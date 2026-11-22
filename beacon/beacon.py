@@ -19,6 +19,7 @@ class Beacon:
     x: float
     y: float
     rssi_at_1m: float = -59.0
+    path_loss_exponent: float = 2.0
 
     @property
     def position(self) -> tuple[float, float]:

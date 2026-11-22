@@ -6,18 +6,22 @@ generates noisy RSSI readings from a true path for testing.
 """
 
 from .beacon import Beacon
+from .calibration import calibrate_beacon, calibrate_survey, fit_path_loss
 from .engine import PositioningEngine
 from .filter import MovingAverageFilter
 from .rssi import distance_to_rssi, rssi_to_distance
 from .simulate import simulate_walk
 from .trilateration import trilaterate
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Beacon",
     "PositioningEngine",
     "MovingAverageFilter",
+    "calibrate_beacon",
+    "calibrate_survey",
+    "fit_path_loss",
     "distance_to_rssi",
     "rssi_to_distance",
     "simulate_walk",

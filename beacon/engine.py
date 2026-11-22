@@ -16,11 +16,14 @@ class PositioningEngine:
     """Estimate a device's position from RSSI observations."""
 
     def __init__(self, beacons: list[Beacon],
-                 path_loss_exponent: float = 2.0,
+                 path_loss_exponent: float | None = None,
                  filter_window: int = 5):
         if len(beacons) < 3:
             raise ValueError("positioning needs at least 3 beacons")
         self.beacons = {b.id: b for b in beacons}
+        # None means "use each beacon's own calibrated exponent".
+        # Passing a value overrides every beacon (the pre-calibration
+        # behaviour, when all beacons shared one exponent).
         self.path_loss_exponent = path_loss_exponent
         self._filter = MovingAverageFilter(window=filter_window)
 
@@ -33,8 +36,11 @@ class PositioningEngine:
             if beacon is None:
                 raise ValueError(f"unknown beacon id: {beacon_id!r}")
             positions.append(beacon.position)
+            exponent = (self.path_loss_exponent
+                        if self.path_loss_exponent is not None
+                        else beacon.path_loss_exponent)
             distances.append(rssi_to_distance(
-                rssi, beacon.rssi_at_1m, self.path_loss_exponent))
+                rssi, beacon.rssi_at_1m, exponent))
         return trilaterate(positions, distances)
 
     def estimate(self, observations: dict[str, float]) -> tuple[float, float]:
