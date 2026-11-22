@@ -8,7 +8,10 @@ library, no dependencies, no BLE hardware needed.
 - Fixed beacons with known `(x, y)` positions in a building.
 - A log-distance path-loss model converting RSSI to distance.
 - Trilateration (least squares, 3+ beacons) to estimate position.
-- A moving-average filter to smooth jittery estimates.
+- A moving-average filter to smooth jittery estimates, with a
+  constant-velocity Kalman filter available as an opt-in
+  (`PositioningEngine(..., filter="kalman")`) that tracks a walking
+  device with less lag.
 - A simulator that generates noisy RSSI readings from a true path,
   so the engine can be tested without real BLE hardware.
 - Per-beacon calibration: fit each beacon's `rssi_at_1m` and
@@ -62,7 +65,11 @@ Gauss-Newton on the true distance residuals; the result passes through
 a moving average (window 5) to reduce jitter. Each beacon carries its
 own `rssi_at_1m` and `n` (defaults -59 dBm and 2.0); the engine uses
 each beacon's own constants unless a single global exponent is passed
-to `PositioningEngine`, which overrides them.
+to `PositioningEngine`, which overrides them. Passing
+`filter="kalman"` swaps the moving average for a constant-velocity
+Kalman filter (state `(x, y, vx, vy)`, one step per observation),
+which predicts the next position from the estimated velocity and so
+lags less behind a walking device.
 
 ## Calibration
 
@@ -94,7 +101,10 @@ with distance.
 Default ward walk, 2 dB RSSI noise: mean error about 2.7 m (2.3-2.9 m
 across seeds). The test suite asserts mean error under 4.0 m on a
 fixed seed as a regression guard. Real hardware will be worse until
-calibrated.
+calibrated. With the Kalman filter on the same walk (seed 7) the mean
+error is 2.16 m, against 2.72 m for the moving average — the Kalman
+filter is currently opt-in while that comparison is extended to more
+seeds before it becomes the default.
 
 Calibration matters more than the filter: in a ward whose true
 constants are `n = 3.0` and `rssi_at_1m = -65 dBm`, the default
@@ -107,6 +117,9 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
 
 ## Roadmap
 
-- Kalman filter in place of the moving average
+- Kalman filter in place of the moving average — in progress: the
+  filter is implemented and opt-in (`filter="kalman"`, v0.3.0);
+  remaining is a multi-seed accuracy comparison, then making it the
+  default
 - Fingerprinting mode (RSSI vectors per room/zone)
 - Multi-floor support (beacon z coordinate, floor detection)

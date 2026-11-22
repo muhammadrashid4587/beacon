@@ -7,6 +7,7 @@ import unittest
 
 from beacon import (
     Beacon,
+    KalmanFilter,
     MovingAverageFilter,
     PositioningEngine,
     calibrate_beacon,
@@ -110,6 +111,99 @@ class TestFilter(unittest.TestCase):
         f.update((10.0, 10.0))
         f.reset()
         self.assertEqual(f.update((2.0, 4.0)), (2.0, 4.0))
+
+
+class TestKalmanFilter(unittest.TestCase):
+    def test_first_update_returns_measurement(self):
+        f = KalmanFilter()
+        self.assertEqual(f.update((3.0, 4.0)), (3.0, 4.0))
+
+    def test_stationary_device_stays_put(self):
+        f = KalmanFilter()
+        for _ in range(20):
+            got = f.update((10.0, 6.0))
+        self.assertAlmostEqual(got[0], 10.0, places=9)
+        self.assertAlmostEqual(got[1], 6.0, places=9)
+
+    def test_tracks_constant_velocity(self):
+        # Device moving 0.5 m/step along x, noisy measurements:
+        # the filter must converge onto the true position.
+        rng = random.Random(5)
+        f = KalmanFilter()
+        errors = []
+        for step in range(1, 61):
+            true = (0.5 * step, 6.0)
+            got = f.update((true[0] + rng.gauss(0.0, 1.0),
+                            true[1] + rng.gauss(0.0, 1.0)))
+            if step > 40:
+                errors.append(math.hypot(got[0] - true[0],
+                                         got[1] - true[1]))
+        # Converged (last 20 steps): mean error below the raw
+        # measurements' ~1.25 m (1 m noise per axis, Euclidean).
+        self.assertLess(statistics.mean(errors), 1.0)
+        vx, vy = f.velocity
+        self.assertAlmostEqual(vx, 0.5, delta=0.2)
+        self.assertAlmostEqual(vy, 0.0, delta=0.2)
+
+    def test_less_lag_than_moving_average_on_a_walk(self):
+        # Constant-velocity walk, noiseless measurements: the Kalman
+        # filter's steady-state lag must be smaller than the moving
+        # average's (window 5 lags ~2 steps behind a moving device).
+        ma = MovingAverageFilter(window=5)
+        kf = KalmanFilter()
+        ma_err = kf_err = 0.0
+        for step in range(1, 41):
+            true = (0.5 * step, 6.0)
+            ma_err = abs(ma.update(true)[0] - true[0])
+            kf_err = abs(kf.update(true)[0] - true[0])
+        self.assertLess(kf_err, ma_err)
+
+    def test_reduces_jitter_like_moving_average(self):
+        # Stationary device at (10, 6) with noisy measurements:
+        # filtered positions must jitter less than the raw ones.
+        rng = random.Random(9)
+        f = KalmanFilter()
+        raw, smooth = [], []
+        for _ in range(60):
+            meas = (10.0 + rng.gauss(0.0, 1.0), 6.0 + rng.gauss(0.0, 1.0))
+            raw.append(meas)
+            smooth.append(f.update(meas))
+        raw_jitter = statistics.pstdev([p[0] for p in raw]) + statistics.pstdev(
+            [p[1] for p in raw])
+        smooth_jitter = statistics.pstdev([p[0] for p in smooth]) + statistics.pstdev(
+            [p[1] for p in smooth])
+        self.assertLess(smooth_jitter, raw_jitter)
+
+    def test_reset_forgets_state(self):
+        f = KalmanFilter()
+        for _ in range(10):
+            f.update((10.0, 6.0))
+        f.reset()
+        self.assertEqual(f.update((2.0, 4.0)), (2.0, 4.0))
+        self.assertEqual(f.velocity, (0.0, 0.0))
+
+    def test_nonpositive_noise_raises(self):
+        with self.assertRaises(ValueError):
+            KalmanFilter(process_noise=0.0)
+        with self.assertRaises(ValueError):
+            KalmanFilter(measurement_noise=-1.0)
+
+
+class TestEngineKalmanFilter(unittest.TestCase):
+    def test_engine_kalman_option_tracks_walk(self):
+        path = rectangular_walk(20.0, 12.0, 10)
+        steps = simulate_walk(path, BEACONS, noise_db=2.0, seed=7)
+        engine = PositioningEngine(BEACONS, filter="kalman")
+        errors = []
+        for step in steps:
+            est = engine.estimate(step["rssi"])
+            true = step["true"]
+            errors.append(math.hypot(est[0] - true[0], est[1] - true[1]))
+        self.assertLess(statistics.mean(errors), 4.0)
+
+    def test_engine_unknown_filter_raises(self):
+        with self.assertRaises(ValueError):
+            PositioningEngine(BEACONS, filter="particle")
 
 
 class TestSimulator(unittest.TestCase):

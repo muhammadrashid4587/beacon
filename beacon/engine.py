@@ -7,7 +7,7 @@ then a moving-average filter.
 """
 
 from .beacon import Beacon
-from .filter import MovingAverageFilter
+from .filter import KalmanFilter, MovingAverageFilter
 from .rssi import rssi_to_distance
 from .trilateration import trilaterate
 
@@ -17,7 +17,8 @@ class PositioningEngine:
 
     def __init__(self, beacons: list[Beacon],
                  path_loss_exponent: float | None = None,
-                 filter_window: int = 5):
+                 filter_window: int = 5,
+                 filter: str = "moving_average"):
         if len(beacons) < 3:
             raise ValueError("positioning needs at least 3 beacons")
         self.beacons = {b.id: b for b in beacons}
@@ -25,7 +26,14 @@ class PositioningEngine:
         # Passing a value overrides every beacon (the pre-calibration
         # behaviour, when all beacons shared one exponent).
         self.path_loss_exponent = path_loss_exponent
-        self._filter = MovingAverageFilter(window=filter_window)
+        if filter == "moving_average":
+            self._filter = MovingAverageFilter(window=filter_window)
+        elif filter == "kalman":
+            self._filter = KalmanFilter()
+        else:
+            raise ValueError(
+                f"unknown filter: {filter!r} "
+                "(expected 'moving_average' or 'kalman')")
 
     def estimate_raw(self, observations: dict[str, float]) -> tuple[float, float]:
         """Unfiltered position estimate from one set of observations."""
