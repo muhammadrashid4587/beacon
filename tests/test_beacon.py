@@ -7,13 +7,16 @@ import unittest
 
 from beacon import (
     Beacon,
+    FingerprintMap,
     KalmanFilter,
     MovingAverageFilter,
     PositioningEngine,
+    build_fingerprint_map,
     calibrate_beacon,
     calibrate_survey,
     distance_to_rssi,
     fit_path_loss,
+    grid_points,
     rssi_to_distance,
     simulate_walk,
     trilaterate,
@@ -465,6 +468,146 @@ class TestCalibration(unittest.TestCase):
         self.assertLess(statistics.mean(calibrated_errors), 4.0)
         self.assertLess(statistics.mean(calibrated_errors),
                         statistics.mean(default_errors))
+
+
+class TestFingerprinting(unittest.TestCase):
+    def _noiseless_map(self, spacing=2.0):
+        cells = grid_points(20.0, 12.0, spacing)
+        survey = simulate_walk(cells, BEACONS, noise_db=0.0, seed=7)
+        return build_fingerprint_map(BEACONS, survey)
+
+    def test_grid_points_cover_ward(self):
+        cells = grid_points(20.0, 12.0, 2.0)
+        self.assertEqual(len(cells), 60)  # 10 x 6 at 2 m spacing, 1 m margin
+        self.assertIn((1.0, 1.0), cells)
+        self.assertIn((19.0, 11.0), cells)
+        # No cell sits on a corner beacon (distance zero is undefined).
+        for cell in cells:
+            for beacon in BEACONS:
+                self.assertGreater(math.hypot(cell[0] - beacon.x,
+                                              cell[1] - beacon.y), 0.0)
+
+    def test_grid_points_reject_bad_arguments(self):
+        with self.assertRaises(ValueError):
+            grid_points(0.0, 12.0, 2.0)
+        with self.assertRaises(ValueError):
+            grid_points(20.0, 12.0, 0.0)
+        with self.assertRaises(ValueError):
+            grid_points(20.0, 12.0, 2.0, margin=6.0)
+
+    def test_noiseless_locate_recovers_exact_cell(self):
+        radio_map = self._noiseless_map()
+        for cell in radio_map.cells:
+            obs = {
+                b.id: distance_to_rssi(math.hypot(cell[0] - b.x,
+                                                  cell[1] - b.y))
+                for b in BEACONS
+            }
+            self.assertEqual(radio_map.locate(obs, k=1), cell)
+            # The exact-match shortcut returns the cell for k=3 too.
+            self.assertEqual(radio_map.locate(obs, k=3), cell)
+
+    def test_off_grid_point_lands_within_one_cell(self):
+        radio_map = self._noiseless_map()
+        point = (10.0, 6.0)
+        obs = {
+            b.id: distance_to_rssi(math.hypot(point[0] - b.x,
+                                              point[1] - b.y))
+            for b in BEACONS
+        }
+        got = radio_map.locate(obs, k=3)
+        self.assertLess(math.hypot(got[0] - point[0], got[1] - point[1]), 2.0)
+
+    def test_noisy_accuracy_comparable_to_trilateration(self):
+        # Survey and walk both at 2 dB RSSI noise: the k=3
+        # fingerprint estimate must stay under a 3.0 m mean error
+        # (trilateration measures ~2.2 m on the same walks).
+        cells = grid_points(20.0, 12.0, 2.0)
+        survey = simulate_walk(cells, BEACONS, noise_db=2.0, seed=7)
+        radio_map = build_fingerprint_map(BEACONS, survey)
+        path = rectangular_walk(20.0, 12.0, 10)
+        for seed in (1, 2, 3, 7, 11):
+            steps = simulate_walk(path, BEACONS, noise_db=2.0, seed=seed)
+            errors = []
+            for step in steps:
+                est = radio_map.locate(step["rssi"], k=3)
+                true = step["true"]
+                errors.append(math.hypot(est[0] - true[0], est[1] - true[1]))
+            self.assertLess(statistics.mean(errors), 3.0,
+                            f"fingerprint mean error too high on seed {seed}")
+
+    def test_k3_beats_k1_on_noisy_data(self):
+        cells = grid_points(20.0, 12.0, 2.0)
+        survey = simulate_walk(cells, BEACONS, noise_db=2.0, seed=7)
+        radio_map = build_fingerprint_map(BEACONS, survey)
+        path = rectangular_walk(20.0, 12.0, 10)
+        steps = simulate_walk(path, BEACONS, noise_db=2.0, seed=7)
+        err1, err3 = [], []
+        for step in steps:
+            true = step["true"]
+            err1.append(math.hypot(
+                *(a - b for a, b in zip(radio_map.locate(step["rssi"], k=1), true))))
+            err3.append(math.hypot(
+                *(a - b for a, b in zip(radio_map.locate(step["rssi"], k=3), true))))
+        self.assertLess(statistics.mean(err3), statistics.mean(err1))
+
+    def test_repeated_samples_at_a_cell_are_averaged(self):
+        radio_map = FingerprintMap(["A", "B"])
+        radio_map.add((5.0, 5.0), {"A": -60.0, "B": -70.0})
+        radio_map.add((5.0, 5.0), {"A": -62.0, "B": -72.0})
+        self.assertEqual(len(radio_map), 1)
+        self.assertEqual(radio_map.fingerprint((5.0, 5.0)),
+                         {"A": -61.0, "B": -71.0})
+        # The averaged vector matches exactly.
+        self.assertEqual(radio_map.locate({"A": -61.0, "B": -71.0}, k=1),
+                         (5.0, 5.0))
+
+    def test_missing_beacon_does_not_raise(self):
+        radio_map = self._noiseless_map()
+        point = (9.0, 5.0)
+        obs = {
+            b.id: distance_to_rssi(math.hypot(point[0] - b.x,
+                                              point[1] - b.y))
+            for b in BEACONS[:3]  # beacon "D" unheard
+        }
+        got = radio_map.locate(obs, k=3)
+        self.assertLess(math.hypot(got[0] - point[0], got[1] - point[1]), 4.0)
+
+    def test_unknown_beacon_raises(self):
+        radio_map = self._noiseless_map()
+        with self.assertRaises(ValueError):
+            radio_map.locate({"ZZ": -70.0})
+        with self.assertRaises(ValueError):
+            radio_map.add((1.0, 1.0), {"ZZ": -70.0})
+
+    def test_empty_map_raises(self):
+        radio_map = FingerprintMap(["A", "B", "C", "D"])
+        with self.assertRaises(ValueError):
+            radio_map.locate({"A": -60.0})
+
+    def test_bad_k_raises(self):
+        radio_map = self._noiseless_map()
+        obs = {b.id: -60.0 for b in BEACONS}
+        with self.assertRaises(ValueError):
+            radio_map.locate(obs, k=0)
+        # k larger than the map just uses every cell.
+        self.assertEqual(len(radio_map.nearest(obs, k=1000)),
+                         len(radio_map))
+
+    def test_nearest_is_sorted_by_rssi_distance(self):
+        radio_map = self._noiseless_map()
+        point = (9.0, 5.0)
+        obs = {
+            b.id: distance_to_rssi(math.hypot(point[0] - b.x,
+                                              point[1] - b.y))
+            for b in BEACONS
+        }
+        neighbours = radio_map.nearest(obs, k=3)
+        distances = [d for _, d in neighbours]
+        self.assertEqual(distances, sorted(distances))
+        # The nearest cell is a neighbour of (9, 5) on the 2 m grid.
+        nearest = neighbours[0][0]
+        self.assertLess(math.hypot(nearest[0] - 9.0, nearest[1] - 5.0), 2.0)
 
 
 if __name__ == "__main__":

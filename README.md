@@ -21,6 +21,10 @@ library, no dependencies, no BLE hardware needed.
   path-loss exponent `n` from a walked survey (known positions plus
   observed RSSI), so the engine uses the real space's constants
   instead of the defaults.
+- Fingerprinting mode: a radio map of averaged RSSI vectors per
+  survey grid cell, located by k-nearest-neighbour matching in RSSI
+  space — no path-loss model involved, so it keeps working where
+  trilateration's distance inversion explodes.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -109,6 +113,40 @@ with too little survey data (fewer than two distinct distances) is
 left unchanged, and a fit is rejected when RSSI does not decrease
 with distance.
 
+## Fingerprinting
+
+Trilateration trusts the path-loss model: when the model is wrong
+the distance inversion explodes and the estimate lands kilometres
+away. Fingerprinting trusts the survey instead. Walk a grid over
+the space once, record the RSSI vector at each cell, and locate by
+matching the live vector against the map:
+
+```python
+from beacon import build_fingerprint_map, grid_points
+from beacon.simulate import simulate_walk
+
+cells = grid_points(20.0, 12.0, spacing=2.0)   # 60 cells, 1 m margin
+survey = simulate_walk(cells, beacons, noise_db=0.0, seed=7)
+radio_map = build_fingerprint_map(beacons, survey)
+x, y = radio_map.locate({"A": -62.1, "B": -71.4, "C": -68.0, "D": -59.8})
+```
+
+`locate` is k-nearest-neighbour in RSSI space (root-mean-square
+distance over the beacons heard) and returns the
+inverse-distance-weighted centroid of the `k` nearest cells
+(`k=3` by default); `k=1` returns the single best-matching cell.
+An exact fingerprint match returns that cell directly. Repeated
+survey passes over a cell are averaged. A beacon unheard in an
+observation is left out of the comparison rather than filled with
+a made-up value, so a partially-heard vector still locates.
+`radio_map.nearest(observations, k)` returns the ranked cells with
+their RSSI distances for inspection.
+
+Measured accuracy (simulator, 2 dB RSSI noise, 2 m grid): mean
+error about 2.1 m with a noisy survey, comparable to trilateration's
+2.2 m on the same walks — and unlike trilateration it needs no
+calibrated path-loss constants at all.
+
 ## Measured accuracy (simulator, not the real world)
 
 Default ward walk, 2 dB RSSI noise: mean error about 2.2 m (1.8-2.6 m
@@ -139,5 +177,11 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   points keeping the lowest residual, and the Kalman filter is now
   the default, with the moving average kept as an opt-out
   (`filter="moving_average"`, v0.5.0)
-- Fingerprinting mode (RSSI vectors per room/zone)
+- Fingerprinting mode (RSSI vectors per room/zone) — done:
+  `FingerprintMap` with a surveyed radio map, k-NN `locate()` with
+  inverse-distance-weighted centroid (`k=3` default, `k=1` returns
+  the best cell), `grid_points` survey grids, repeated samples
+  averaged per cell, unheard beacons left out of the comparison
+  (v0.6.0); noisy-survey mean error ~2.1 m, comparable to
+  trilateration, with no path-loss model involved
 - Multi-floor support (beacon z coordinate, floor detection)

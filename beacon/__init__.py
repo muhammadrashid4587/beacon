@@ -9,17 +9,21 @@ from .beacon import Beacon
 from .calibration import calibrate_beacon, calibrate_survey, fit_path_loss
 from .engine import PositioningEngine
 from .filter import KalmanFilter, MovingAverageFilter
+from .fingerprint import FingerprintMap, build_fingerprint_map, grid_points
 from .rssi import distance_to_rssi, rssi_to_distance
 from .simulate import simulate_walk
 from .trilateration import trilaterate
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = [
     "Beacon",
     "PositioningEngine",
     "MovingAverageFilter",
     "KalmanFilter",
+    "FingerprintMap",
+    "build_fingerprint_map",
+    "grid_points",
     "calibrate_beacon",
     "calibrate_survey",
     "fit_path_loss",
