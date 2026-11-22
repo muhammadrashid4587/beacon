@@ -222,6 +222,44 @@ class TestKalmanFilter(unittest.TestCase):
 
 
 class TestEngineKalmanFilter(unittest.TestCase):
+    def test_default_filter_is_kalman(self):
+        # The Kalman filter is the default since 0.5.0; the moving
+        # average is only an opt-out.
+        engine = PositioningEngine(BEACONS)
+        self.assertEqual(engine.filter, "kalman")
+        self.assertIsInstance(engine._filter, KalmanFilter)
+
+    def test_default_engine_accuracy_across_seeds(self):
+        # Regression guard for the new default: on the existing walk
+        # fixtures the default (Kalman) engine must stay under the
+        # 4.0 m mean-error bound on every seed.
+        path = rectangular_walk(20.0, 12.0, 10)
+        for seed in (1, 2, 3, 7, 11):
+            steps = simulate_walk(path, BEACONS, noise_db=2.0, seed=seed)
+            engine = PositioningEngine(BEACONS)
+            errors = []
+            for step in steps:
+                est = engine.estimate(step["rssi"])
+                true = step["true"]
+                errors.append(math.hypot(est[0] - true[0],
+                                         est[1] - true[1]))
+            self.assertLess(statistics.mean(errors), 4.0,
+                            f"default engine mean error too high on seed {seed}")
+
+    def test_moving_average_opt_out_still_available(self):
+        # The old default is still reachable as an explicit opt-out.
+        engine = PositioningEngine(BEACONS, filter="moving_average")
+        self.assertEqual(engine.filter, "moving_average")
+        self.assertIsInstance(engine._filter, MovingAverageFilter)
+        path = rectangular_walk(20.0, 12.0, 10)
+        steps = simulate_walk(path, BEACONS, noise_db=2.0, seed=7)
+        errors = []
+        for step in steps:
+            est = engine.estimate(step["rssi"])
+            true = step["true"]
+            errors.append(math.hypot(est[0] - true[0], est[1] - true[1]))
+        self.assertLess(statistics.mean(errors), 4.0)
+
     def test_engine_kalman_option_tracks_walk(self):
         path = rectangular_walk(20.0, 12.0, 10)
         steps = simulate_walk(path, BEACONS, noise_db=2.0, seed=7)
@@ -244,7 +282,7 @@ class TestEngineKalmanFilter(unittest.TestCase):
         path = rectangular_walk(20.0, 12.0, 10)
         for seed in (1, 2, 3, 7, 11):
             steps = simulate_walk(path, BEACONS, noise_db=2.0, seed=seed)
-            ma = PositioningEngine(BEACONS)
+            ma = PositioningEngine(BEACONS, filter="moving_average")
             kf = PositioningEngine(BEACONS, filter="kalman")
             ma_err, kf_err = [], []
             for step in steps:
@@ -269,9 +307,10 @@ class TestSimulator(unittest.TestCase):
             est = engine.estimate(step["rssi"])
             true = step["true"]
             errors.append(math.hypot(est[0] - true[0], est[1] - true[1]))
-        # Measured across seeds 1, 2, 3, 7, 11: mean 2.30-2.90 m.
-        # Bound is ~1.5x the worst measured seed, so the test guards
-        # against regressions, not against the model itself.
+        # Measured across seeds 1, 2, 3, 7, 11 with the Kalman
+        # default: mean 1.83-2.63 m. Bound is ~1.5x the worst
+        # measured seed, so the test guards against regressions,
+        # not against the model itself.
         self.assertLess(statistics.mean(errors), 4.0)
 
     def test_smoothing_reduces_jitter(self):

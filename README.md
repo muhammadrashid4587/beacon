@@ -11,10 +11,10 @@ library, no dependencies, no BLE hardware needed.
   refined by Gauss-Newton from several seed points (the linear
   solution, the beacon centroid, each beacon) keeping the lowest
   residual, so a bad initial guess cannot trap the refinement.
-- A moving-average filter to smooth jittery estimates, with a
-  constant-velocity Kalman filter available as an opt-in
-  (`PositioningEngine(..., filter="kalman")`) that tracks a walking
-  device with less lag.
+- A constant-velocity Kalman filter smooths jittery estimates and
+  tracks a walking device with less lag than a moving average; the
+  moving average is still available as an opt-out
+  (`PositioningEngine(..., filter="moving_average")`).
 - A simulator that generates noisy RSSI readings from a true path,
   so the engine can be tested without real BLE hardware.
 - Per-beacon calibration: fit each beacon's `rssi_at_1m` and
@@ -49,6 +49,9 @@ Or directly:
 python3 -m beacon.cli --steps 10 --noise 2.0 --seed 7
 ```
 
+The CLI uses the Kalman filter by default; pass
+`--filter moving_average` to compare against the old default.
+
 Use it as a library:
 
 ```python
@@ -69,14 +72,17 @@ several seed points (linear solution, beacon centroid, each beacon)
 and keeps the lowest-residual result, so a bad initial guess cannot
 trap it or let it diverge — on 2,000 noisy walks the worst
 single-seed error was ~32,500 m against ~93 m multi-seed. The result
-passes through a moving average (window 5) to reduce jitter. Each beacon carries its
+passes through a constant-velocity Kalman filter (state `(x, y, vx,
+vy)`, one step per observation), which predicts the next position
+from the estimated velocity and so lags less behind a walking device
+than the moving average it replaced as the default in v0.5.0; the
+moving average (window 5) is still available via
+`filter="moving_average"`. Each beacon carries its
 own `rssi_at_1m` and `n` (defaults -59 dBm and 2.0); the engine uses
 each beacon's own constants unless a single global exponent is passed
 to `PositioningEngine`, which overrides them. Passing
-`filter="kalman"` swaps the moving average for a constant-velocity
-Kalman filter (state `(x, y, vx, vy)`, one step per observation),
-which predicts the next position from the estimated velocity and so
-lags less behind a walking device.
+`filter="moving_average"` swaps the Kalman filter back for the
+moving average.
 
 ## Calibration
 
@@ -105,15 +111,15 @@ with distance.
 
 ## Measured accuracy (simulator, not the real world)
 
-Default ward walk, 2 dB RSSI noise: mean error about 2.7 m (2.3-2.9 m
-across seeds). The test suite asserts mean error under 4.0 m on a
-fixed seed as a regression guard. Real hardware will be worse until
-calibrated. With the Kalman filter on the same walk the mean error
-is lower on every seed (seed 1: 1.97 m vs 2.77 m; seed 2: 2.57 m
-vs 2.96 m; seed 3: 2.63 m vs 2.69 m; seed 7: 2.16 m vs 2.73 m;
-seed 11: 1.83 m vs 2.30 m) — the multi-seed comparison is done and
-the Kalman filter is the better default on accuracy; it stays opt-in
-until it becomes the default in the next release.
+Default ward walk, 2 dB RSSI noise: mean error about 2.2 m (1.8-2.6 m
+across seeds) with the Kalman filter, which became the default in
+v0.5.0; the moving average it replaced gave 2.3-3.0 m on the same
+walks (seed 1: 1.97 m vs 2.77 m; seed 2: 2.57 m vs 2.96 m; seed 3:
+2.63 m vs 2.69 m; seed 7: 2.16 m vs 2.73 m; seed 11: 1.83 m vs
+2.30 m). The test suite asserts mean error under 4.0 m on a fixed
+seed as a regression guard, and under 4.0 m on every seed 1, 2, 3, 7,
+11 for the default engine. Real hardware will be worse until
+calibrated.
 
 Calibration matters more than the filter: in a ward whose true
 constants are `n = 3.0` and `rssi_at_1m = -65 dBm`, the default
@@ -126,11 +132,12 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
 
 ## Roadmap
 
-- Kalman filter in place of the moving average — in progress: the
-  filter is implemented and opt-in (`filter="kalman"`, v0.3.0), the
-  multi-seed accuracy comparison is done (Kalman beats the moving
-  average on seeds 1, 2, 3, 7, 11, v0.4.0), and trilateration now
-  refines from several seed points keeping the lowest residual;
-  remaining is making the Kalman filter the default
+- Kalman filter in place of the moving average — done: the
+  filter is implemented (v0.3.0), the multi-seed accuracy
+  comparison is done (Kalman beats the moving average on seeds 1,
+  2, 3, 7, 11, v0.4.0), trilateration refines from several seed
+  points keeping the lowest residual, and the Kalman filter is now
+  the default, with the moving average kept as an opt-out
+  (`filter="moving_average"`, v0.5.0)
 - Fingerprinting mode (RSSI vectors per room/zone)
 - Multi-floor support (beacon z coordinate, floor detection)

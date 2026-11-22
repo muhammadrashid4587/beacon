@@ -13,7 +13,7 @@ from .rssi import distance_to_rssi, rssi_to_distance
 from .simulate import simulate_walk
 from .trilateration import trilaterate
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     "Beacon",

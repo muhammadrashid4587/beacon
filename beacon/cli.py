@@ -38,12 +38,16 @@ def main() -> int:
                         help="RSSI noise stddev in dB")
     parser.add_argument("--seed", type=int, default=7,
                         help="random seed (omit for a fresh run)")
+    parser.add_argument("--filter", choices=("kalman", "moving_average"),
+                        default="kalman",
+                        help="position filter (default: kalman; "
+                        "moving_average is the pre-0.5.0 default)")
     args = parser.parse_args()
 
     path = rectangular_walk(WARD_WIDTH_M, WARD_HEIGHT_M, args.steps)
     steps = simulate_walk(path, default_beacons(), noise_db=args.noise,
                           seed=args.seed)
-    engine = PositioningEngine(default_beacons())
+    engine = PositioningEngine(default_beacons(), filter=args.filter)
 
     print(f"{'step':>4} {'true':>14} {'estimated':>14} {'error m':>7}")
     errors = []

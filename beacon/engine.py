@@ -3,7 +3,8 @@
 One engine instance tracks one device. Feed it a dict of
 ``{beacon_id: rssi_dbm}`` per step and it returns the smoothed
 position estimate: RSSI to distance (path-loss model), trilateration,
-then a moving-average filter.
+then a constant-velocity Kalman filter (a moving average is still
+available as an opt-out via ``filter="moving_average"``).
 """
 
 from .beacon import Beacon
@@ -18,7 +19,7 @@ class PositioningEngine:
     def __init__(self, beacons: list[Beacon],
                  path_loss_exponent: float | None = None,
                  filter_window: int = 5,
-                 filter: str = "moving_average"):
+                 filter: str = "kalman"):
         if len(beacons) < 3:
             raise ValueError("positioning needs at least 3 beacons")
         self.beacons = {b.id: b for b in beacons}
@@ -26,6 +27,9 @@ class PositioningEngine:
         # Passing a value overrides every beacon (the pre-calibration
         # behaviour, when all beacons shared one exponent).
         self.path_loss_exponent = path_loss_exponent
+        # The filter in use ("kalman" by default, "moving_average"
+        # as an opt-out); kept so callers can inspect the default.
+        self.filter = filter
         if filter == "moving_average":
             self._filter = MovingAverageFilter(window=filter_window)
         elif filter == "kalman":
