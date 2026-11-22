@@ -57,6 +57,38 @@ class TestTrilateration(unittest.TestCase):
             trilaterate([(0.0, 0.0), (10.0, 0.0), (20.0, 0.0)],
                         [5.0, 5.0, 15.0])
 
+    def test_multistart_avoids_diverged_refinement(self):
+        # Noisy distances (3 dB RSSI noise) whose linear solution is
+        # so far off that a single Gauss-Newton run from it diverges
+        # to (655, -3843), ~3900 m from the true (21.06, 0.96).
+        # The multi-start refinement must stay in the ward.
+        got = trilaterate([(b.x, b.y) for b in BEACONS],
+                          [17.81, 1.21, 8.6, 51.42])
+        self.assertLess(math.hypot(got[0] - 21.06, got[1] - 0.96), 15.0)
+
+    def test_multistart_picks_lowest_residual(self):
+        # On noisy distances, the returned point must have the lowest
+        # distance residual of any single-seed refinement.
+        from beacon.trilateration import _gauss_newton, _residual_sum
+        rng = random.Random(17)
+        true = (12.0, 5.0)
+        distances = []
+        for b in BEACONS:
+            d = math.hypot(true[0] - b.x, true[1] - b.y)
+            distances.append(
+                rssi_to_distance(distance_to_rssi(d) + rng.gauss(0.0, 3.0)))
+        beacons = [(b.x, b.y) for b in BEACONS]
+        got = trilaterate(beacons, distances)
+        got_residual = _residual_sum(beacons, distances, got)
+        seeds = [(10.0, 6.0),
+                 (sum(x for x, _ in beacons) / len(beacons),
+                  sum(y for _, y in beacons) / len(beacons))]
+        seeds.extend(beacons)
+        for seed in seeds:
+            candidate = _gauss_newton(beacons, distances, seed)
+            self.assertLessEqual(
+                got_residual, _residual_sum(beacons, distances, candidate))
+
 
 class TestRssiModel(unittest.TestCase):
     def test_round_trips_distance(self):
@@ -204,6 +236,26 @@ class TestEngineKalmanFilter(unittest.TestCase):
     def test_engine_unknown_filter_raises(self):
         with self.assertRaises(ValueError):
             PositioningEngine(BEACONS, filter="particle")
+
+    def test_kalman_beats_moving_average_across_seeds(self):
+        # Multi-seed accuracy comparison (2 dB RSSI noise, default
+        # ward walk): the Kalman filter must beat the moving average
+        # on every seed, not just seed 7.
+        path = rectangular_walk(20.0, 12.0, 10)
+        for seed in (1, 2, 3, 7, 11):
+            steps = simulate_walk(path, BEACONS, noise_db=2.0, seed=seed)
+            ma = PositioningEngine(BEACONS)
+            kf = PositioningEngine(BEACONS, filter="kalman")
+            ma_err, kf_err = [], []
+            for step in steps:
+                true = step["true"]
+                ma_err.append(math.hypot(
+                    *(a - b for a, b in zip(ma.estimate(step["rssi"]), true))))
+                kf_err.append(math.hypot(
+                    *(a - b for a, b in zip(kf.estimate(step["rssi"]), true))))
+            self.assertLess(statistics.mean(kf_err),
+                            statistics.mean(ma_err),
+                            f"Kalman did not beat moving average on seed {seed}")
 
 
 class TestSimulator(unittest.TestCase):

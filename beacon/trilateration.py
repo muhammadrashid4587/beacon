@@ -17,6 +17,17 @@ distance residuals. The linearisation distorts the noise (a small RSSI
 error becomes a large distance error far from a beacon), so the raw
 linear estimate is noisy; refining against the actual residuals
 roughly halves the error on noisy data.
+
+Gauss-Newton is a local optimiser: from a bad starting point it can
+converge to a wrong local minimum, or diverge outright when the
+distances are inconsistent (heavy RSSI noise can push the linear
+solution thousands of metres away). So the refinement runs from
+several seeds — the linear solution, the centroid of the beacons,
+and each beacon's own position — and keeps the result with the
+lowest sum of squared distance residuals. A bad initial guess can
+no longer trap the refinement, which matters most for the Kalman
+filter: it consumes these raw estimates, and one diverged estimate
+would drag the filter's state far off track.
 """
 
 import math
@@ -63,7 +74,24 @@ def trilaterate(beacons: list[tuple[float, float]],
     y = (ata_00 * atb_1 - ata_01 * atb_0) / det
     if not (math.isfinite(x) and math.isfinite(y)):
         raise ValueError("trilateration produced a non-finite position")
-    return _gauss_newton(beacons, distances, (x, y))
+    # Multi-start refinement: Gauss-Newton from the linear solution,
+    # the beacon centroid, and each beacon, keeping the result with
+    # the lowest distance residual. One bad start cannot trap it.
+    seeds = [(x, y)]
+    seeds.append((sum(b[0] for b in beacons) / len(beacons),
+                  sum(b[1] for b in beacons) / len(beacons)))
+    seeds.extend(beacons)
+    candidates = [_gauss_newton(beacons, distances, seed) for seed in seeds]
+    return min(candidates,
+               key=lambda p: _residual_sum(beacons, distances, p))
+
+
+def _residual_sum(beacons: list[tuple[float, float]],
+                  distances: list[float],
+                  point: tuple[float, float]) -> float:
+    """Sum of squared distance residuals at ``point``."""
+    return sum((math.hypot(point[0] - xi, point[1] - yi) - di) ** 2
+               for (xi, yi), di in zip(beacons, distances))
 
 
 def _gauss_newton(beacons: list[tuple[float, float]],
