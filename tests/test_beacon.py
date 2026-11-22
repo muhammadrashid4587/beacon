@@ -8,18 +8,23 @@ import unittest
 from beacon import (
     Beacon,
     FingerprintMap,
+    FloorEstimate,
     KalmanFilter,
     MovingAverageFilter,
+    Position,
     PositioningEngine,
     build_fingerprint_map,
     calibrate_beacon,
     calibrate_survey,
     distance_to_rssi,
+    estimate_floor,
     fit_path_loss,
     grid_points,
     rssi_to_distance,
+    simulate_multifloor_walk,
     simulate_walk,
     trilaterate,
+    two_floor_walk,
 )
 from beacon.simulate import rectangular_walk
 
@@ -608,6 +613,214 @@ class TestFingerprinting(unittest.TestCase):
         # The nearest cell is a neighbour of (9, 5) on the 2 m grid.
         nearest = neighbours[0][0]
         self.assertLess(math.hypot(nearest[0] - 9.0, nearest[1] - 5.0), 2.0)
+
+
+class TestMultiFloor(unittest.TestCase):
+    """Multi-floor positioning: floor vote, within-floor accuracy,
+    and the honest edge cases (adjacent-floor bleed, missing floor
+    beacons, low-confidence votes, too few beacons on a floor)."""
+
+    # Two floors over the same 20 x 12 m ward: four corner beacons
+    # per floor, same (x, y), ids A-D downstairs and E-H upstairs.
+    FLOORS = [
+        Beacon("A", 0.0, 0.0, floor=0),
+        Beacon("B", 20.0, 0.0, floor=0),
+        Beacon("C", 20.0, 12.0, floor=0),
+        Beacon("D", 0.0, 12.0, floor=0),
+        Beacon("E", 0.0, 0.0, floor=1),
+        Beacon("F", 20.0, 0.0, floor=1),
+        Beacon("G", 20.0, 12.0, floor=1),
+        Beacon("H", 0.0, 12.0, floor=1),
+    ]
+
+    def test_beacon_default_floor_is_zero(self):
+        self.assertEqual(Beacon("A", 0.0, 0.0).floor, 0)
+        self.assertEqual(Beacon("A", 0.0, 0.0, floor=2).floor, 2)
+
+    def test_noiseless_vote_picks_correct_floor_with_confidence(self):
+        # Noiseless observations from the middle of the ward on each
+        # floor: the vote must pick that floor with high confidence,
+        # even though the other floor's beacons are also heard
+        # (attenuated through the slab).
+        for floor in (0, 1):
+            steps = simulate_multifloor_walk(
+                [(10.0, 6.0, floor)], self.FLOORS, noise_db=0.0, seed=7)
+            vote = estimate_floor(steps[0]["rssi"], self.FLOORS)
+            self.assertEqual(vote.floor, floor)
+            self.assertGreater(vote.confidence, 0.8)
+            self.assertIsInstance(vote, FloorEstimate)
+            # Both floors scored (the other floor's beacons were
+            # heard, just weakly), so the vote is a comparison, not
+            # a default.
+            self.assertEqual(set(vote.scores), {0, 1})
+
+    def test_cross_floor_attenuation_weakens_rssi(self):
+        # Same (x, y), one floor apart from a ground-floor beacon:
+        # the beacon must read weaker from upstairs than from its
+        # own floor (3D distance plus the slab attenuation).
+        down = simulate_multifloor_walk(
+            [(10.0, 6.0, 0)], self.FLOORS, noise_db=0.0, seed=7)[0]
+        up = simulate_multifloor_walk(
+            [(10.0, 6.0, 1)], self.FLOORS, noise_db=0.0, seed=7)[0]
+        self.assertLess(up["rssi"]["A"], down["rssi"]["A"])
+
+    def test_two_floor_walk_accuracy_and_floor_classification(self):
+        # A walk downstairs then upstairs, 2 dB RSSI noise: the floor
+        # must be right on at least 95% of steps on every seed, and
+        # the within-floor (x, y) error must stay under the same
+        # 4.0 m guard as the single-floor engine.
+        path = two_floor_walk(20.0, 12.0, 10)
+        for seed in (1, 2, 3, 7, 11):
+            steps = simulate_multifloor_walk(path, self.FLOORS,
+                                             noise_db=2.0, seed=seed)
+            engine = PositioningEngine(self.FLOORS)
+            floor_ok = 0
+            errors = []
+            for step in steps:
+                pos = engine.estimate_with_floor(step["rssi"])
+                true_x, true_y, true_floor = step["true"]
+                self.assertIsInstance(pos, Position)
+                if pos.floor == true_floor:
+                    floor_ok += 1
+                errors.append(math.hypot(pos.x - true_x, pos.y - true_y))
+            self.assertGreaterEqual(floor_ok / len(steps), 0.95,
+                                    f"floor accuracy too low on seed {seed}")
+            self.assertLess(statistics.mean(errors), 4.0,
+                            f"within-floor error too high on seed {seed}")
+
+    def test_within_floor_error_comparable_to_single_floor(self):
+        # Same walk, same seeds, single-floor engine vs multi-floor:
+        # localising within the voted floor must not cost more than
+        # 1.0 m of mean error over the single-floor baseline (measured
+        # differences are -0.3 to +0.5 m).
+        path = two_floor_walk(20.0, 12.0, 10)
+        single = [b for b in self.FLOORS if b.floor == 0]
+        for seed in (1, 2, 3, 7, 11):
+            multi_steps = simulate_multifloor_walk(
+                path, self.FLOORS, noise_db=2.0, seed=seed)
+            single_steps = simulate_walk(
+                rectangular_walk(20.0, 12.0, 10), single,
+                noise_db=2.0, seed=seed)
+            multi_engine = PositioningEngine(self.FLOORS)
+            single_engine = PositioningEngine(single)
+            multi_err, single_err = [], []
+            for step in multi_steps:
+                pos = multi_engine.estimate_with_floor(step["rssi"])
+                tx, ty, _ = step["true"]
+                multi_err.append(math.hypot(pos.x - tx, pos.y - ty))
+            for step in single_steps:
+                est = single_engine.estimate(step["rssi"])
+                single_err.append(math.hypot(
+                    est[0] - step["true"][0], est[1] - step["true"][1]))
+            self.assertLess(statistics.mean(multi_err),
+                            statistics.mean(single_err) + 1.0,
+                            f"multi-floor much worse than single on seed {seed}")
+
+    def test_floor_with_no_beacons_heard_cannot_win(self):
+        # Only ground-floor beacons heard (the upstairs beacons are
+        # out of range): the vote must pick floor 0 with confidence
+        # 1.0, and the engine must report floor 0.
+        steps = simulate_multifloor_walk(
+            [(10.0, 6.0, 0)], self.FLOORS, noise_db=0.0, seed=7)
+        obs = {k: v for k, v in steps[0]["rssi"].items()
+               if k in ("A", "B", "C", "D")}
+        vote = estimate_floor(obs, self.FLOORS)
+        self.assertEqual(vote.floor, 0)
+        self.assertAlmostEqual(vote.confidence, 1.0)
+        engine = PositioningEngine(self.FLOORS)
+        self.assertEqual(engine.estimate_with_floor(obs).floor, 0)
+
+    def test_low_confidence_vote_keeps_current_floor(self):
+        # The engine is tracking on floor 0; then every beacon is
+        # heard at the same strength from both floors, so the vote
+        # is a 50/50 coin toss. Hysteresis must keep floor 0 rather
+        # than flickering.
+        engine = PositioningEngine(self.FLOORS)
+        steps = simulate_multifloor_walk(
+            [(10.0, 6.0, 0)], self.FLOORS, noise_db=0.0, seed=7)
+        self.assertEqual(engine.estimate_with_floor(steps[0]["rssi"]).floor, 0)
+        ambiguous = {b.id: -70.0 for b in self.FLOORS}
+        vote = estimate_floor(ambiguous, self.FLOORS)
+        self.assertAlmostEqual(vote.confidence, 0.5, places=6)
+        self.assertEqual(engine.estimate_with_floor(ambiguous).floor, 0)
+        self.assertEqual(engine.current_floor, 0)
+
+    def test_floor_change_resets_filter(self):
+        # The device walks downstairs, then appears upstairs at the
+        # far corner. A floor change must reset the filter, so the
+        # first upstairs estimate lands near the true upstairs point
+        # instead of being dragged back toward the downstairs track.
+        engine = PositioningEngine(self.FLOORS)
+        down = simulate_multifloor_walk(
+            [(10.0, 6.0, 0)] * 20, self.FLOORS, noise_db=2.0, seed=7)
+        for step in down:
+            engine.estimate_with_floor(step["rssi"])
+        up = simulate_multifloor_walk(
+            [(2.0, 2.0, 1)], self.FLOORS, noise_db=0.0, seed=7)
+        pos = engine.estimate_with_floor(up[0]["rssi"])
+        self.assertEqual(pos.floor, 1)
+        self.assertLess(math.hypot(pos.x - 2.0, pos.y - 2.0), 4.0)
+
+    def test_too_few_beacons_on_floor_falls_back(self):
+        # Only two upstairs beacons heard, plus one downstairs: the
+        # vote still picks floor 1 (two votes beat one), but
+        # trilateration needs three beacons on the floor, so the
+        # engine must fall back to all heard beacons and still return
+        # a position on floor 1 instead of raising. The (x, y) is
+        # degraded — the cross-floor distance is inflated by the
+        # slab — so this asserts the floor and a finite position,
+        # not accuracy.
+        steps = simulate_multifloor_walk(
+            [(10.0, 6.0, 1)], self.FLOORS, noise_db=0.0, seed=7)
+        obs = {k: v for k, v in steps[0]["rssi"].items()
+               if k in ("E", "F", "C")}
+        engine = PositioningEngine(self.FLOORS)
+        pos = engine.estimate_with_floor(obs)
+        self.assertEqual(pos.floor, 1)
+        self.assertTrue(math.isfinite(pos.x) and math.isfinite(pos.y))
+
+    def test_estimate_still_returns_xy_tuple(self):
+        # Backwards compatibility: estimate() returns (x, y) and
+        # estimate_with_floor() returns the Position with the floor.
+        engine = PositioningEngine(self.FLOORS)
+        steps = simulate_multifloor_walk(
+            [(9.0, 5.0, 1)], self.FLOORS, noise_db=0.0, seed=7)
+        xy = engine.estimate(steps[0]["rssi"])
+        self.assertIsInstance(xy, tuple)
+        self.assertEqual(len(xy), 2)
+        pos = engine.estimate_with_floor(steps[0]["rssi"])
+        self.assertEqual(pos.floor, 1)
+        self.assertAlmostEqual(pos.x, xy[0])
+        self.assertAlmostEqual(pos.y, xy[1])
+
+    def test_reset_forgets_floor(self):
+        engine = PositioningEngine(self.FLOORS)
+        steps = simulate_multifloor_walk(
+            [(10.0, 6.0, 1)], self.FLOORS, noise_db=0.0, seed=7)
+        engine.estimate_with_floor(steps[0]["rssi"])
+        self.assertEqual(engine.current_floor, 1)
+        engine.reset()
+        self.assertIsNone(engine.current_floor)
+
+    def test_estimate_floor_rejects_unknown_beacon(self):
+        with self.assertRaises(ValueError):
+            estimate_floor({"ZZ": -70.0}, self.FLOORS)
+
+    def test_estimate_floor_rejects_empty_observations(self):
+        with self.assertRaises(ValueError):
+            estimate_floor({}, self.FLOORS)
+
+    def test_bad_floor_switch_confidence_raises(self):
+        with self.assertRaises(ValueError):
+            PositioningEngine(self.FLOORS, floor_switch_confidence=0.0)
+        with self.assertRaises(ValueError):
+            PositioningEngine(self.FLOORS, floor_switch_confidence=1.5)
+
+    def test_multifloor_walk_is_reproducible(self):
+        path = two_floor_walk(20.0, 12.0, 5)
+        a = simulate_multifloor_walk(path, self.FLOORS, seed=42)
+        b = simulate_multifloor_walk(path, self.FLOORS, seed=42)
+        self.assertEqual(a, b)
 
 
 if __name__ == "__main__":

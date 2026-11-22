@@ -6,6 +6,11 @@ a device would observe 1 metre away from this beacon, in dBm. It is a
 calibration constant: measure it once per beacon model in the real
 space, or use the default (-59 dBm, a typical BLE value) for the
 simulator.
+
+``floor`` is the floor the beacon is mounted on (0 is the ground
+floor). Beacons on different floors share the same (x, y) plane in
+the building's coordinate system; the engine uses ``floor`` to work
+out which floor a device is on before localising within it.
 """
 
 from dataclasses import dataclass
@@ -20,6 +25,7 @@ class Beacon:
     y: float
     rssi_at_1m: float = -59.0
     path_loss_exponent: float = 2.0
+    floor: int = 0
 
     @property
     def position(self) -> tuple[float, float]:

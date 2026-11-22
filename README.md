@@ -25,6 +25,12 @@ library, no dependencies, no BLE hardware needed.
   survey grid cell, located by k-nearest-neighbour matching in RSSI
   space — no path-loss model involved, so it keeps working where
   trilateration's distance inversion explodes.
+- Multi-floor support: beacons carry a `floor` attribute, the
+  engine votes on which floor the device is on (closer beacons vote
+  harder; beacons heard through a floor slab vote weakly), then
+  localises within that floor's 2D plane — with hysteresis so the
+  reported floor does not flicker near a stairwell, and a filter
+  reset on every floor change.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -65,6 +71,24 @@ beacons = [Beacon("A", 0, 0), Beacon("B", 20, 0),
            Beacon("C", 20, 12), Beacon("D", 0, 12)]
 engine = PositioningEngine(beacons)
 x, y = engine.estimate({"A": -62.1, "B": -71.4, "C": -68.0, "D": -59.8})
+```
+
+In a multi-floor building, give each beacon its floor and use
+`estimate_with_floor`, which returns a `Position` carrying the
+floor and the confidence of the floor vote:
+
+```python
+from beacon import Beacon, PositioningEngine
+
+beacons = [Beacon("A", 0, 0, floor=0), Beacon("B", 20, 0, floor=0),
+           Beacon("C", 20, 12, floor=0), Beacon("D", 0, 12, floor=0),
+           Beacon("E", 0, 0, floor=1), Beacon("F", 20, 0, floor=1),
+           Beacon("G", 20, 12, floor=1), Beacon("H", 0, 12, floor=1)]
+engine = PositioningEngine(beacons)
+pos = engine.estimate_with_floor({"A": -80.1, "B": -84.3, "C": -82.0,
+                                  "D": -79.5, "E": -62.4, "F": -70.8,
+                                  "G": -68.2, "H": -60.1})
+# pos.x, pos.y, pos.floor == 1, pos.floor_confidence
 ```
 
 ## Model
@@ -147,6 +171,46 @@ error about 2.1 m with a noisy survey, comparable to trilateration's
 2.2 m on the same walks — and unlike trilateration it needs no
 calibrated path-loss constants at all.
 
+## Multi-floor
+
+Give each beacon a `floor` (`Beacon("E", 0, 0, floor=1)`; the
+default is 0, so single-floor code is unaffected) and the engine
+votes on the floor before localising within it. Each heard beacon
+votes for its own floor with weight `1 / distance` from the
+path-loss model, so near beacons count more than far ones — and
+beacons on an adjacent floor are heard through the slab, so their
+apparent distance is inflated and they vote weakly. The winning
+floor's share of the total weight is its confidence
+(`estimate_floor` returns the vote, its confidence, and every
+floor's score for inspection).
+
+`estimate_with_floor` returns a `Position(x, y, floor,
+floor_confidence)`. The floor only switches when the winning
+floor's confidence clears 0.6 (configurable via
+`floor_switch_confidence`); a 50/50 vote near a stairwell keeps the
+current floor instead of flickering. A floor change resets the
+smoothing filter, since the device has moved to a different plane.
+When fewer than three beacons are heard on the winning floor, the
+engine falls back to all heard beacons rather than failing — the
+(x, y) degrades (cross-floor distances are inflated by the slab)
+but the floor stays right. A floor with no beacons heard scores
+zero and cannot win. `estimate` still returns `(x, y)`; in a
+single-floor building the vote is trivial and the result is
+identical to before.
+
+The simulator models a floor as 3 m of vertical separation plus
+15 dB of slab attenuation for beacons on a different floor from the
+device (`simulate_multifloor_walk`, path points are
+`(x, y, floor)`; `two_floor_walk` walks the ward downstairs then
+upstairs).
+
+Measured accuracy (simulator, 2 dB RSSI noise, two-floor ward,
+4 beacons per floor): floor classification is 100% correct on
+seeds 1, 2, 3, 7, 11, and within-floor mean error is 2.1–2.4 m —
+comparable to the single-floor engine's 1.8–2.6 m on the same walks.
+A noiseless vote from mid-ward reports the correct floor at 0.85
+confidence.
+
 ## Measured accuracy (simulator, not the real world)
 
 Default ward walk, 2 dB RSSI noise: mean error about 2.2 m (1.8-2.6 m
@@ -184,4 +248,14 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   averaged per cell, unheard beacons left out of the comparison
   (v0.6.0); noisy-survey mean error ~2.1 m, comparable to
   trilateration, with no path-loss model involved
-- Multi-floor support (beacon z coordinate, floor detection)
+- Multi-floor support (beacon z coordinate, floor detection) —
+  done: `Beacon.floor`, a `1 / distance` floor vote with a
+  confidence score, `estimate_with_floor` returning a `Position`
+  with the floor attached, 0.6-confidence hysteresis against floor
+  flicker, a filter reset on floor change, a fallback to all heard
+  beacons when fewer than three are heard on the winning floor, and
+  a multi-floor simulator (3 m floor height, 15 dB slab
+  attenuation) with a two-floor walk fixture (v0.7.0); floor
+  classification 100% on seeds 1, 2, 3, 7, 11, within-floor mean
+  error 2.1–2.4 m, comparable to single-floor mode. The roadmap is
+  now complete.
