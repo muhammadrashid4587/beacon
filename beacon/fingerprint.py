@@ -36,6 +36,8 @@ from a surveyed grid, then locate live observations against it:
 
 import math
 
+from .floors import Position
+
 
 def grid_points(width: float, height: float, spacing: float,
                 margin: float = 1.0) -> list[tuple[float, float]]:
@@ -201,3 +203,175 @@ def build_fingerprint_map(beacons, steps: list[dict]) -> FingerprintMap:
     ``FingerprintMap.from_survey`` matching ``calibrate_survey``.
     """
     return FingerprintMap.from_survey([b.id for b in beacons], steps)
+
+
+class MultiFloorFingerprintMap:
+    """A radio map per floor: one ``FingerprintMap`` for each floor.
+
+    Multi-floor fingerprinting works in two steps, mirroring the
+    trilateration engine's floor-first design but without any
+    path-loss model. First the floor is classified: the live RSSI
+    vector is matched against every floor's map, and the floor whose
+    map holds the nearest fingerprint in RSSI space wins — a beacon
+    heard through the slab reads ~15 dB weaker than the same beacon
+    surveyed on its own floor, so the wrong floor's map matches
+    badly and the right floor's matches well. Then the k-NN lookup
+    runs within the winning floor's map only, so a cell on the
+    wrong floor can never drag the estimate across floors.
+
+    Each floor's map is built from that floor's beacons only, the
+    same restriction the engine applies when it localises within a
+    floor. Survey steps carry ``{"true": (x, y, floor), "rssi": ...}``
+    — exactly the shape ``simulate_multifloor_walk`` returns.
+    """
+
+    def __init__(self, floor_maps: dict[int, FingerprintMap]):
+        if not floor_maps:
+            raise ValueError(
+                "multi-floor fingerprinting needs at least one floor")
+        for floor, radio_map in floor_maps.items():
+            if len(radio_map) == 0:
+                raise ValueError(
+                    f"floor {floor} has an empty fingerprint map")
+        self._maps = dict(floor_maps)
+
+    @property
+    def floors(self) -> list[int]:
+        """The floors this map covers, in the order they were added."""
+        return list(self._maps)
+
+    @property
+    def maps(self) -> dict[int, FingerprintMap]:
+        """The per-floor radio maps (floor -> FingerprintMap)."""
+        return dict(self._maps)
+
+    def __len__(self) -> int:
+        return sum(len(m) for m in self._maps.values())
+
+    @classmethod
+    def from_survey(cls, beacons, steps: list[dict]
+                    ) -> "MultiFloorFingerprintMap":
+        """Build one radio map per floor from a multi-floor survey.
+
+        ``beacons`` is the list of all surveyed beacons (across
+        floors) and ``steps`` a list of
+        ``{"true": (x, y, floor), "rssi": {id: rssi}}`` dicts. Each
+        floor's map is built from that floor's beacons only: a
+        survey step's cross-floor readings (heard through the slab)
+        are dropped for the map of the floor the step was walked on,
+        so each floor's fingerprints describe only its own beacons.
+        """
+        by_floor: dict[int, list] = {}
+        for beacon in beacons:
+            by_floor.setdefault(beacon.floor, []).append(beacon)
+        floor_maps: dict[int, FingerprintMap] = {}
+        for floor, floor_beacons in by_floor.items():
+            floor_ids = [b.id for b in floor_beacons]
+            radio_map = FingerprintMap(floor_ids)
+            for step in steps:
+                x, y, step_floor = step["true"]
+                if step_floor != floor:
+                    continue
+                radio_map.add((x, y), {bid: rssi for bid, rssi in
+                                       step["rssi"].items()
+                                       if bid in floor_ids})
+            if len(radio_map) == 0:
+                raise ValueError(
+                    f"no survey steps for floor {floor}")
+            floor_maps[floor] = radio_map
+        return cls(floor_maps)
+
+    def classify_floor(self, observations: dict[str, float]
+                       ) -> tuple[int, float, dict[int, float]]:
+        """Classify which floor an observation set was taken on.
+
+        Returns ``(floor, confidence, distances)``: the winning
+        floor, its confidence, and every floor's nearest-fingerprint
+        distance in dB (floors sharing no beacons with the
+        observation are left out). The confidence is the runner-up
+        distance's share of the two best distances —
+        ``second / (best + second)`` — so it is 1.0 for a single
+        floor, near 1.0 when the winner matches far better than any
+        other floor, and 0.5 when two floors match equally well and
+        the classification is a coin toss.
+
+        Raises ValueError on an unknown beacon id, an empty
+        observation set, or when no floor's map shares a beacon
+        with the observations.
+        """
+        if not observations:
+            raise ValueError(
+                "floor classification needs at least one observation")
+        known = {bid for m in self._maps.values()
+                 for bid in m.beacon_ids}
+        for beacon_id in observations:
+            if beacon_id not in known:
+                raise ValueError(f"unknown beacon id: {beacon_id!r}")
+        distances: dict[int, float] = {}
+        for floor, radio_map in self._maps.items():
+            # Each floor's map only knows its own beacons, so match
+            # against the observation restricted to that floor —
+            # the other floor's beacons are cross-floor readings
+            # for this map, not part of its fingerprints.
+            floor_obs = {bid: rssi for bid, rssi in observations.items()
+                         if bid in radio_map.beacon_ids}
+            if not floor_obs:
+                continue
+            try:
+                nearest = radio_map.nearest(floor_obs, k=1)
+            except ValueError:
+                continue
+            distances[floor] = nearest[0][1]
+        if not distances:
+            raise ValueError(
+                "observations share no beacons with the fingerprint map")
+        ranked = sorted(distances.items(), key=lambda item: item[1])
+        floor, best = ranked[0]
+        if len(ranked) == 1:
+            confidence = 1.0
+        else:
+            second = ranked[1][1]
+            confidence = second / (best + second) if best + second else 1.0
+        return floor, confidence, distances
+
+    def locate_with_floor(self, observations: dict[str, float], k: int = 3
+                          ) -> Position:
+        """Estimate a position with its floor, from one observation set.
+
+        Classifies the floor first (see ``classify_floor``), then
+        runs the k-NN lookup within that floor's map only and
+        returns a ``Position(x, y, floor, floor_confidence)``.
+        """
+        floor, confidence, _ = self.classify_floor(observations)
+        radio_map = self._maps[floor]
+        floor_obs = {bid: rssi for bid, rssi in observations.items()
+                     if bid in radio_map.beacon_ids}
+        x, y = radio_map.locate(floor_obs, k)
+        return Position(x=x, y=y, floor=floor,
+                        floor_confidence=confidence)
+
+    def locate(self, observations: dict[str, float], k: int = 3
+               ) -> tuple[float, float]:
+        """Estimate (x, y) from one observation set, floor first.
+
+        Same as ``locate_with_floor`` but returns only the (x, y)
+        — the floor is still classified first and the lookup still
+        runs within that floor's map.
+        """
+        position = self.locate_with_floor(observations, k)
+        return (position.x, position.y)
+
+
+def build_multifloor_fingerprint_map(beacons,
+                                     steps: list[dict]
+                                     ) -> MultiFloorFingerprintMap:
+    """Build one radio map per floor from a multi-floor survey.
+
+    ``beacons`` is the list of all surveyed beacons (across floors)
+    and ``steps`` a list of ``{"true": (x, y, floor), "rssi": ...}``
+    dicts — exactly the shape ``simulate_multifloor_walk`` returns.
+    A convenience wrapper around
+    ``MultiFloorFingerprintMap.from_survey`` matching
+    ``build_fingerprint_map``.
+    """
+    return MultiFloorFingerprintMap.from_survey(beacons, steps)

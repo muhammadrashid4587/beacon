@@ -31,6 +31,10 @@ library, no dependencies, no BLE hardware needed.
   localises within that floor's 2D plane — with hysteresis so the
   reported floor does not flicker near a stairwell, and a filter
   reset on every floor change.
+- Multi-floor fingerprinting: one radio map per floor, the floor
+  classified by which floor's map holds the nearest fingerprint in
+  RSSI space, then the k-NN lookup runs within that floor's map
+  only — no path-loss model involved at any step.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -211,6 +215,57 @@ comparable to the single-floor engine's 1.8–2.6 m on the same walks.
 A noiseless vote from mid-ward reports the correct floor at 0.85
 confidence.
 
+## Multi-floor fingerprinting
+
+Fingerprinting works per floor too, with no path-loss model
+involved at any step. Survey each floor's grid (the same
+`grid_points` cells, walked once per floor) and build one radio
+map per floor:
+
+```python
+from beacon import build_multifloor_fingerprint_map, grid_points
+from beacon.simulate import simulate_multifloor_walk
+
+cells = grid_points(20.0, 12.0, spacing=2.0)
+path = ([(x, y, 0) for x, y in cells]
+        + [(x, y, 1) for x, y in cells])
+survey = simulate_multifloor_walk(path, beacons, noise_db=2.0, seed=7)
+maps = build_multifloor_fingerprint_map(beacons, survey)
+pos = maps.locate_with_floor({"A": -80.1, "B": -84.3, "C": -82.0,
+                              "D": -79.5, "E": -62.4, "F": -70.8,
+                              "G": -68.2, "H": -60.1})
+# pos.x, pos.y, pos.floor == 1, pos.floor_confidence
+```
+
+`locate_with_floor` classifies the floor first, then runs the k-NN
+lookup within that floor's map only. The floor is classified by
+matching the live RSSI vector against every floor's map: the floor
+whose map holds the nearest fingerprint in RSSI space wins. That
+works because a beacon heard through the slab reads ~15 dB weaker
+than the same beacon surveyed on its own floor, so the wrong
+floor's map matches badly (about 14 dB away) while the right
+floor's matches within the noise (about 1 dB). Each floor's map is
+built from that floor's beacons only, the same restriction the
+trilateration engine applies when it localises within a floor, so
+a cell on the wrong floor can never drag the estimate across
+floors. `classify_floor` returns the floor, its confidence, and
+every floor's nearest-fingerprint distance for inspection; the
+confidence is the runner-up distance's share of the two best
+distances, so it is near 1.0 when the winner matches far better
+than any other floor and 0.5 when two floors match equally well.
+`locate` returns just the `(x, y)` with the floor still classified
+first. A floor whose beacons were not heard is skipped rather than
+failing the classification, and an observation sharing no beacons
+with any floor's map raises instead of returning a made-up
+position.
+
+Measured accuracy (simulator, 2 dB RSSI noise, two-floor ward,
+4 beacons per floor, noisy survey): floor classification is 100%
+correct on seeds 1, 2, 3, 7, 11, and within-floor mean error is
+1.95–2.38 m — comparable to single-floor fingerprinting's
+1.83–2.30 m on the same walks. A noiseless classification from
+mid-ward reports the correct floor at 0.94–0.95 confidence.
+
 ## Measured accuracy (simulator, not the real world)
 
 Default ward walk, 2 dB RSSI noise: mean error about 2.2 m (1.8-2.6 m
@@ -257,5 +312,15 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   a multi-floor simulator (3 m floor height, 15 dB slab
   attenuation) with a two-floor walk fixture (v0.7.0); floor
   classification 100% on seeds 1, 2, 3, 7, 11, within-floor mean
-  error 2.1–2.4 m, comparable to single-floor mode. The roadmap is
-  now complete.
+  error 2.1–2.4 m, comparable to single-floor mode.
+- Multi-floor fingerprinting (radio map per floor) — done:
+  `MultiFloorFingerprintMap` with one `FingerprintMap` per floor,
+  `classify_floor` matching the live RSSI vector against every
+  floor's map (the floor whose map holds the nearest fingerprint
+  wins), `locate_with_floor` returning a `Position` with the floor
+  and its confidence, and `build_multifloor_fingerprint_map`
+  building the per-floor maps from a multi-floor survey (v0.8.0);
+  floor classification 100% on seeds 1, 2, 3, 7, 11, within-floor
+  mean error 1.95–2.38 m, comparable to single-floor
+  fingerprinting's 1.83–2.30 m, with no path-loss model involved.
+  The roadmap is now complete.

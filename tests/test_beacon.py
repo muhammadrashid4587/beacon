@@ -11,9 +11,11 @@ from beacon import (
     FloorEstimate,
     KalmanFilter,
     MovingAverageFilter,
+    MultiFloorFingerprintMap,
     Position,
     PositioningEngine,
     build_fingerprint_map,
+    build_multifloor_fingerprint_map,
     calibrate_beacon,
     calibrate_survey,
     distance_to_rssi,
@@ -821,6 +823,187 @@ class TestMultiFloor(unittest.TestCase):
         a = simulate_multifloor_walk(path, self.FLOORS, seed=42)
         b = simulate_multifloor_walk(path, self.FLOORS, seed=42)
         self.assertEqual(a, b)
+
+
+class TestMultiFloorFingerprinting(unittest.TestCase):
+    """Multi-floor fingerprinting: per-floor radio maps, floor
+    classification from the maps themselves, and within-floor
+    accuracy comparable to single-floor fingerprinting."""
+
+    # Reuse the two-floor fixture from TestMultiFloor: four corner
+    # beacons per floor over the same 20 x 12 m ward.
+    FLOORS = TestMultiFloor.FLOORS
+
+    def _two_floor_map(self, noise_db=0.0, spacing=2.0, seed=7):
+        cells = grid_points(20.0, 12.0, spacing)
+        path = ([(x, y, 0) for x, y in cells]
+                + [(x, y, 1) for x, y in cells])
+        survey = simulate_multifloor_walk(path, self.FLOORS,
+                                          noise_db=noise_db, seed=seed)
+        return build_multifloor_fingerprint_map(self.FLOORS, survey)
+
+    def test_maps_cover_both_floors(self):
+        radio_map = self._two_floor_map()
+        self.assertEqual(radio_map.floors, [0, 1])
+        self.assertEqual(len(radio_map.maps[0]), 60)
+        self.assertEqual(len(radio_map.maps[1]), 60)
+        self.assertEqual(len(radio_map), 120)
+        # Each floor's map only knows its own beacons.
+        self.assertEqual(radio_map.maps[0].beacon_ids,
+                         ["A", "B", "C", "D"])
+        self.assertEqual(radio_map.maps[1].beacon_ids,
+                         ["E", "F", "G", "H"])
+
+    def test_noiseless_locate_recovers_exact_cell_and_floor(self):
+        radio_map = self._two_floor_map()
+        for floor in (0, 1):
+            for cell in radio_map.maps[floor].cells:
+                steps = simulate_multifloor_walk(
+                    [(cell[0], cell[1], floor)], self.FLOORS,
+                    noise_db=0.0, seed=7)
+                pos = radio_map.locate_with_floor(steps[0]["rssi"], k=1)
+                self.assertIsInstance(pos, Position)
+                self.assertEqual(pos.floor, floor)
+                self.assertEqual((pos.x, pos.y), cell)
+                # An exact fingerprint match is confident.
+                self.assertGreater(pos.floor_confidence, 0.8)
+
+    def test_noiseless_vote_picks_correct_floor_with_confidence(self):
+        # Noiseless observations from mid-ward on each floor: the
+        # floor whose map matches best must win with high
+        # confidence, and both floors must have scored.
+        radio_map = self._two_floor_map()
+        for floor in (0, 1):
+            steps = simulate_multifloor_walk(
+                [(10.0, 6.0, floor)], self.FLOORS, noise_db=0.0, seed=7)
+            got, confidence, distances = radio_map.classify_floor(
+                steps[0]["rssi"])
+            self.assertEqual(got, floor)
+            self.assertGreater(confidence, 0.8)
+            self.assertEqual(set(distances), {0, 1})
+            # The winning floor matches far better than the other:
+            # the wrong floor's beacons were heard through the slab.
+            self.assertLess(distances[floor], distances[1 - floor] / 3)
+
+    def test_two_floor_walk_accuracy_and_floor_classification(self):
+        # A walk downstairs then upstairs, 2 dB RSSI noise, surveyed
+        # with a noisy radio map: the floor must be right on at
+        # least 95% of steps on every seed, and the within-floor
+        # (x, y) error must stay under the same 3.0 m guard as
+        # single-floor fingerprinting.
+        radio_map = self._two_floor_map(noise_db=2.0)
+        path = two_floor_walk(20.0, 12.0, 10)
+        for seed in (1, 2, 3, 7, 11):
+            steps = simulate_multifloor_walk(path, self.FLOORS,
+                                             noise_db=2.0, seed=seed)
+            floor_ok = 0
+            errors = []
+            for step in steps:
+                pos = radio_map.locate_with_floor(step["rssi"], k=3)
+                true_x, true_y, true_floor = step["true"]
+                if pos.floor == true_floor:
+                    floor_ok += 1
+                errors.append(math.hypot(pos.x - true_x, pos.y - true_y))
+            self.assertGreaterEqual(floor_ok / len(steps), 0.95,
+                                    f"floor accuracy too low on seed {seed}")
+            self.assertLess(statistics.mean(errors), 3.0,
+                            f"within-floor error too high on seed {seed}")
+
+    def test_within_floor_error_comparable_to_single_floor(self):
+        # Same walk, same seeds, single-floor fingerprinting vs
+        # multi-floor: classifying the floor first and looking up
+        # within that floor's map must not cost more than 1.0 m of
+        # mean error over the single-floor baseline.
+        multi_map = self._two_floor_map(noise_db=2.0)
+        cells = grid_points(20.0, 12.0, 2.0)
+        single_survey = simulate_walk(cells, BEACONS, noise_db=2.0, seed=7)
+        single_map = build_fingerprint_map(BEACONS, single_survey)
+        path = two_floor_walk(20.0, 12.0, 10)
+        single = [b for b in self.FLOORS if b.floor == 0]
+        for seed in (1, 2, 3, 7, 11):
+            multi_steps = simulate_multifloor_walk(
+                path, self.FLOORS, noise_db=2.0, seed=seed)
+            single_steps = simulate_walk(
+                rectangular_walk(20.0, 12.0, 10), single,
+                noise_db=2.0, seed=seed)
+            multi_err, single_err = [], []
+            for step in multi_steps:
+                pos = multi_map.locate_with_floor(step["rssi"], k=3)
+                tx, ty, _ = step["true"]
+                multi_err.append(math.hypot(pos.x - tx, pos.y - ty))
+            for step in single_steps:
+                est = single_map.locate(step["rssi"], k=3)
+                single_err.append(math.hypot(
+                    est[0] - step["true"][0], est[1] - step["true"][1]))
+            self.assertLess(statistics.mean(multi_err),
+                            statistics.mean(single_err) + 1.0,
+                            f"multi-floor much worse than single on seed {seed}")
+
+    def test_locate_returns_xy_tuple(self):
+        # Backwards-compatible shape: locate() returns (x, y) and
+        # locate_with_floor() returns the Position with the floor.
+        radio_map = self._two_floor_map()
+        steps = simulate_multifloor_walk(
+            [(9.0, 5.0, 1)], self.FLOORS, noise_db=0.0, seed=7)
+        xy = radio_map.locate(steps[0]["rssi"])
+        self.assertIsInstance(xy, tuple)
+        self.assertEqual(len(xy), 2)
+        pos = radio_map.locate_with_floor(steps[0]["rssi"])
+        self.assertEqual(pos.floor, 1)
+        self.assertAlmostEqual(pos.x, xy[0])
+        self.assertAlmostEqual(pos.y, xy[1])
+
+    def test_single_floor_map_reports_confidence_one(self):
+        # One floor only: the classification is trivial and the
+        # confidence is 1.0.
+        cells = grid_points(20.0, 12.0, 2.0)
+        survey = simulate_walk(cells, BEACONS, noise_db=0.0, seed=7)
+        radio_map = MultiFloorFingerprintMap(
+            {0: build_fingerprint_map(BEACONS, survey)})
+        steps = simulate_walk([(9.0, 5.0)], BEACONS, noise_db=0.0, seed=7)
+        pos = radio_map.locate_with_floor(steps[0]["rssi"])
+        self.assertEqual(pos.floor, 0)
+        self.assertEqual(pos.floor_confidence, 1.0)
+
+    def test_partial_hearing_still_classifies(self):
+        # Only the upstairs beacons heard: the downstairs map
+        # shares no beacons with the observation, so it is skipped
+        # and floor 1 still wins.
+        radio_map = self._two_floor_map()
+        steps = simulate_multifloor_walk(
+            [(10.0, 6.0, 1)], self.FLOORS, noise_db=0.0, seed=7)
+        obs = {k: v for k, v in steps[0]["rssi"].items()
+               if k in ("E", "F", "G", "H")}
+        pos = radio_map.locate_with_floor(obs)
+        self.assertEqual(pos.floor, 1)
+        self.assertEqual(pos.floor_confidence, 1.0)
+
+    def test_empty_map_raises(self):
+        with self.assertRaises(ValueError):
+            MultiFloorFingerprintMap({})
+        with self.assertRaises(ValueError):
+            MultiFloorFingerprintMap({0: FingerprintMap(["A", "B"])})
+
+    def test_no_survey_steps_for_a_floor_raises(self):
+        # Survey only walked floor 0, but beacons exist on floor 1.
+        cells = grid_points(20.0, 12.0, 2.0)
+        path = [(x, y, 0) for x, y in cells]
+        survey = simulate_multifloor_walk(path, self.FLOORS,
+                                          noise_db=0.0, seed=7)
+        with self.assertRaises(ValueError):
+            build_multifloor_fingerprint_map(self.FLOORS, survey)
+
+    def test_unknown_beacon_raises(self):
+        radio_map = self._two_floor_map()
+        with self.assertRaises(ValueError):
+            radio_map.locate_with_floor({"ZZ": -70.0})
+        with self.assertRaises(ValueError):
+            radio_map.classify_floor({"ZZ": -70.0})
+
+    def test_empty_observations_raise(self):
+        radio_map = self._two_floor_map()
+        with self.assertRaises(ValueError):
+            radio_map.locate_with_floor({})
 
 
 if __name__ == "__main__":
