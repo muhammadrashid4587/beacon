@@ -53,6 +53,11 @@ library, no dependencies, no BLE hardware needed.
   calibration, the steps, and the built radio map) saves to a
   portable JSON file and loads back losslessly, so a survey can be
   shared or reused across runs without re-walking the ward.
+- Position uncertainty: every raw estimate carries a 95%
+  confidence ellipse, so a ward dashboard knows how much to trust
+  each position — tight in the middle of the ward, stretched along
+  the weak axis near an edge or where the beacons cluster on one
+  side.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -434,6 +439,51 @@ not understand, instead of loading garbage. `calibrated_beacons()`
 fits the beacons from the survey's steps; it refuses multi-floor
 surveys, whose cross-floor readings would corrupt the fit.
 
+## Position uncertainty
+
+A position estimate on its own does not say how much to trust it.
+A device in the middle of the ward, heard by beacons spread around
+it, is pinned down tightly; the same device near the ward's edge,
+heard by beacons all on one side, is well located along one axis
+and barely located across it. `estimate_with_uncertainty` returns
+the raw estimate together with a 95% confidence ellipse for it:
+
+```python
+from beacon import Beacon, PositioningEngine
+
+beacons = [Beacon("A", 0, 0), Beacon("B", 20, 0),
+           Beacon("C", 20, 12), Beacon("D", 0, 12)]
+engine = PositioningEngine(beacons)
+x, y, unc = engine.estimate_with_uncertainty(
+    {"A": -62.1, "B": -71.4, "C": -68.0, "D": -59.8})
+# unc.semi_major, unc.semi_minor (metres), unc.angle_deg
+# (orientation of the major axis, degrees from +x)
+unc.contains(10.0, 6.0, (x, y))   # is a point inside the ellipse?
+```
+
+The ellipse comes from the weighted least-squares covariance of
+the trilateration: each Jacobian row is the unit vector from a
+beacon to the estimate, weighted by `1 / sigma_d`, where the
+distance noise `sigma_d` follows from the RSSI noise
+(`sigma_rssi_db`, 2.0 dB by default) through the log-distance
+model — a steeper path-loss exponent turns the same RSSI noise
+into a smaller distance error, so calibrated beacons get tighter
+ellipses. The eigenvalues of the covariance give the axes, scaled
+by the 95% chi-square quantile for 2 degrees of freedom. The
+ellipse describes one raw trilateration, not the filtered track:
+it is the uncertainty of the geometry and the RSSI noise at this
+step. Fewer than three beacons, or a geometry whose covariance is
+singular (the estimate sitting on the beacon line), raises instead
+of returning a made-up ellipse.
+
+Measured behaviour (simulator, 2 dB RSSI noise, 200 trials per
+seed): the true position lands inside the 95% ellipse in 90–95%
+of trials across seeds 1, 2, 3, 7, 11 — close to the nominal 95%,
+slightly under it because the linearisation and the estimated
+distances are themselves noisy. A symmetric four-beacon square
+gives a near-circular ellipse; beacons clustered on one wall
+stretch the ellipse more than 2:1 along the weak axis.
+
 ## Measured accuracy (simulator, not the real world)
 
 Default ward walk, 2 dB RSSI noise: mean error about 2.2 m (1.8-2.6 m
@@ -530,5 +580,16 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   alarms, a beacon 12 dB too loud alarms at about +12 dB while
   the others stay silent, and a short drift that leaves the
   window stops alarming by itself.
-  The roadmap grows as new needs surface — the drift alarm is
-  the latest addition.
+- Position uncertainty (confidence ellipse per estimate) —
+  done: `estimate_uncertainty` derives a 95% confidence ellipse
+  from the trilateration's weighted least-squares covariance,
+  with per-beacon distance noise propagated from the RSSI noise
+  through the log-distance model, and
+  `PositioningEngine.estimate_with_uncertainty` returns the raw
+  estimate with its ellipse attached (v0.13.0); the true
+  position lands inside the ellipse in 90–95% of trials across
+  seeds 1, 2, 3, 7, 11, a symmetric layout gives a near-circular
+  ellipse, and beacons clustered on one wall stretch it more
+  than 2:1 along the weak axis.
+  The roadmap grows as new needs surface — the confidence
+  ellipse is the latest addition.

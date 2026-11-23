@@ -26,6 +26,7 @@ from .floors import (DEFAULT_FLOOR_SWITCH_CONFIDENCE, FloorEstimate,
                      Position, estimate_floor as _vote_floor)
 from .rssi import rssi_to_distance
 from .trilateration import trilaterate
+from .uncertainty import PositionUncertainty, estimate_uncertainty
 
 
 class PositioningEngine:
@@ -96,6 +97,33 @@ class PositioningEngine:
                 raise ValueError(f"unknown beacon id: {beacon_id!r}")
         positions, distances = self._distances(observations, beacons)
         return trilaterate(positions, distances)
+
+    def estimate_with_uncertainty(
+            self, observations: dict[str, float],
+            sigma_rssi_db: float = 2.0
+            ) -> tuple[float, float, PositionUncertainty]:
+        """Raw position estimate plus its 95% confidence ellipse.
+
+        Like ``estimate_raw`` this is unfiltered — one observation
+        set, all heard beacons — so the ellipse describes the
+        geometry and RSSI noise of this step, not the filtered
+        track. ``sigma_rssi_db`` is the assumed RSSI noise in dB
+        (default 2.0, matching the simulator's default noise).
+        """
+        beacons = [self.beacons[beacon_id] for beacon_id in observations
+                   if beacon_id in self.beacons]
+        for beacon_id in observations:
+            if beacon_id not in self.beacons:
+                raise ValueError(f"unknown beacon id: {beacon_id!r}")
+        positions, distances = self._distances(observations, beacons)
+        exponents = [
+            (self.path_loss_exponent
+             if self.path_loss_exponent is not None
+             else beacon.path_loss_exponent)
+            for beacon in beacons]
+        x, y = trilaterate(positions, distances)
+        return (x, y, estimate_uncertainty(
+            positions, (x, y), distances, exponents, sigma_rssi_db))
 
     def estimate_floor(self, observations: dict[str, float]) -> FloorEstimate:
         """Vote on which floor the device is on, from one observation

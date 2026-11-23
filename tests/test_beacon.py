@@ -26,9 +26,11 @@ from beacon import (
     distance_to_rssi,
     DriftMonitor,
     estimate_floor,
+    estimate_uncertainty,
     fit_path_loss,
     grid_points,
     healthy_beacons,
+    PositionUncertainty,
     rssi_to_distance,
     simulate_multifloor_walk,
     simulate_walk,
@@ -1447,6 +1449,116 @@ class TestDriftMonitor(unittest.TestCase):
         monitor = DriftMonitor(BEACONS)
         with self.assertRaises(ValueError):
             monitor.observe((5.0, 5.0, 0), {"A": -60.0})
+
+
+class TestPositionUncertainty(unittest.TestCase):
+    def test_symmetric_layout_is_near_circular(self):
+        # Four corner beacons of a square ward, device dead centre:
+        # the geometry constrains x and y equally, so the ellipse
+        # is a circle.
+        square = [Beacon("A", 0.0, 0.0), Beacon("B", 12.0, 0.0),
+                  Beacon("C", 12.0, 12.0), Beacon("D", 0.0, 12.0)]
+        centre = (6.0, 6.0)
+        distances = _distances_to(centre, square)
+        unc = estimate_uncertainty(
+            [b.position for b in square], centre, distances)
+        self.assertLess(unc.semi_major / unc.semi_minor, 1.2)
+        self.assertGreater(unc.semi_minor, 0.0)
+        self.assertLess(unc.semi_major, 6.0)
+
+    def test_one_sided_beacons_stretch_along_the_weak_axis(self):
+        # Beacons clustered on the west wall, device 15 m east of
+        # them: every beacon lies in roughly the same direction, so
+        # the measurements pin down the east-west distance but
+        # barely constrain north-south — the ellipse is long in y
+        # and its major axis points along y.
+        wall = [Beacon("A", 0.0, 0.0), Beacon("B", 0.0, 12.0),
+                Beacon("C", 0.0, 6.0), Beacon("D", 2.0, 6.0)]
+        point = (15.0, 6.0)
+        distances = _distances_to(point, wall)
+        unc = estimate_uncertainty(
+            [b.position for b in wall], point, distances)
+        self.assertGreater(unc.semi_major / unc.semi_minor, 2.0)
+        self.assertGreater(abs(unc.angle_deg), 60.0)
+
+    def test_axes_scale_linearly_with_rssi_noise(self):
+        centre = (10.0, 6.0)
+        distances = _distances_to(centre, BEACONS)
+        positions = [b.position for b in BEACONS]
+        small = estimate_uncertainty(positions, centre, distances,
+                                     sigma_rssi_db=1.0)
+        large = estimate_uncertainty(positions, centre, distances,
+                                     sigma_rssi_db=2.0)
+        self.assertAlmostEqual(large.semi_major,
+                               2.0 * small.semi_major, places=9)
+        self.assertAlmostEqual(large.semi_minor,
+                               2.0 * small.semi_minor, places=9)
+
+    def test_steeper_exponent_shrinks_the_ellipse(self):
+        # A steeper path-loss exponent turns the same RSSI noise
+        # into a smaller distance error.
+        centre = (10.0, 6.0)
+        distances = _distances_to(centre, BEACONS)
+        positions = [b.position for b in BEACONS]
+        shallow = estimate_uncertainty(positions, centre, distances,
+                                       path_loss_exponents=[2.0] * 4)
+        steep = estimate_uncertainty(positions, centre, distances,
+                                     path_loss_exponents=[4.0] * 4)
+        self.assertLess(steep.semi_major, shallow.semi_major)
+
+    def test_true_position_lands_inside_the_95_ellipse(self):
+        # Coverage check: with 2 dB RSSI noise, the true position
+        # should sit inside the 95% ellipse in about 95% of trials.
+        rng = random.Random(7)
+        inside = 0
+        trials = 200
+        true = (10.0, 6.0)
+        for _ in range(trials):
+            obs = {b.id: distance_to_rssi(
+                       math.hypot(true[0] - b.x, true[1] - b.y),
+                       b.rssi_at_1m, b.path_loss_exponent)
+                   + rng.gauss(0.0, 2.0) for b in BEACONS}
+            engine = PositioningEngine(BEACONS)
+            x, y, unc = engine.estimate_with_uncertainty(obs)
+            if unc.contains(true[0], true[1], (x, y)):
+                inside += 1
+        self.assertGreaterEqual(inside / trials, 0.85)
+
+    def test_bad_inputs_raise(self):
+        centre = (10.0, 6.0)
+        positions = [b.position for b in BEACONS]
+        distances = _distances_to(centre, BEACONS)
+        with self.assertRaises(ValueError):
+            estimate_uncertainty(positions[:2], centre,
+                                 distances[:2])
+        with self.assertRaises(ValueError):
+            estimate_uncertainty(positions, centre, distances,
+                                 sigma_rssi_db=0.0)
+        collinear = [(0.0, 0.0), (10.0, 0.0), (20.0, 0.0)]
+        # The estimate sits on the beacon line itself, so every
+        # Jacobian row points along x and the covariance is
+        # singular — the cross-line uncertainty is unbounded.
+        with self.assertRaises(ValueError):
+            estimate_uncertainty(collinear, (10.0, 0.0),
+                                 [10.0, 0.0, 10.0])
+
+    def test_engine_method_matches_raw_estimate(self):
+        true = (10.0, 6.0)
+        obs = {b.id: distance_to_rssi(
+                   math.hypot(true[0] - b.x, true[1] - b.y))
+               for b in BEACONS}
+        engine = PositioningEngine(BEACONS)
+        x, y, unc = engine.estimate_with_uncertainty(obs)
+        self.assertIsInstance(unc, PositionUncertainty)
+        self.assertAlmostEqual(x, true[0], places=6)
+        self.assertAlmostEqual(y, true[1], places=6)
+        self.assertGreater(unc.semi_major, 0.0)
+        self.assertGreaterEqual(unc.semi_major, unc.semi_minor)
+
+    def test_engine_unknown_beacon_raises(self):
+        engine = PositioningEngine(BEACONS)
+        with self.assertRaises(ValueError):
+            engine.estimate_with_uncertainty({"Z": -60.0})
 
 
 if __name__ == "__main__":

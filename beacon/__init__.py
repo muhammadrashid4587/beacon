@@ -19,8 +19,9 @@ from .rssi import distance_to_rssi, rssi_to_distance
 from .simulate import simulate_multifloor_walk, simulate_walk, two_floor_walk
 from .survey import Survey
 from .trilateration import trilaterate
+from .uncertainty import PositionUncertainty, estimate_uncertainty
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 __all__ = [
     "Beacon",
@@ -50,5 +51,7 @@ __all__ = [
     "two_floor_walk",
     "Survey",
     "trilaterate",
+    "PositionUncertainty",
+    "estimate_uncertainty",
     "__version__",
 ]
