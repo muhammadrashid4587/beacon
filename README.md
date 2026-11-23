@@ -68,6 +68,10 @@ library, no dependencies, no BLE hardware needed.
   with the 95% confidence ellipse attached — partial scans merge
   across beacons, stale readings age out, and a beacon dropping
   out mid-stream degrades the track instead of breaking it.
+- A live track accuracy report: score a recorded walk against
+  ground truth — mean, median, 90th percentile and worst error,
+  plus coverage (how much of the walk was actually located) and
+  floor accuracy on multi-floor walks.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -594,6 +598,56 @@ error is 2.43 m and the track keeps emitting on three beacons; the
 ellipse widens as the geometry thins (mean semi-major axis 6.32 m
 with four beacons, 7.42 m after D drops).
 
+## Live track accuracy report
+
+The README's accuracy numbers above were measured by hand, once.
+A ward that re-runs its walks — after moving a beacon, after a
+recalibration, after a firmware change — needs the same verdict in
+code, on every walk. `evaluate_live_track` scores a recorded
+track against ground truth, step by step:
+
+```python
+from beacon import LiveTracker, PositioningEngine, evaluate_live_track
+from beacon.simulate import rectangular_walk, simulate_walk
+
+beacons = [Beacon("A", 0, 0), Beacon("B", 20, 0),
+           Beacon("C", 20, 12), Beacon("D", 0, 12)]
+steps = simulate_walk(rectangular_walk(20, 12, 10), beacons,
+                      noise_db=2.0, seed=7)
+tracker = LiveTracker(PositioningEngine(beacons))
+positions = [tracker.feed(step["rssi"], float(i))
+             for i, step in enumerate(steps)]
+report = evaluate_live_track(positions, [step["true"] for step in steps])
+# report.mean_error_m, report.median_error_m, report.p90_error_m,
+# report.max_error_m, report.coverage, report.floor_accuracy
+report.to_dict()   # JSON-friendly, for dashboards and regression logs
+```
+
+The report is a `TrackReport`: how many steps were scored, how
+many produced a position, and `coverage` — the located share —
+so a track starved by dead beacons shows up as low coverage
+rather than silently short. The error figures (mean, median,
+90th percentile, worst step) are computed over the located steps
+only. Ground truth is one `(x, y)` per step, or `(x, y, floor)`
+on a multi-floor walk, in which case `floor_accuracy` is the
+share of located steps whose floor was right (it is `None` when
+the truth carries no floors). A walk with no located step at all
+raises instead of reporting zeroes — with nothing located there
+is no error to summarise, and a report of zeroes would hide the
+failure. Length mismatches, mixed two- and three-tuple truth, and
+empty walks raise the same way.
+
+Measured behaviour (simulator, 2 dB RSSI noise, default ward walk,
+seed 7): mean error 2.16 m, median 2.08 m, 90th percentile
+4.14 m, worst step 6.70 m, coverage 1.0. With beacon D dropping
+out at step 20 the coverage stays 1.0 — three beacons still
+locate — and the dropout shows up in the error instead (mean
+2.43 m, worst step 7.63 m). On the two-floor walk the floor
+accuracy is 1.0 with a mean error of 2.53 m. Even a noiseless
+walk is not exact through the live tracker: the Kalman filter
+lags the walk around the corners, so the mean error is 0.31 m
+and the worst step 1.02 m.
+
 ## Measured accuracy (simulator, not the real world)
 
 Default ward walk, 2 dB RSSI noise: mean error about 2.2 m (1.8-2.6 m
@@ -729,5 +783,16 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   (v0.15.0); on the default ward walk the live track's mean error
   is 2.16 m, and 2.43 m with beacon D dropping out at step 20 —
   the tracker adds no error of its own.
-  The roadmap grows as new needs surface — live tracking is the
-  latest addition.
+- Live track accuracy report (score a recorded walk against
+  ground truth) — done: `evaluate_live_track` returns a
+  `TrackReport` with mean, median, 90th percentile and worst error
+  over the located steps, plus `coverage` (the located share of
+  the walk) and `floor_accuracy` on multi-floor walks, with a
+  `to_dict()` for dashboards and regression logs; empty walks,
+  length mismatches, and walks with nothing located raise instead
+  of reporting zeroes (v0.16.0); on the default ward walk, seed 7,
+  mean 2.16 m, median 2.08 m, p90 4.14 m, worst 6.70 m, coverage
+  1.0 — and a beacon dropout shows up in the error (mean 2.43 m)
+  rather than the coverage, which stays 1.0 on three beacons.
+  The roadmap grows as new needs surface — the accuracy report is
+  the latest addition.

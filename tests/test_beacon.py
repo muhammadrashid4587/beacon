@@ -32,6 +32,7 @@ from beacon import (
     DriftMonitor,
     estimate_floor,
     estimate_uncertainty,
+    evaluate_live_track,
     fit_path_loss,
     grid_points,
     healthy_beacons,
@@ -42,6 +43,7 @@ from beacon import (
     simulate_multifloor_walk,
     simulate_walk,
     Survey,
+    TrackReport,
     trilaterate,
     two_floor_walk,
 )
@@ -1828,6 +1830,122 @@ class TestLiveTracking(unittest.TestCase):
         records = [json.loads(line) for line in out.getvalue().splitlines()]
         self.assertEqual(len(records), 40)
         self.assertTrue(all(r["position"] is not None for r in records))
+
+
+class TestLiveTrackReport(unittest.TestCase):
+    def _track(self, steps, beacons=BEACONS):
+        tracker = LiveTracker(PositioningEngine(beacons))
+        return [tracker.feed(step["rssi"], float(i))
+                for i, step in enumerate(steps)]
+
+    def test_noiseless_walk_scores_near_zero_error(self):
+        steps = simulate_walk(rectangular_walk(20.0, 12.0, 10), BEACONS,
+                              noise_db=0.0, seed=7)
+        report = evaluate_live_track(self._track(steps),
+                                     [step["true"] for step in steps])
+        self.assertEqual(report.steps, 40)
+        self.assertEqual(report.located, 40)
+        self.assertEqual(report.coverage, 1.0)
+        # Noiseless RSSI, but the Kalman filter still lags the walk
+        # around the corners, so the live track is not exact even
+        # with perfect readings — mean 0.31 m, worst step 1.02 m.
+        self.assertLess(report.mean_error_m, 1.0)
+        self.assertLess(report.max_error_m, 1.5)
+        self.assertIsNone(report.floor_accuracy)
+
+    def test_noisy_walk_mean_error_matches_live_track(self):
+        steps = simulate_walk(rectangular_walk(20.0, 12.0, 10), BEACONS,
+                              noise_db=2.0, seed=7)
+        report = evaluate_live_track(self._track(steps),
+                                     [step["true"] for step in steps])
+        self.assertEqual(report.coverage, 1.0)
+        # The live track's mean error on the default ward walk is
+        # 2.16 m; the report must agree with the track it scores.
+        self.assertAlmostEqual(report.mean_error_m, 2.16, delta=0.05)
+        self.assertLessEqual(report.median_error_m, report.p90_error_m)
+        self.assertLessEqual(report.p90_error_m, report.max_error_m)
+        self.assertLess(report.mean_error_m, 4.0)
+
+    def test_beacon_dropout_shows_in_error_not_coverage(self):
+        steps = simulate_walk(rectangular_walk(20.0, 12.0, 10), BEACONS,
+                              noise_db=2.0, seed=7)
+        tracker = LiveTracker(PositioningEngine(BEACONS))
+        positions = []
+        for i, step in enumerate(steps):
+            rssi = dict(step["rssi"])
+            if i >= 20:
+                del rssi["D"]  # beacon D dies halfway through the walk
+            positions.append(tracker.feed(rssi, float(i)))
+        report = evaluate_live_track(
+            positions, [step["true"] for step in steps])
+        # Three beacons still locate, so coverage stays full — the
+        # dropout shows up as a worse mean error instead.
+        self.assertEqual(report.coverage, 1.0)
+        self.assertGreater(report.mean_error_m, 2.16)
+
+    def test_starved_steps_lower_coverage(self):
+        steps = simulate_walk(rectangular_walk(20.0, 12.0, 10), BEACONS,
+                              noise_db=2.0, seed=7)
+        tracker = LiveTracker(PositioningEngine(BEACONS))
+        positions = []
+        for i, step in enumerate(steps):
+            # Only two beacons heard for the second half: the track
+            # starves and those steps produce no position at all —
+            # except the first five, where C and D are still inside
+            # the 5 s stale window and keep the track alive.
+            rssi = (step["rssi"] if i < 20
+                    else {"A": step["rssi"]["A"], "B": step["rssi"]["B"]})
+            positions.append(tracker.feed(rssi, float(i)))
+        report = evaluate_live_track(
+            positions, [step["true"] for step in steps])
+        self.assertEqual(report.steps, 40)
+        self.assertEqual(report.located, 25)
+        self.assertEqual(report.coverage, 0.625)
+
+    def test_two_floor_walk_scores_floor_accuracy(self):
+        beacons = [Beacon("A", 0.0, 0.0, floor=0),
+                   Beacon("B", 20.0, 0.0, floor=0),
+                   Beacon("C", 20.0, 12.0, floor=0),
+                   Beacon("D", 0.0, 12.0, floor=0),
+                   Beacon("E", 0.0, 0.0, floor=1),
+                   Beacon("F", 20.0, 0.0, floor=1),
+                   Beacon("G", 20.0, 12.0, floor=1),
+                   Beacon("H", 0.0, 12.0, floor=1)]
+        steps = simulate_multifloor_walk(
+            two_floor_walk(20.0, 12.0, 10), beacons,
+            noise_db=2.0, seed=7)
+        report = evaluate_live_track(self._track(steps, beacons),
+                                     [step["true"] for step in steps])
+        self.assertEqual(report.floor_accuracy, 1.0)
+        self.assertLess(report.mean_error_m, 4.0)
+
+    def test_report_serialises_to_json(self):
+        steps = simulate_walk(rectangular_walk(20.0, 12.0, 10), BEACONS,
+                              noise_db=2.0, seed=7)
+        report = evaluate_live_track(self._track(steps),
+                                     [step["true"] for step in steps])
+        record = json.loads(json.dumps(report.to_dict()))
+        self.assertEqual(record["steps"], 40)
+        self.assertEqual(record["located"], 40)
+        self.assertEqual(record["coverage"], 1.0)
+        self.assertIsNone(record["floor_accuracy"])
+        self.assertAlmostEqual(record["mean_error_m"],
+                               report.mean_error_m)
+
+    def test_bad_inputs_raise(self):
+        steps = simulate_walk(rectangular_walk(20.0, 12.0, 10), BEACONS,
+                              noise_db=2.0, seed=7)
+        truth = [step["true"] for step in steps]
+        positions = self._track(steps)
+        with self.assertRaises(ValueError):
+            evaluate_live_track([], [])
+        with self.assertRaises(ValueError):
+            evaluate_live_track(positions, truth[:-1])
+        with self.assertRaises(ValueError):
+            evaluate_live_track(
+                positions, truth[:-1] + [(0.0, 0.0, 0)])
+        with self.assertRaises(ValueError):
+            evaluate_live_track([None] * len(truth), truth)
 
 
 if __name__ == "__main__":

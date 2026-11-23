@@ -36,6 +36,8 @@ instead, so the mode can be tried with no scanner at all.
 
 import argparse
 import json
+import math
+import statistics
 import sys
 from dataclasses import dataclass
 
@@ -192,6 +194,102 @@ class LiveTracker:
         self._last_t = None
         self._last = None
         self.engine.reset()
+
+
+@dataclass(frozen=True)
+class TrackReport:
+    """How a live track scored against ground truth.
+
+    ``steps`` is how many ground-truth steps were scored,
+    ``located`` how many of them produced a live position, and
+    ``coverage`` is ``located / steps`` — the share of the walk the
+    tracker actually located, so a track starved by dead beacons
+    shows up as low coverage rather than silently short. The error
+    figures are the Euclidean distance between the live position
+    and the true position, over the located steps only: mean,
+    median, 90th percentile, and worst step. ``floor_accuracy`` is
+    the share of located steps whose floor was right, or None when
+    the ground truth carries no floors.
+    """
+
+    steps: int
+    located: int
+    coverage: float
+    mean_error_m: float
+    median_error_m: float
+    p90_error_m: float
+    max_error_m: float
+    floor_accuracy: float | None
+
+    def to_dict(self) -> dict:
+        """JSON-friendly form, for dashboards and regression logs."""
+        return {
+            "steps": self.steps,
+            "located": self.located,
+            "coverage": self.coverage,
+            "mean_error_m": self.mean_error_m,
+            "median_error_m": self.median_error_m,
+            "p90_error_m": self.p90_error_m,
+            "max_error_m": self.max_error_m,
+            "floor_accuracy": self.floor_accuracy,
+        }
+
+
+def evaluate_live_track(
+        positions: list[LivePosition | None],
+        truth: list[tuple[float, float] | tuple[float, float, int]]
+        ) -> TrackReport:
+    """Score a live track against ground truth, step by step.
+
+    ``positions`` is the track — one ``LivePosition`` (or None, for
+    a step too thin to locate) per step, in order — and ``truth``
+    is the matching ground truth, one ``(x, y)`` per step, or
+    ``(x, y, floor)`` when the walk changes floor. The two lists
+    must be the same length: feed a recorded walk through a
+    ``LiveTracker`` step by step and collect the positions it
+    returns, in the same order as the walk's steps.
+
+    Raises ValueError on an empty walk, on mismatched lengths, on
+    truth entries that mix two- and three-tuples, or when no step
+    was located at all — with no located steps there is no error
+    to summarise, and a report of zeroes would hide the failure.
+    """
+    if not truth:
+        raise ValueError("cannot score an empty walk")
+    if len(positions) != len(truth):
+        raise ValueError(
+            f"positions ({len(positions)}) and truth ({len(truth)}) "
+            "must have the same length")
+    has_floor = [len(point) == 3 for point in truth]
+    if any(has_floor) and not all(has_floor):
+        raise ValueError(
+            "truth must be all (x, y) or all (x, y, floor), not mixed")
+    errors: list[float] = []
+    floors_right = 0
+    located = 0
+    for position, point in zip(positions, truth):
+        if position is None:
+            continue
+        located += 1
+        errors.append(math.hypot(position.x - point[0],
+                                 position.y - point[1]))
+        if len(point) == 3 and position.floor == point[2]:
+            floors_right += 1
+    if not errors:
+        raise ValueError("no step was located, nothing to score")
+    errors.sort()
+    p90_index = max(0, math.ceil(0.9 * len(errors)) - 1)
+    return TrackReport(
+        steps=len(truth),
+        located=located,
+        coverage=located / len(truth),
+        mean_error_m=statistics.fmean(errors),
+        median_error_m=statistics.median(errors),
+        p90_error_m=errors[p90_index],
+        max_error_m=errors[-1],
+        floor_accuracy=(floors_right / located
+                        if all(has_floor) else None),
+    )
 
 
 def parse_line(line: str) -> tuple[float, dict[str, float]]:
