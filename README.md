@@ -80,6 +80,11 @@ library, no dependencies, no BLE hardware needed.
   ground truth — mean, median, 90th percentile and worst error,
   plus coverage (how much of the walk was actually located) and
   floor accuracy on multi-floor walks.
+- A live track export: save a recorded track as JSON or CSV for a
+  ward dashboard — one row per located position with the
+  timestamp, the position, the floor, the 95% confidence ellipse,
+  the beacons used, the beacons excluded, and the track's
+  coverage — so the track survives the run that produced it.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -714,6 +719,58 @@ walk is not exact through the live tracker: the Kalman filter
 lags the walk around the corners, so the mean error is 0.31 m
 and the worst step 1.02 m.
 
+## Live track export
+
+A live track is only useful while the dashboard is watching it.
+A ward that wants the track afterwards — to replay a shift, to
+audit where a device went, to feed a dashboard that was not
+running at the time — needs the track as a file. `track_rows`
+turns a recorded track into one row per located position, and
+`export_track_json` / `export_track_csv` save it:
+
+```python
+from beacon import LiveTracker, PositioningEngine, export_track_csv
+from beacon.simulate import rectangular_walk, simulate_walk
+
+beacons = [Beacon("A", 0, 0), Beacon("B", 20, 0),
+           Beacon("C", 20, 12), Beacon("D", 0, 12)]
+steps = simulate_walk(rectangular_walk(20, 12, 10), beacons,
+                      noise_db=2.0, seed=7)
+tracker = LiveTracker(PositioningEngine(beacons))
+positions = [tracker.feed(step["rssi"], float(i))
+             for i, step in enumerate(steps)]
+export_track_csv(positions, "ward-a-track.csv")
+```
+
+Each row carries the timestamp, the (x, y) in metres, the floor
+and its confidence, the 95% confidence ellipse (semi-major,
+semi-minor, angle — empty when the step's geometry was
+degenerate), the beacons the estimate was built from, the
+beacons excluded as dark with their reasons, and the track's
+overall coverage — the located share of the walk, the same on
+every row. Steps that produced no position are not rows, since
+there is no position to write, but they are counted in the
+coverage, so a starved track never pretends it was complete;
+the JSON file's header carries the step counts and the coverage
+too. Both formats round-trip: `load_track_json` /
+`load_track_csv` read back exactly the rows `track_rows`
+produced, so an export can be verified by loading it again.
+`examples/live-track-export.json` and
+`examples/live-track-export.csv` are the default demo walk
+exported both ways. The CLI saves the track the same way:
+
+```sh
+python3 -m beacon.tracking --demo --export-csv ward-a-track.csv
+python3 -m beacon.tracking < readings.jsonl --export-json track.json
+```
+
+Measured behaviour (simulator, 2 dB RSSI noise, default ward
+walk, seed 7): the demo export is 40 rows over 40 steps,
+coverage 1.0, and the JSON and CSV exports load back to
+identical rows. With beacon D dying at step 20 the rows from
+step 30 run on three beacons and record D excluded with its
+reason, while the coverage stays 1.0.
+
 ## Measured accuracy (simulator, not the real world)
 
 Default ward walk, 2 dB RSSI noise: mean error about 2.2 m (1.8-2.6 m
@@ -884,5 +941,19 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   re-admits at step 37 — the track keeps coverage 1.0 at 2.31 m
   mean error (median 2.13 m, 90th percentile 4.14 m, worst step
   6.70 m).
-  The roadmap grows as new needs surface — re-admission is the
-  latest addition.
+- Live track export (save a recorded track for a ward dashboard)
+  — done: `track_rows` turns a recorded track into one row per
+  located position (timestamp, x, y, floor, confidence ellipse,
+  beacons used, beacons excluded, track coverage), and
+  `export_track_json` / `export_track_csv` save it, with
+  `load_track_json` / `load_track_csv` reading back exactly the
+  same rows; `python -m beacon.tracking` takes `--export-json`
+  and `--export-csv` in both demo and stream mode, and
+  `examples/live-track-export.json` / `.csv` are the default
+  demo walk exported both ways (v0.19.0); on the default ward
+  walk, seed 7, the export is 40 rows over 40 steps at coverage
+  1.0, and with beacon D dying at step 20 the rows from step 30
+  run on three beacons and record D excluded — steps that
+  produced no position are counted in the coverage, not hidden.
+  The roadmap grows as new needs surface — live track export is
+  the latest addition.

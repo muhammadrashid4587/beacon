@@ -20,12 +20,15 @@ from .placement import (LayoutScore, PlacementAdvice, advise_placement,
 from .rssi import distance_to_rssi, rssi_to_distance
 from .simulate import simulate_multifloor_walk, simulate_walk, two_floor_walk
 from .survey import Survey
+from .export import (export_track_csv, export_track_json,
+                     load_track_csv, load_track_json, track_from_dict,
+                     track_rows, track_to_dict)
 from .tracking import (ExcludedBeacon, LivePosition, LiveTracker,
                        TrackReport, evaluate_live_track)
 from .trilateration import trilaterate
 from .uncertainty import PositionUncertainty, estimate_uncertainty
 
-__version__ = "0.18.0"
+__version__ = "0.19.0"
 
 __all__ = [
     "Beacon",
@@ -59,6 +62,13 @@ __all__ = [
     "LiveTracker",
     "TrackReport",
     "evaluate_live_track",
+    "export_track_csv",
+    "export_track_json",
+    "load_track_csv",
+    "load_track_json",
+    "track_from_dict",
+    "track_rows",
+    "track_to_dict",
     "trilaterate",
     "PositionUncertainty",
     "estimate_uncertainty",

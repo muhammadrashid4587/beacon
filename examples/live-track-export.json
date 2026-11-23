@@ -1,0 +1,729 @@
+{
+  "format": "beacon-live-track",
+  "version": 1,
+  "steps": 40,
+  "located": 40,
+  "coverage": 1.0,
+  "rows": [
+    {
+      "t": 0.0,
+      "x": 2.847920732655559,
+      "y": 0.7045815376128562,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 5.989824058647372,
+      "ellipse_semi_minor_m": 1.650839771664443,
+      "ellipse_angle_deg": -76.31971712650804,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 1.0,
+      "x": 4.681128364329712,
+      "y": 4.2815102830408005,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 4.925302100042,
+      "ellipse_semi_minor_m": 2.688863781574093,
+      "ellipse_angle_deg": -48.616711780078624,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 2.0,
+      "x": 5.629255555629142,
+      "y": 3.3567861111354453,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 5.632647618634852,
+      "ellipse_semi_minor_m": 2.3147331195106355,
+      "ellipse_angle_deg": -68.73705638364004,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 3.0,
+      "x": 8.227245353280884,
+      "y": 4.17072893756946,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 6.3287929245918315,
+      "ellipse_semi_minor_m": 3.729404100292343,
+      "ellipse_angle_deg": 85.196149574136,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 4.0,
+      "x": 8.254578436891213,
+      "y": -0.26916611772785526,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 7.319060354941912,
+      "ellipse_semi_minor_m": 5.370141127215768,
+      "ellipse_angle_deg": 64.05439605841616,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 5.0,
+      "x": 10.121236859901034,
+      "y": 0.25912751376602183,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 7.439048428038912,
+      "ellipse_semi_minor_m": 3.5775446864902687,
+      "ellipse_angle_deg": -85.8983956602835,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 6.0,
+      "x": 10.538204829654944,
+      "y": 1.7054751086155,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 6.566416485043211,
+      "ellipse_semi_minor_m": 3.2133962291670475,
+      "ellipse_angle_deg": 78.13000339856832,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 7.0,
+      "x": 12.694749396607563,
+      "y": 0.3845676828066167,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 7.692284944700468,
+      "ellipse_semi_minor_m": 2.682050863338778,
+      "ellipse_angle_deg": -82.75610446140573,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 8.0,
+      "x": 14.796972849931016,
+      "y": 2.023447439864885,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 4.995669317362107,
+      "ellipse_semi_minor_m": 2.9778413830070107,
+      "ellipse_angle_deg": 53.67307013148905,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 9.0,
+      "x": 15.723489422249486,
+      "y": 2.8603208861282026,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 6.147041915066911,
+      "ellipse_semi_minor_m": 2.679382111338995,
+      "ellipse_angle_deg": 58.853046834964815,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 10.0,
+      "x": 20.536017995030946,
+      "y": 2.29395359533994,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 5.047053818074948,
+      "ellipse_semi_minor_m": 1.4933289784089225,
+      "ellipse_angle_deg": -68.23722384063394,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 11.0,
+      "x": 20.184781470794928,
+      "y": 0.012846720286810331,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 7.589764992723183,
+      "ellipse_semi_minor_m": 1.4166484695625055,
+      "ellipse_angle_deg": -50.05807408464273,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 12.0,
+      "x": 19.92269894854194,
+      "y": 2.101869760044563,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 6.345126445497017,
+      "ellipse_semi_minor_m": 2.409025038867605,
+      "ellipse_angle_deg": 11.788620405572836,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 13.0,
+      "x": 20.317376630171914,
+      "y": 4.428627578422043,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 7.912830042736089,
+      "ellipse_semi_minor_m": 1.9311481207352572,
+      "ellipse_angle_deg": 0.7075906288789772,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 14.0,
+      "x": 19.421884801608087,
+      "y": 4.223345001836847,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 4.890402099772869,
+      "ellipse_semi_minor_m": 2.452084867285487,
+      "ellipse_angle_deg": 18.962365822765836,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 15.0,
+      "x": 19.732268870450298,
+      "y": 4.880674191742202,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 8.089104189571922,
+      "ellipse_semi_minor_m": 2.8342147777305855,
+      "ellipse_angle_deg": -0.5274161615031774,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 16.0,
+      "x": 22.687898339865708,
+      "y": 6.397866129157639,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 4.347688059753662,
+      "ellipse_semi_minor_m": 2.3017624512888353,
+      "ellipse_angle_deg": 44.40587952117092,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 17.0,
+      "x": 22.059069649055278,
+      "y": 8.42038718761281,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 7.54472402090939,
+      "ellipse_semi_minor_m": 1.7746867619987399,
+      "ellipse_angle_deg": 8.495580826734512,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 18.0,
+      "x": 22.847058553364928,
+      "y": 13.022639801121617,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 12.72813836677001,
+      "ellipse_semi_minor_m": 2.058951450915999,
+      "ellipse_angle_deg": -39.37007403295317,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 19.0,
+      "x": 21.878222411122554,
+      "y": 12.232251061534333,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 7.645994638075861,
+      "ellipse_semi_minor_m": 1.421268284474053,
+      "ellipse_angle_deg": 10.57499328926476,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 20.0,
+      "x": 19.23960533517489,
+      "y": 11.536610982178233,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 5.064685655530963,
+      "ellipse_semi_minor_m": 1.0917356265187999,
+      "ellipse_angle_deg": -54.01120055886634,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 21.0,
+      "x": 15.894858533061704,
+      "y": 10.314396919012562,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 4.905628385710841,
+      "ellipse_semi_minor_m": 2.934670377602225,
+      "ellipse_angle_deg": -73.16157728140011,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 22.0,
+      "x": 13.930725335985924,
+      "y": 7.72804820245618,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 5.12633210104285,
+      "ellipse_semi_minor_m": 4.072212527417265,
+      "ellipse_angle_deg": -73.46913927491023,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 23.0,
+      "x": 10.94186485123394,
+      "y": 9.78981595227967,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 7.908468942183507,
+      "ellipse_semi_minor_m": 3.2258161682263378,
+      "ellipse_angle_deg": -88.24002725118874,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 24.0,
+      "x": 11.802061460513006,
+      "y": 9.666366302652943,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 4.944695490291105,
+      "ellipse_semi_minor_m": 3.5173107889281185,
+      "ellipse_angle_deg": -84.90210225819311,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 25.0,
+      "x": 10.086094453095445,
+      "y": 9.262079540784988,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 6.442056958339281,
+      "ellipse_semi_minor_m": 3.1826915912618308,
+      "ellipse_angle_deg": 84.07391896631567,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 26.0,
+      "x": 9.095461677457118,
+      "y": 10.928999310492364,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 8.11184081252889,
+      "ellipse_semi_minor_m": 3.352772017586764,
+      "ellipse_angle_deg": -88.8046109801274,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 27.0,
+      "x": 8.92918279450735,
+      "y": 10.875483387403165,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 7.334555110573599,
+      "ellipse_semi_minor_m": 3.1740752033037163,
+      "ellipse_angle_deg": 86.72931391965125,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 28.0,
+      "x": 6.8501477304654665,
+      "y": 12.47339452327871,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 7.779652723971262,
+      "ellipse_semi_minor_m": 3.050313683338249,
+      "ellipse_angle_deg": -76.54553020310928,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 29.0,
+      "x": 4.436764438257741,
+      "y": 11.347352787853023,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 4.107706417537016,
+      "ellipse_semi_minor_m": 2.846766495435257,
+      "ellipse_angle_deg": 55.946058087820795,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 30.0,
+      "x": 3.773846171517916,
+      "y": 11.25585361031519,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 6.615115728749497,
+      "ellipse_semi_minor_m": 1.2816487023090006,
+      "ellipse_angle_deg": 79.83018170344002,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 31.0,
+      "x": 2.3717071260750338,
+      "y": 10.01325171292375,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 5.370472797921532,
+      "ellipse_semi_minor_m": 1.6397285784857287,
+      "ellipse_angle_deg": 35.09946097583013,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 32.0,
+      "x": 2.407187337161931,
+      "y": 9.164501487902331,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 4.849465987758897,
+      "ellipse_semi_minor_m": 2.2176225063790005,
+      "ellipse_angle_deg": 47.01565143901321,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 33.0,
+      "x": 3.5629208413995386,
+      "y": 8.216245830489006,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 3.398059019886558,
+      "ellipse_semi_minor_m": 2.3820490900381444,
+      "ellipse_angle_deg": 56.455154896832155,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 34.0,
+      "x": 2.2349737272011723,
+      "y": 7.68104364277638,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 6.960483448920422,
+      "ellipse_semi_minor_m": 2.224393815130703,
+      "ellipse_angle_deg": 10.917900353260789,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 35.0,
+      "x": 4.296052908913734,
+      "y": 5.958574263152085,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 5.7242381463000696,
+      "ellipse_semi_minor_m": 3.299190645087721,
+      "ellipse_angle_deg": -61.84428401996209,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 36.0,
+      "x": 4.045008326359523,
+      "y": 5.6475839694233745,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 4.478149643559522,
+      "ellipse_semi_minor_m": 3.150155128418506,
+      "ellipse_angle_deg": 6.386638116481531,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 37.0,
+      "x": 4.103815732128879,
+      "y": 4.230616879718735,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 4.680643049104252,
+      "ellipse_semi_minor_m": 2.8090838013119908,
+      "ellipse_angle_deg": -44.99239048489135,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 38.0,
+      "x": 2.7375891993249692,
+      "y": 2.6139024743262036,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 5.910441452767747,
+      "ellipse_semi_minor_m": 1.2939162130432487,
+      "ellipse_angle_deg": -33.67511204212051,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    },
+    {
+      "t": 39.0,
+      "x": -1.417610705902185,
+      "y": -0.4069153719901297,
+      "floor": 0,
+      "floor_confidence": 1.0,
+      "ellipse_semi_major_m": 7.721466433792488,
+      "ellipse_semi_minor_m": 1.9511217704818702,
+      "ellipse_angle_deg": -64.70930608975745,
+      "beacons_used": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ],
+      "beacons_excluded": [],
+      "coverage": 1.0
+    }
+  ]
+}

@@ -34,9 +34,13 @@ from beacon import (
     estimate_floor,
     estimate_uncertainty,
     evaluate_live_track,
+    export_track_csv,
+    export_track_json,
     fit_path_loss,
     grid_points,
     healthy_beacons,
+    load_track_csv,
+    load_track_json,
     placement_uncertainty,
     PositionUncertainty,
     rssi_to_distance,
@@ -44,6 +48,7 @@ from beacon import (
     simulate_multifloor_walk,
     simulate_walk,
     Survey,
+    track_rows,
     TrackReport,
     trilaterate,
     two_floor_walk,
@@ -2142,6 +2147,170 @@ class TestLiveTrackReport(unittest.TestCase):
                 positions, truth[:-1] + [(0.0, 0.0, 0)])
         with self.assertRaises(ValueError):
             evaluate_live_track([None] * len(truth), truth)
+
+
+class TestLiveTrackExport(unittest.TestCase):
+    def _track(self, die_at=None, seed=7):
+        """Feed the default walk through the tracker; beacon D
+        dies at step ``die_at`` when given. Returns the recorded
+        positions (one per step, None where a step was too thin
+        to locate)."""
+        steps = simulate_walk(rectangular_walk(20.0, 12.0, 10), BEACONS,
+                              noise_db=2.0, seed=seed)
+        tracker = LiveTracker(PositioningEngine(BEACONS))
+        positions = []
+        for i, step in enumerate(steps):
+            rssi = dict(step["rssi"])
+            if die_at is not None and i >= die_at:
+                del rssi["D"]
+            positions.append(tracker.feed(rssi, float(i)))
+        return positions
+
+    def test_row_carries_everything_a_dashboard_needs(self):
+        rows = track_rows(self._track())
+        self.assertEqual(len(rows), 40)
+        row = rows[0]
+        self.assertEqual(row["t"], 0.0)
+        self.assertEqual(row["floor"], 0)
+        self.assertGreater(row["floor_confidence"], 0.0)
+        self.assertGreater(row["ellipse_semi_major_m"], 0.0)
+        self.assertGreaterEqual(row["ellipse_semi_major_m"],
+                                row["ellipse_semi_minor_m"])
+        self.assertGreater(row["ellipse_semi_minor_m"], 0.0)
+        self.assertGreaterEqual(row["ellipse_angle_deg"], -90.0)
+        self.assertLessEqual(row["ellipse_angle_deg"], 90.0)
+        self.assertEqual(row["beacons_used"], ["A", "B", "C", "D"])
+        self.assertEqual(row["beacons_excluded"], [])
+        self.assertEqual(row["coverage"], 1.0)
+
+    def test_json_round_trip_is_lossless(self):
+        positions = self._track(die_at=20)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "track.json")
+            export_track_json(positions, path)
+            loaded = load_track_json(path)
+            # The file header says what the track was: 40 steps, all
+            # located, coverage 1.0 even though a beacon died.
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        self.assertEqual(loaded, track_rows(positions))
+        self.assertEqual(data["format"], "beacon-live-track")
+        self.assertEqual(data["steps"], 40)
+        self.assertEqual(data["located"], 40)
+        self.assertEqual(data["coverage"], 1.0)
+
+    def test_csv_round_trip_matches_json_rows(self):
+        positions = self._track(die_at=20)
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "track.json")
+            csv_path = os.path.join(tmp, "track.csv")
+            export_track_json(positions, json_path)
+            export_track_csv(positions, csv_path)
+            self.assertEqual(load_track_csv(csv_path),
+                             load_track_json(json_path))
+            with open(csv_path, encoding="utf-8") as handle:
+                header = handle.readline().strip()
+        self.assertEqual(header, "t,x,y,floor,floor_confidence,"
+                                 "ellipse_semi_major_m,"
+                                 "ellipse_semi_minor_m,"
+                                 "ellipse_angle_deg,beacons_used,"
+                                 "beacons_excluded,coverage")
+
+    def test_dropout_shows_in_beacons_used_and_excluded(self):
+        rows = track_rows(self._track(die_at=20))
+        # Before D dies, the rows run on all four beacons.
+        early = rows[15]
+        self.assertEqual(early["beacons_used"], ["A", "B", "C", "D"])
+        self.assertEqual(early["beacons_excluded"], [])
+        # D is last heard at step 19 and ages out of the merged
+        # set after the 5 s stale window, so from step 25 the rows
+        # run on three beacons — but D is not called dark until
+        # the 10 s window passes, so no exclusion is recorded yet.
+        mid = rows[25]
+        self.assertEqual(mid["beacons_used"], ["A", "B", "C"])
+        self.assertEqual(mid["beacons_excluded"], [])
+        # From step 30 D is recorded excluded, with why.
+        late = rows[35]
+        self.assertEqual(late["beacons_used"], ["A", "B", "C"])
+        self.assertEqual(len(late["beacons_excluded"]), 1)
+        self.assertEqual(late["beacons_excluded"][0]["id"], "D")
+        self.assertIn("no reading for", late["beacons_excluded"][0]["reason"])
+
+    def test_starved_steps_are_counted_not_hidden(self):
+        # Two beacons only: nothing locates, so there are no rows
+        # but the coverage still says so.
+        steps = simulate_walk(rectangular_walk(20.0, 12.0, 10), BEACONS,
+                              noise_db=2.0, seed=7)
+        tracker = LiveTracker(PositioningEngine(BEACONS))
+        positions = [tracker.feed({"A": step["rssi"]["A"],
+                                   "B": step["rssi"]["B"]}, float(i))
+                      for i, step in enumerate(steps)]
+        self.assertEqual(track_rows(positions), [])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "track.json")
+            export_track_json(positions, path)
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        self.assertEqual(data["steps"], 40)
+        self.assertEqual(data["located"], 0)
+        self.assertEqual(data["coverage"], 0.0)
+
+    def test_row_without_an_ellipse_round_trips(self):
+        # A step whose geometry was degenerate carries no ellipse;
+        # the export keeps the ellipse fields empty, not made up.
+        position = LivePosition(t=0.0, x=10.0, y=6.0, floor=0,
+                                floor_confidence=1.0, uncertainty=None,
+                                heard=("A", "B", "C"), excluded=())
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "track.json")
+            csv_path = os.path.join(tmp, "track.csv")
+            export_track_json([position], json_path)
+            export_track_csv([position], csv_path)
+            rows = load_track_json(json_path)
+            self.assertEqual(load_track_csv(csv_path), rows)
+        self.assertIsNone(rows[0]["ellipse_semi_major_m"])
+        self.assertIsNone(rows[0]["ellipse_semi_minor_m"])
+        self.assertIsNone(rows[0]["ellipse_angle_deg"])
+
+    def test_bad_inputs_raise(self):
+        with self.assertRaises(ValueError):
+            track_rows([])
+        with self.assertRaises(FileNotFoundError):
+            load_track_json("/nonexistent/track.json")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "track.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump({"format": "not-a-track", "version": 1,
+                           "rows": []}, handle)
+            with self.assertRaises(ValueError):
+                load_track_json(path)
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump({"format": "beacon-live-track", "version": 99,
+                           "rows": []}, handle)
+            with self.assertRaises(ValueError):
+                load_track_json(path)
+            csv_path = os.path.join(tmp, "track.csv")
+            with open(csv_path, "w", encoding="utf-8") as handle:
+                handle.write("t,x\n0.0,1.0\n")
+            with self.assertRaises(ValueError):
+                load_track_csv(csv_path)
+
+    def test_cli_demo_exports_json_and_csv(self):
+        import io
+
+        from beacon.tracking import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "track.json")
+            csv_path = os.path.join(tmp, "track.csv")
+            out = io.StringIO()
+            self.assertEqual(main(argv=["--demo",
+                                        "--export-json", json_path,
+                                        "--export-csv", csv_path],
+                                  output_stream=out), 0)
+            self.assertEqual(len(load_track_json(json_path)), 40)
+            self.assertEqual(load_track_csv(csv_path),
+                             load_track_json(json_path))
 
 
 if __name__ == "__main__":

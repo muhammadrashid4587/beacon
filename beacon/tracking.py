@@ -501,9 +501,10 @@ def default_beacons() -> list[Beacon]:
 
 def run_demo(stale_after: float, dark_after: float,
              readmit_after: int,
-             sigma_rssi_db: float, output_stream) -> int:
+             sigma_rssi_db: float, output_stream) -> list[LivePosition | None]:
     """Feed a simulated ward walk through the tracker at 1 Hz and
-    print one JSON line per step — the mode with no scanner needed."""
+    print one JSON line per step — the mode with no scanner needed.
+    Returns the recorded track, so the caller can export it."""
     beacons = default_beacons()
     steps = simulate_walk(rectangular_walk(20.0, 12.0, 10), beacons,
                           noise_db=2.0, seed=7)
@@ -512,13 +513,15 @@ def run_demo(stale_after: float, dark_after: float,
                           dark_after=dark_after,
                           readmit_after=readmit_after,
                           sigma_rssi_db=sigma_rssi_db)
+    positions: list[LivePosition | None] = []
     for i, step in enumerate(steps):
         t = float(i)
         position = tracker.feed(step["rssi"], t)
+        positions.append(position)
         print(json.dumps(format_output(t, position, tracker.heard,
                                       tracker.excluded)),
               file=output_stream)
-    return 0
+    return positions
 
 
 def main(argv=None, input_stream=None, output_stream=None) -> int:
@@ -528,8 +531,11 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
     ``--demo`` runs a simulated walk instead of reading stdin.
     ``--stale-after`` (seconds), ``--dark-after`` (seconds),
     ``--readmit-after`` (readings) and ``--sigma-rssi`` (dB) tune
-    the tracker. ``input_stream`` / ``output_stream`` exist so tests can
-    drive the stream without touching sys.stdin / sys.stdout.
+    the tracker. ``--export-json`` / ``--export-csv`` save the
+    recorded track (one row per located position) to a file a
+    ward dashboard can consume, in either mode. ``input_stream``
+    / ``output_stream`` exist so tests can drive the stream
+    without touching sys.stdin / sys.stdout.
     """
     parser = argparse.ArgumentParser(
         description="Live BLE indoor-positioning tracker: read RSSI "
@@ -554,6 +560,12 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                         default=DEFAULT_SIGMA_RSSI_DB,
                         help="assumed RSSI noise in dB for the confidence "
                         f"ellipse (default: {DEFAULT_SIGMA_RSSI_DB})")
+    parser.add_argument("--export-json", default=None, metavar="PATH",
+                        help="save the recorded track as JSON to PATH "
+                        "(one row per located position)")
+    parser.add_argument("--export-csv", default=None, metavar="PATH",
+                        help="save the recorded track as CSV to PATH "
+                        "(one row per located position)")
     args = parser.parse_args(argv)
     if args.stale_after <= 0:
         parser.error("--stale-after must be positive")
@@ -567,9 +579,11 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
         parser.error("--sigma-rssi must be positive")
 
     if args.demo:
-        return run_demo(args.stale_after, args.dark_after,
-                        args.readmit_after, args.sigma_rssi,
-                        output_stream or sys.stdout)
+        positions = run_demo(args.stale_after, args.dark_after,
+                             args.readmit_after, args.sigma_rssi,
+                             output_stream or sys.stdout)
+        _export_track(positions, args.export_json, args.export_csv)
+        return 0
 
     tracker = LiveTracker(PositioningEngine(default_beacons()),
                           stale_after=args.stale_after,
@@ -578,15 +592,36 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                           sigma_rssi_db=args.sigma_rssi)
     source = input_stream if input_stream is not None else sys.stdin
     sink = output_stream if output_stream is not None else sys.stdout
+    positions = []
     for line in source:
         if not line.strip():
             continue
         t, rssi = parse_line(line)
         position = tracker.feed(rssi, t)
+        positions.append(position)
         print(json.dumps(format_output(t, position, tracker.heard,
                                        tracker.excluded)),
               file=sink)
+    _export_track(positions, args.export_json, args.export_csv)
     return 0
+
+
+def _export_track(positions: list[LivePosition | None],
+                  json_path: str | None, csv_path: str | None) -> None:
+    """Save a recorded track to the requested export files, if
+    any. A track with no steps (an empty stream) has nothing to
+    export, so the flags are quietly skipped rather than
+    failing a run that streamed nothing. The import is local:
+    ``beacon.export`` imports this module for ``LivePosition``,
+    so a top-level import here would be circular."""
+    from .export import export_track_csv, export_track_json
+
+    if not positions:
+        return
+    if json_path is not None:
+        export_track_json(positions, json_path)
+    if csv_path is not None:
+        export_track_csv(positions, csv_path)
 
 
 if __name__ == "__main__":
