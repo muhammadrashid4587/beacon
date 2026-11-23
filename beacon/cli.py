@@ -5,14 +5,17 @@ each corner, and a device walking a rectangular loop inside it.
 
 Usage:
     python -m beacon.cli [--steps 40] [--noise 2.0] [--seed 7]
+    python -m beacon.cli --map-overlay track.json [--map-output map.svg]
 """
 
 import argparse
 import math
 import statistics
+import sys
 
 from .beacon import Beacon
 from .engine import PositioningEngine
+from .map_overlay import load_track_for_overlay, render_map_overlay
 from .simulate import rectangular_walk, simulate_walk
 
 WARD_WIDTH_M = 20.0
@@ -29,7 +32,7 @@ def default_beacons() -> list[Beacon]:
     ]
 
 
-def main() -> int:
+def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Simulate a BLE indoor-positioning walk.")
     parser.add_argument("--steps", type=int, default=10,
@@ -42,7 +45,30 @@ def main() -> int:
                         default="kalman",
                         help="position filter (default: kalman; "
                         "moving_average is the pre-0.5.0 default)")
-    args = parser.parse_args()
+    parser.add_argument("--map-overlay", default=None, metavar="PATH",
+                        help="render a ward-map SVG overlay from an "
+                        "exported live track (.json or .csv) instead "
+                        "of simulating a walk")
+    parser.add_argument("--map-output", default=None, metavar="PATH",
+                        help="write the map overlay SVG here "
+                        "(default: print it to stdout)")
+    parser.add_argument("--map-floor", type=int, default=None,
+                        help="floor to plot on the overlay (default: "
+                        "the track's most common floor)")
+    args = parser.parse_args(argv)
+
+    if args.map_overlay is not None:
+        rows = load_track_for_overlay(args.map_overlay)
+        svg = render_map_overlay(rows, default_beacons(),
+                                 width_m=WARD_WIDTH_M,
+                                 height_m=WARD_HEIGHT_M,
+                                 floor=args.map_floor)
+        if args.map_output is not None:
+            with open(args.map_output, "w", encoding="utf-8") as handle:
+                handle.write(svg)
+        else:
+            sys.stdout.write(svg)
+        return 0
 
     path = rectangular_walk(WARD_WIDTH_M, WARD_HEIGHT_M, args.steps)
     steps = simulate_walk(path, default_beacons(), noise_db=args.noise,

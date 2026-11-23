@@ -85,6 +85,12 @@ library, no dependencies, no BLE hardware needed.
   timestamp, the position, the floor, the 95% confidence ellipse,
   the beacons used, the beacons excluded, and the track's
   coverage — so the track survives the run that produced it.
+- A ward-map overlay: plot an exported live track on the ward
+  plan as a self-contained SVG — ward outline, beacons at their
+  known positions, the track path with start and end markers,
+  and one 95% confidence ellipse per point, coloured by how wide
+  it is, with a legend — so a dashboard can show where the
+  device went and how much to trust each point.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -771,6 +777,45 @@ identical rows. With beacon D dying at step 20 the rows from
 step 30 run on three beacons and record D excluded with its
 reason, while the coverage stays 1.0.
 
+## Ward-map overlay
+
+An exported track is a table; a ward dashboard wants a picture.
+`render_map_overlay` plots the track on the ward plan as a
+self-contained SVG — no dependencies, no JavaScript, openable in
+a browser or embeddable in a dashboard:
+
+```python
+from beacon import load_track_json, render_map_overlay
+from beacon.cli import default_beacons
+
+rows = load_track_json("ward-a-track.json")
+svg = render_map_overlay(rows, default_beacons())
+open("ward-a-track.svg", "w").write(svg)
+```
+
+The SVG draws the ward outline with a 5 m grid, the beacons as
+labelled diamonds at their known positions, the track as a path
+through the located points with S (start) and E (end) markers,
+and one 95% confidence ellipse per point — coloured by how wide
+it is (green tight, semi-major ≤ 2 m; amber loose, ≤ 5 m; red
+very loose, above 5 m; grey where the geometry was degenerate
+and the point has no ellipse), with a legend explaining the
+colours. The header carries the floor, the point count and the
+coverage, so a thin track shows up as thin. A multi-floor track
+plots one floor only — the most common floor in the track by
+default, or the floor named with `floor=` — so two floors never
+land on top of each other. The CLI renders it directly:
+
+```sh
+python3 -m beacon.cli --map-overlay ward-a-track.json --map-output ward-a-track.svg
+python3 -m beacon.cli --map-overlay ward-a-track.csv --map-floor 1
+```
+
+Measured behaviour: the default demo export
+(`examples/live-track-export.json`, 40 rows, coverage 1.0)
+renders 40 track points, 40 ellipses, all four beacons, and the
+same SVG from the CSV export — JSON and CSV are the same track.
+
 ## Measured accuracy (simulator, not the real world)
 
 Default ward walk, 2 dB RSSI noise: mean error about 2.2 m (1.8-2.6 m
@@ -955,5 +1000,21 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   1.0, and with beacon D dying at step 20 the rows from step 30
   run on three beacons and record D excluded — steps that
   produced no position are counted in the coverage, not hidden.
-  The roadmap grows as new needs surface — live track export is
-  the latest addition.
+- Ward-map overlay (plot an exported live track on the ward plan)
+  — done: `render_map_overlay` renders an exported track as a
+  self-contained SVG — ward outline with a 5 m grid, beacons as
+  labelled diamonds, the track as a path with start and end
+  markers, and one 95% confidence ellipse per point, coloured by
+  its semi-major axis (green ≤ 2 m, amber ≤ 5 m, red above, grey
+  with no ellipse), with a legend and the floor, point count and
+  coverage in the header; a multi-floor track plots one floor
+  only, the most common by default or the floor named with
+  `floor=`; `load_track_for_overlay` reads a `.json` or `.csv`
+  export, `write_map_overlay` writes the SVG to a file, and
+  `python -m beacon.cli --map-overlay track.json
+  [--map-output map.svg] [--map-floor N]` renders it from the
+  command line (v0.20.0); on the default demo export (40 rows,
+  coverage 1.0) the overlay renders 40 points, 40 ellipses and
+  all four beacons, and the JSON and CSV exports render the
+  identical SVG. The roadmap grows as new needs surface — the
+  ward-map overlay is the latest addition.

@@ -40,9 +40,11 @@ from beacon import (
     grid_points,
     healthy_beacons,
     load_track_csv,
+    load_track_for_overlay,
     load_track_json,
     placement_uncertainty,
     PositionUncertainty,
+    render_map_overlay,
     rssi_to_distance,
     score_layout,
     simulate_multifloor_walk,
@@ -52,6 +54,7 @@ from beacon import (
     TrackReport,
     trilaterate,
     two_floor_walk,
+    write_map_overlay,
 )
 from beacon.simulate import rectangular_walk
 
@@ -2311,6 +2314,118 @@ class TestLiveTrackExport(unittest.TestCase):
             self.assertEqual(len(load_track_json(json_path)), 40)
             self.assertEqual(load_track_csv(csv_path),
                              load_track_json(json_path))
+
+
+class TestWardMapOverlay(unittest.TestCase):
+    def _example_rows(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        return load_track_json(
+            os.path.join(here, "..", "examples", "live-track-export.json"))
+
+    def _row(self, x, y, semi_major, floor=0, t=0.0):
+        return {
+            "t": t, "x": x, "y": y, "floor": floor,
+            "floor_confidence": 1.0,
+            "ellipse_semi_major_m": semi_major,
+            "ellipse_semi_minor_m": (semi_major or 1.0) / 2.0,
+            "ellipse_angle_deg": 30.0,
+            "beacons_used": ["A", "B", "C", "D"],
+            "beacons_excluded": [], "coverage": 1.0,
+        }
+
+    def test_example_export_renders_all_points_and_beacons(self):
+        rows = self._example_rows()
+        svg = render_map_overlay(rows, BEACONS)
+        self.assertIn("<svg", svg)
+        self.assertIn("</svg>", svg)
+        # One track point per located row, in order.
+        self.assertEqual(svg.count('data-index="'), len(rows))
+        self.assertEqual(svg.count("<ellipse"), len(rows))
+        # Every beacon is labelled on the plan.
+        for beacon in BEACONS:
+            self.assertIn(f'data-beacon="{beacon.id}"', svg)
+            self.assertIn(f">{beacon.id}</text>", svg)
+        # Start and end markers, and the legend.
+        self.assertIn(">S</text>", svg)
+        self.assertIn(">E</text>", svg)
+        self.assertIn("Legend", svg)
+        self.assertIn("floor 0", svg)
+        self.assertIn("40 points", svg)
+
+    def test_csv_export_renders_the_same_track(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        csv_rows = load_track_csv(
+            os.path.join(here, "..", "examples", "live-track-export.csv"))
+        json_svg = render_map_overlay(self._example_rows(), BEACONS)
+        csv_svg = render_map_overlay(csv_rows, BEACONS)
+        self.assertEqual(json_svg, csv_svg)
+
+    def test_confidence_colour_follows_ellipse_size(self):
+        rows = [
+            self._row(2.0, 2.0, 1.0, t=0.0),
+            self._row(5.0, 5.0, 3.0, t=1.0),
+            self._row(8.0, 8.0, 8.0, t=2.0),
+            self._row(11.0, 9.0, None, t=3.0),
+        ]
+        svg = render_map_overlay(rows, BEACONS)
+        # Tight, loose, very loose, and no-ellipse each get their
+        # own colour on the point markers.
+        for colour in ("#2e7d32", "#e6a817", "#c0392b", "#757575"):
+            self.assertIn(f'fill="{colour}"', svg)
+        # The point with no ellipse has a marker but no ellipse.
+        self.assertEqual(svg.count("<ellipse"), 3)
+        self.assertEqual(svg.count('data-index="'), 4)
+
+    def test_multi_floor_track_plots_one_floor_only(self):
+        rows = [self._row(2.0, 2.0, 1.0, floor=0, t=0.0),
+                self._row(3.0, 3.0, 1.0, floor=0, t=1.0),
+                self._row(15.0, 9.0, 1.0, floor=1, t=2.0)]
+        # Default floor is the most common one (floor 0).
+        svg = render_map_overlay(rows, BEACONS)
+        self.assertEqual(svg.count('data-index="'), 2)
+        self.assertIn("floor 0", svg)
+        svg = render_map_overlay(rows, BEACONS, floor=1)
+        self.assertEqual(svg.count('data-index="'), 1)
+        self.assertIn("floor 1", svg)
+
+    def test_bad_inputs_raise(self):
+        with self.assertRaises(ValueError):
+            render_map_overlay([], BEACONS)
+        with self.assertRaises(ValueError):
+            render_map_overlay([self._row(2.0, 2.0, 1.0)], [])
+        with self.assertRaises(ValueError):
+            render_map_overlay([self._row(2.0, 2.0, 1.0, floor=0)],
+                               BEACONS, floor=1)
+        with self.assertRaises(ValueError):
+            load_track_for_overlay("track.txt")
+        with self.assertRaises(FileNotFoundError):
+            load_track_for_overlay("missing.json")
+
+    def test_write_map_overlay_round_trips_through_the_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "map.svg")
+            svg = write_map_overlay(
+                os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "..", "examples", "live-track-export.json"),
+                BEACONS, out)
+            with open(out, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), svg)
+            self.assertEqual(svg.count('data-index="'), 40)
+
+    def test_cli_map_overlay_flag_writes_svg(self):
+        from beacon.cli import main
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        track = os.path.join(here, "..", "examples",
+                             "live-track-export.json")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "map.svg")
+            self.assertEqual(main(argv=["--map-overlay", track,
+                                       "--map-output", out]), 0)
+            with open(out, encoding="utf-8") as handle:
+                svg = handle.read()
+            self.assertIn("<svg", svg)
+            self.assertEqual(svg.count('data-index="'), 40)
 
 
 if __name__ == "__main__":
