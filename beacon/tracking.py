@@ -78,6 +78,12 @@ DEFAULT_READMIT_AFTER = 3
 # simulator's default noise and the engine's default.
 DEFAULT_SIGMA_RSSI_DB = 2.0
 
+# A beacon whose reported battery level is at or below this is
+# treated as dead from a drained cell, not just unheard — the
+# same level as ``BatteryModel``'s default cutoff, so the
+# exclusion reason can name the battery as the cause.
+BATTERY_EXHAUSTED_LEVEL = 0.05
+
 
 @dataclass(frozen=True)
 class ExcludedBeacon:
@@ -111,7 +117,11 @@ class LivePosition:
     is the beacons left out because they went dark mid-track, with
     the reason each was excluded — empty when no beacon is dark,
     so a dashboard can tell a three-beacon estimate from a
-    four-beacon one and why.
+    four-beacon one and why. ``battery`` is the battery level
+    reported for each beacon at this step (0 to 1), as
+    ``(id, level)`` pairs in id order — empty when the readings
+    carried no battery state, so a track without batteries is
+    unaffected.
     """
 
     t: float
@@ -122,6 +132,7 @@ class LivePosition:
     uncertainty: PositionUncertainty | None
     heard: tuple[str, ...]
     excluded: tuple[ExcludedBeacon, ...] = ()
+    battery: tuple[tuple[str, float], ...] = ()
 
     def to_dict(self) -> dict:
         """JSON-friendly form, for the stream output and dashboards."""
@@ -139,6 +150,8 @@ class LivePosition:
                 }),
             "heard": list(self.heard),
             "excluded": [b.to_dict() for b in self.excluded],
+            "battery": {beacon_id: level
+                        for beacon_id, level in self.battery},
         }
 
 
@@ -192,6 +205,11 @@ class LiveTracker:
         # after the reading ages out, so a beacon that goes quiet
         # can be recognised as dark rather than never-heard.
         self._seen: dict[str, float] = {}
+        # Beacon id -> last reported battery level (0 to 1), from
+        # the most recent reading that carried battery state.
+        # Empty when the readings carry none, so a track without
+        # batteries is unaffected.
+        self._battery: dict[str, float] = {}
         # Beacon id -> (consecutive readings that heard it since it
         # went dark, whether it has been heard at all since going
         # dark). A dark beacon leaves this dict — rejoins the
@@ -224,7 +242,13 @@ class LiveTracker:
         dashboard can see it coming back rather than vanishing
         from the list on a single stray scan. A beacon never
         heard is not excluded — there is nothing to fall back
-        from, it simply was never part of the track."""
+        from, it simply was never part of the track. When the
+        readings carry battery state and a dark beacon's last
+        reported level is at or below the exhausted level, the
+        reason names the battery as the cause ("battery exhausted
+        at 0.04 — ...") instead of only the silence, so a
+        dashboard can tell a beacon that died from a drained cell
+        from one that was shielded or unplugged."""
         excluded = []
         for beacon_id, (heard_again, ever_heard) in sorted(
                 self._dark.items()):
@@ -235,11 +259,16 @@ class LiveTracker:
                             f"{self._readmit_after} fresh readings "
                             "to re-admit")))
             else:
+                reason = (f"no reading for "
+                          f"{t - self._seen[beacon_id]:.1f}s "
+                          f"(dark after {self._dark_after:.1f}s)")
+                level = self._battery.get(beacon_id)
+                if (level is not None
+                        and level <= BATTERY_EXHAUSTED_LEVEL):
+                    reason = (f"battery exhausted at {level:.2f} — "
+                              f"{reason}")
                 excluded.append(ExcludedBeacon(
-                    id=beacon_id,
-                    reason=(f"no reading for "
-                            f"{t - self._seen[beacon_id]:.1f}s "
-                            f"(dark after {self._dark_after:.1f}s)")))
+                    id=beacon_id, reason=reason))
         return tuple(excluded)
 
     def _update_dark(self, heard_now: set[str], t: float) -> None:
@@ -280,15 +309,21 @@ class LiveTracker:
             return ()
         return self._excluded_at(self._last_t)
 
-    def feed(self, rssi: dict[str, float], t: float) -> LivePosition | None:
+    def feed(self, rssi: dict[str, float], t: float,
+             battery: dict[str, float] | None = None) -> LivePosition | None:
         """Feed one reading and return the live position it gives.
 
         ``rssi`` maps beacon id to RSSI in dBm (a partial scan is
         fine — only the beacons heard need be present), ``t`` is the
-        reading's timestamp in seconds. Unknown beacon ids are
-        ignored rather than failing the stream. Timestamps must not
-        go backwards: a reading older than the previous one is a
-        replayed or misordered scan, not a live one.
+        reading's timestamp in seconds. ``battery`` maps beacon id
+        to its reported battery level (0 to 1) at this reading,
+        when the readings carry battery state — the levels are
+        attached to the live position, and a beacon that goes dark
+        with an exhausted level is excluded with the battery named
+        as the cause. Unknown beacon ids are ignored rather than
+        failing the stream. Timestamps must not go backwards: a
+        reading older than the previous one is a replayed or
+        misordered scan, not a live one.
 
         Returns the live position, or None when fewer than three
         fresh beacons remain — trilateration needs three, and a
@@ -298,6 +333,10 @@ class LiveTracker:
             raise ValueError(
                 f"timestamps must not go backwards: {t} after {self._last_t}")
         self._last_t = t
+        if battery is not None:
+            for beacon_id, level in battery.items():
+                if beacon_id in self.engine.beacons:
+                    self._battery[beacon_id] = level
         heard_now = set()
         for beacon_id, value in rssi.items():
             if beacon_id not in self.engine.beacons:
@@ -342,7 +381,8 @@ class LiveTracker:
             t=t, x=position.x, y=position.y, floor=position.floor,
             floor_confidence=position.floor_confidence,
             uncertainty=uncertainty, heard=tuple(sorted(fresh)),
-            excluded=self._excluded_at(t))
+            excluded=self._excluded_at(t),
+            battery=tuple(sorted(self._battery.items())))
         self._last = live
         return live
 
@@ -351,6 +391,7 @@ class LiveTracker:
         self._latest.clear()
         self._seen.clear()
         self._dark.clear()
+        self._battery.clear()
         self._last_t = None
         self._last = None
         self.engine.reset()
@@ -501,13 +542,24 @@ def default_beacons() -> list[Beacon]:
 
 def run_demo(stale_after: float, dark_after: float,
              readmit_after: int,
-             sigma_rssi_db: float, output_stream) -> list[LivePosition | None]:
+             sigma_rssi_db: float, output_stream,
+             battery_drain_per_hour: float = 0.0) -> list[LivePosition | None]:
     """Feed a simulated ward walk through the tracker at 1 Hz and
     print one JSON line per step — the mode with no scanner needed.
-    Returns the recorded track, so the caller can export it."""
+    With ``battery_drain_per_hour`` above zero, beacon D drains
+    at that rate from a full cell, so the walk shows a beacon
+    degrading and then going dark mid-track — its battery level
+    rides on each live position. Returns the recorded track, so
+    the caller can export it."""
+    from .battery import BatteryModel
+
     beacons = default_beacons()
+    batteries = None
+    if battery_drain_per_hour > 0:
+        batteries = {"D": BatteryModel(
+            drain_rate_per_hour=battery_drain_per_hour)}
     steps = simulate_walk(rectangular_walk(20.0, 12.0, 10), beacons,
-                          noise_db=2.0, seed=7)
+                          noise_db=2.0, seed=7, batteries=batteries)
     tracker = LiveTracker(PositioningEngine(beacons),
                           stale_after=stale_after,
                           dark_after=dark_after,
@@ -516,7 +568,8 @@ def run_demo(stale_after: float, dark_after: float,
     positions: list[LivePosition | None] = []
     for i, step in enumerate(steps):
         t = float(i)
-        position = tracker.feed(step["rssi"], t)
+        position = tracker.feed(step["rssi"], t,
+                                battery=step.get("battery"))
         positions.append(position)
         print(json.dumps(format_output(t, position, tracker.heard,
                                       tracker.excluded)),
@@ -560,6 +613,11 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                         default=DEFAULT_SIGMA_RSSI_DB,
                         help="assumed RSSI noise in dB for the confidence "
                         f"ellipse (default: {DEFAULT_SIGMA_RSSI_DB})")
+    parser.add_argument("--battery-drain-per-hour", type=float, default=0.0,
+                        help="demo only: drain beacon D's battery at "
+                        "this fraction of a full charge per hour, so "
+                        "the walk shows a beacon degrading and going "
+                        "dark mid-track (default: 0, no battery drain)")
     parser.add_argument("--export-json", default=None, metavar="PATH",
                         help="save the recorded track as JSON to PATH "
                         "(one row per located position)")
@@ -577,11 +635,15 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
         parser.error("--readmit-after must be at least 1")
     if args.sigma_rssi <= 0:
         parser.error("--sigma-rssi must be positive")
+    if args.battery_drain_per_hour < 0:
+        parser.error("--battery-drain-per-hour must not be negative")
 
     if args.demo:
         positions = run_demo(args.stale_after, args.dark_after,
                              args.readmit_after, args.sigma_rssi,
-                             output_stream or sys.stdout)
+                             output_stream or sys.stdout,
+                             battery_drain_per_hour
+                             =args.battery_drain_per_hour)
         _export_track(positions, args.export_json, args.export_csv)
         return 0
 

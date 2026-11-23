@@ -41,6 +41,9 @@ FORMAT = "beacon-live-track"
 FORMAT_VERSION = 1
 
 # CSV column order — fixed, so a dashboard can rely on it.
+# ``battery`` was added in v0.25.0; files written before that
+# (eleven columns, no battery) still load — see
+# ``load_track_csv`` — with the battery defaulting to empty.
 CSV_FIELDS = (
     "t",
     "x",
@@ -53,6 +56,7 @@ CSV_FIELDS = (
     "beacons_used",
     "beacons_excluded",
     "coverage",
+    "battery",
 )
 
 
@@ -65,7 +69,9 @@ def track_rows(positions: list[LivePosition | None]) -> list[dict]:
     its confidence, the 95% confidence ellipse (None fields when
     the step's geometry was degenerate), the beacons the estimate
     was built from, the beacons excluded as dark with their
-    reasons, and the track's overall coverage — the located share
+    reasons, the battery level reported for each beacon at that
+    step (an empty dict when the readings carried no battery
+    state), and the track's overall coverage — the located share
     of the walk, the same on every row.
 
     Raises ValueError on an empty track: with no steps there is
@@ -97,6 +103,8 @@ def track_rows(positions: list[LivePosition | None]) -> list[dict]:
             "beacons_used": list(position.heard),
             "beacons_excluded": [b.to_dict() for b in position.excluded],
             "coverage": coverage,
+            "battery": {beacon_id: level
+                        for beacon_id, level in position.battery},
         })
     return rows
 
@@ -152,6 +160,10 @@ def track_from_dict(data: dict) -> list[dict]:
                 for b in row["beacons_excluded"]
             ],
             "coverage": float(row["coverage"]),
+            "battery": {
+                str(beacon_id): float(level)
+                for beacon_id, level in row.get("battery", {}).items()
+            },
         }
         for row in rows
     ]
@@ -192,6 +204,9 @@ def _row_to_csv(row: dict) -> dict:
         "beacons_used": ";".join(row["beacons_used"]),
         "beacons_excluded": json.dumps(row["beacons_excluded"]),
         "coverage": repr(row["coverage"]),
+        "battery": ";".join(
+            f"{beacon_id}={level!r}"
+            for beacon_id, level in sorted(row["battery"].items())),
     }
 
 
@@ -220,7 +235,22 @@ def _row_from_csv(raw: dict) -> dict:
             for b in json.loads(raw["beacons_excluded"])
         ],
         "coverage": float(raw["coverage"]),
+        "battery": _battery_from_csv(raw.get("battery", "")),
     }
+
+
+def _battery_from_csv(raw_battery: str) -> dict:
+    """Parse the CSV battery column (``"A=0.87;B=0.91"``) back to
+    a dict. Empty when the column is empty — or when the file
+    predates the battery column entirely, so old exports still
+    load."""
+    if not raw_battery:
+        return {}
+    levels = {}
+    for pair in raw_battery.split(";"):
+        beacon_id, _, level = pair.partition("=")
+        levels[beacon_id] = float(level)
+    return levels
 
 
 def export_track_csv(positions: list[LivePosition | None],
@@ -237,10 +267,22 @@ def export_track_csv(positions: list[LivePosition | None],
 
 def load_track_csv(path: str) -> list[dict]:
     """Read back the rows from a file written by
-    ``export_track_csv``."""
+    ``export_track_csv``.
+
+    Files written before v0.25.0 have no battery column — their
+    eleven-column header is accepted too, and those rows load
+    with an empty battery dict, so old exports keep working.
+    """
     with open(path, encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
-        if reader.fieldnames != list(CSV_FIELDS):
+        if reader.fieldnames == list(CSV_FIELDS):
+            pass
+        elif reader.fieldnames == list(CSV_FIELDS[:-1]):
+            # Pre-battery export: no battery column. DictReader
+            # fills the missing field with None, which
+            # ``_row_from_csv`` treats as no battery state.
+            pass
+        else:
             raise ValueError(
                 "not a beacon live-track CSV: unexpected columns "
                 f"{reader.fieldnames!r}")

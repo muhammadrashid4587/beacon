@@ -5,6 +5,7 @@ the positioning engine works on RSSI observations, and a simulator
 generates noisy RSSI readings from a true path for testing.
 """
 
+from .battery import BatteryModel
 from .beacon import Beacon
 from .calibration import calibrate_beacon, calibrate_survey, fit_path_loss
 from .engine import PositioningEngine
@@ -37,9 +38,10 @@ from .validation import (DEFAULT_MAX_WORST_SEMI_MAJOR_M,
                          FloorLayoutVerdict, LayoutValidation,
                          validate_floor_layouts)
 
-__version__ = "0.24.0"
+__version__ = "0.25.0"
 
 __all__ = [
+    "BatteryModel",
     "Beacon",
     "PositioningEngine",
     "MovingAverageFilter",

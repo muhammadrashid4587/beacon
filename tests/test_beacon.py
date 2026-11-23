@@ -9,6 +9,7 @@ import tempfile
 import unittest
 
 from beacon import (
+    BatteryModel,
     Beacon,
     BeaconHealth,
     FingerprintMap,
@@ -2223,7 +2224,7 @@ class TestLiveTrackExport(unittest.TestCase):
                                  "ellipse_semi_major_m,"
                                  "ellipse_semi_minor_m,"
                                  "ellipse_angle_deg,beacons_used,"
-                                 "beacons_excluded,coverage")
+                                 "beacons_excluded,coverage,battery")
 
     def test_dropout_shows_in_beacons_used_and_excluded(self):
         rows = track_rows(self._track(die_at=20))
@@ -2933,6 +2934,234 @@ class TestFloorLayoutValidation(unittest.TestCase):
         from beacon.cli import main
 
         self.assertEqual(main(["--validate-layout"]), 0)
+
+
+class TestBatteryDegradation(unittest.TestCase):
+    def _draining_walk(self, seed=7, drain_per_hour=1.2):
+        """The default ward walk with beacon D draining at
+        ``drain_per_hour`` — at 120 s per step the 40-step walk
+        spans 80 minutes, so D (cutoff 0.05) goes dark at step
+        24. Returns (steps, positions) through a live tracker."""
+        steps = simulate_walk(rectangular_walk(20.0, 12.0, 10), BEACONS,
+                              noise_db=2.0, seed=seed,
+                              batteries={"D": BatteryModel(
+                                  drain_rate_per_hour=drain_per_hour)},
+                              step_seconds=120.0)
+        tracker = LiveTracker(PositioningEngine(BEACONS))
+        positions = [tracker.feed(step["rssi"], float(i) * 120.0,
+                                  battery=step.get("battery"))
+                     for i, step in enumerate(steps)]
+        return steps, positions
+
+    def _mean_error(self, positions, steps, lo, hi):
+        errors = [math.hypot(p.x - s["true"][0], p.y - s["true"][1])
+                  for p, s in zip(positions[lo:hi], steps[lo:hi])
+                  if p is not None]
+        return statistics.fmean(errors)
+
+    def test_model_drains_linearly_and_floors_at_zero(self):
+        model = BatteryModel(drain_rate_per_hour=0.5)
+        self.assertEqual(model.level_at(0.0), 1.0)
+        self.assertAlmostEqual(model.level_at(3600.0), 0.5)
+        self.assertAlmostEqual(model.level_at(7200.0), 0.0)
+        # A dead cell stays dead, it does not go negative.
+        self.assertEqual(model.level_at(99999.0), 0.0)
+        with self.assertRaises(ValueError):
+            model.level_at(-1.0)
+
+    def test_loss_grows_with_the_square_of_charge_used(self):
+        model = BatteryModel(max_rssi_loss_db=6.0)
+        self.assertEqual(model.rssi_loss_db(1.0), 0.0)
+        # Half drained: a quarter of the max loss.
+        self.assertAlmostEqual(model.rssi_loss_db(0.5), 1.5)
+        self.assertEqual(model.rssi_loss_db(0.0), 6.0)
+        self.assertLess(model.rssi_loss_db(0.75),
+                        model.rssi_loss_db(0.5))
+        self.assertLess(model.rssi_loss_db(0.5),
+                        model.rssi_loss_db(0.25))
+
+    def test_extra_noise_grows_as_battery_falls(self):
+        model = BatteryModel(max_extra_noise_db=3.0)
+        self.assertEqual(model.extra_noise_db(1.0), 0.0)
+        self.assertAlmostEqual(model.extra_noise_db(0.5), 1.5)
+        self.assertEqual(model.extra_noise_db(0.0), 3.0)
+
+    def test_cutoff_makes_beacon_dark(self):
+        model = BatteryModel(cutoff=0.05)
+        self.assertFalse(model.is_dark(0.06))
+        self.assertTrue(model.is_dark(0.05))
+        self.assertTrue(model.is_dark(0.0))
+        rng = random.Random(1)
+        self.assertIsNone(model.apply(-70.0, 0.04, rng))
+        self.assertIsNotNone(model.apply(-70.0, 0.06, rng))
+
+    def test_bad_models_raise(self):
+        with self.assertRaises(ValueError):
+            BatteryModel(initial=0.0)
+        with self.assertRaises(ValueError):
+            BatteryModel(initial=1.5)
+        with self.assertRaises(ValueError):
+            BatteryModel(drain_rate_per_hour=-1.0)
+        with self.assertRaises(ValueError):
+            BatteryModel(cutoff=1.0)
+        with self.assertRaises(ValueError):
+            BatteryModel(max_rssi_loss_db=-1.0)
+        with self.assertRaises(ValueError):
+            BatteryModel(max_extra_noise_db=-1.0)
+
+    def test_simulator_weakens_a_draining_beacon_by_the_model(self):
+        # No extra noise, so the degradation is exact: the
+        # draining beacon reads weaker than the healthy one by
+        # exactly the model's loss at that level.
+        path = rectangular_walk(20.0, 12.0, 10)
+        healthy = simulate_walk(path, BEACONS, noise_db=0.0, seed=7)
+        model = BatteryModel(drain_rate_per_hour=1.2,
+                             max_extra_noise_db=0.0)
+        degraded = simulate_walk(path, BEACONS, noise_db=0.0, seed=7,
+                                 batteries={"D": model},
+                                 step_seconds=120.0)
+        for i, (good, bad) in enumerate(zip(healthy, degraded)):
+            level = model.level_at(i * 120.0)
+            if model.is_dark(level):
+                # Past the cutoff the beacon is silent, not weak.
+                self.assertNotIn("D", bad["rssi"])
+                continue
+            self.assertAlmostEqual(
+                bad["rssi"]["D"],
+                good["rssi"]["D"] - model.rssi_loss_db(level))
+            # The healthy beacons are untouched.
+            for beacon_id in ("A", "B", "C"):
+                self.assertEqual(bad["rssi"][beacon_id],
+                                 good["rssi"][beacon_id])
+
+    def test_dark_beacon_is_not_heard_and_battery_is_reported(self):
+        steps, _ = self._draining_walk()
+        # Every step reports D's level, falling monotonically.
+        levels = [step["battery"]["D"] for step in steps]
+        self.assertEqual(levels[0], 1.0)
+        self.assertEqual(levels[-1], 0.0)
+        self.assertTrue(all(a >= b for a, b in
+                            zip(levels, levels[1:])))
+        # D is heard through step 23 and silent from step 24,
+        # when its level crosses the 0.05 cutoff.
+        self.assertIn("D", steps[23]["rssi"])
+        self.assertLessEqual(steps[23]["battery"]["D"], 0.08)
+        self.assertNotIn("D", steps[24]["rssi"])
+        self.assertNotIn("D", steps[39]["rssi"])
+        # The other beacons never carry battery state — only D
+        # was given a model — so their readings are untouched.
+        for step in steps:
+            self.assertEqual(list(step["battery"]), ["D"])
+
+    def test_live_track_error_grows_as_beacon_drains(self):
+        steps, positions = self._draining_walk()
+        report = evaluate_live_track(
+            positions, [step["true"] for step in steps])
+        baseline_steps, baseline_positions = self._draining_walk(
+            drain_per_hour=0.0)
+        baseline_report = evaluate_live_track(
+            baseline_positions,
+            [step["true"] for step in baseline_steps])
+        # The walk stays fully located — three beacons still
+        # locate — but the error is far worse with D draining:
+        # 2.16 m healthy against 5.09 m degraded on seed 7.
+        self.assertEqual(report.coverage, 1.0)
+        self.assertGreater(report.mean_error_m,
+                           baseline_report.mean_error_m)
+        self.assertAlmostEqual(baseline_report.mean_error_m, 2.16,
+                               places=1)
+        self.assertAlmostEqual(report.mean_error_m, 5.09, places=1)
+        # The error grows while D is dying, not after it is
+        # dead: steps 0-5 (D healthy) average 2.19 m, steps
+        # 12-19 (D at 0.52 down to 0.24) average 13.66 m, and
+        # once D is dark the three-beacon track recovers to
+        # 3.36 m over steps 24-39.
+        self.assertAlmostEqual(
+            self._mean_error(positions, steps, 0, 6), 2.19, places=1)
+        self.assertAlmostEqual(
+            self._mean_error(positions, steps, 12, 20), 13.66,
+            places=1)
+        self.assertLess(self._mean_error(positions, steps, 24, 40),
+                        self._mean_error(positions, steps, 12, 20))
+
+    def test_dark_beacon_excluded_with_battery_reason(self):
+        steps, positions = self._draining_walk()
+        # D's last reading is step 23; the 10 s dark window
+        # passes at the next 120 s step, so it is first recorded
+        # excluded at step 24 — with the battery named as the
+        # cause, not just the silence.
+        first = next(p for p in positions if p is not None
+                     and p.excluded)
+        self.assertEqual(first.t, 24 * 120.0)
+        self.assertEqual(len(first.excluded), 1)
+        self.assertEqual(first.excluded[0].id, "D")
+        self.assertIn("battery exhausted", first.excluded[0].reason)
+        self.assertIn("no reading for", first.excluded[0].reason)
+        # The battery level rides on every live position.
+        self.assertEqual(dict(positions[0].battery), {"D": 1.0})
+        self.assertEqual(dict(positions[-1].battery), {"D": 0.0})
+
+    def test_battery_rides_on_export_rows_and_round_trips(self):
+        _, positions = self._draining_walk()
+        rows = track_rows(positions)
+        self.assertEqual(len(rows), 40)
+        self.assertEqual(rows[0]["battery"], {"D": 1.0})
+        self.assertEqual(rows[-1]["battery"], {"D": 0.0})
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "track.json")
+            csv_path = os.path.join(tmp, "track.csv")
+            export_track_json(positions, json_path)
+            export_track_csv(positions, csv_path)
+            self.assertEqual(load_track_json(json_path), rows)
+            self.assertEqual(load_track_csv(csv_path), rows)
+            with open(csv_path, encoding="utf-8") as handle:
+                header = handle.readline().strip()
+        self.assertIn("battery", header)
+        # A track without batteries exports empty battery dicts.
+        healthy = simulate_walk(rectangular_walk(20.0, 12.0, 10),
+                                BEACONS, noise_db=2.0, seed=7)
+        tracker = LiveTracker(PositioningEngine(BEACONS))
+        plain = [tracker.feed(step["rssi"], float(i))
+                 for i, step in enumerate(healthy)]
+        self.assertEqual(track_rows(plain)[0]["battery"], {})
+
+    def test_old_csv_without_battery_column_still_loads(self):
+        rows = load_track_csv("examples/live-track-export.csv")
+        self.assertEqual(len(rows), 40)
+        self.assertEqual(rows[0]["battery"], {})
+
+    def test_multifloor_walk_degrades_too(self):
+        model = BatteryModel(drain_rate_per_hour=1.2)
+        steps = simulate_multifloor_walk(
+            two_floor_walk(20.0, 12.0, 10), BEACONS, noise_db=2.0,
+            seed=7, batteries={"D": model}, step_seconds=120.0)
+        self.assertEqual(len(steps), 80)
+        self.assertIn("D", steps[0]["rssi"])
+        self.assertNotIn("D", steps[24]["rssi"])
+        self.assertEqual(steps[0]["battery"]["D"], 1.0)
+
+    def test_demo_battery_flag_drains_beacon_d(self):
+        import io
+        import json as json_lib
+
+        from beacon.tracking import main
+
+        out = io.StringIO()
+        self.assertEqual(main(argv=["--demo",
+                                    "--battery-drain-per-hour", "150"],
+                              output_stream=out), 0)
+        lines = [json_lib.loads(line) for line in
+                 out.getvalue().splitlines()]
+        self.assertEqual(len(lines), 40)
+        drained = [line for line in lines
+                   if line["position"] is not None
+                   and line["position"]["excluded"]]
+        self.assertTrue(drained)
+        first = drained[0]
+        self.assertEqual(first["position"]["excluded"][0]["id"], "D")
+        self.assertIn("battery exhausted",
+                      first["position"]["excluded"][0]["reason"])
+        self.assertEqual(first["position"]["battery"]["D"], 0.0)
 
 
 if __name__ == "__main__":

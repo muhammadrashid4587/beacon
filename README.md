@@ -112,6 +112,11 @@ library, no dependencies, no BLE hardware needed.
   `cannot_triangulate`, and a floor whose worst 95% error is above
   the 10 m limit is flagged `thin`, with a plain-language warning
   saying which floor to fix and why.
+- Battery degradation: a beacon's RSSI weakens and gets noisier
+  as its battery drains, and the beacon goes dark below a cutoff
+  — so a walk with a draining beacon shows the error growing
+  while the beacon is dying, and the battery level rides on the
+  live positions and the exported track rows.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -1052,6 +1057,78 @@ limit, which is the same trade the advisor's own notes describe
 `cannot_triangulate`, and three beacons on one line validate
 `thin` with test points on the line reported as undefined.
 
+## Battery degradation
+
+A beacon does not die all at once. As its cell drains, its
+transmit power sags — the signal gets weaker — and the readings
+get noisier, until the cell can no longer power the radio and
+the beacon goes dark. That slow decline poisons positioning
+long before the beacon disappears: the engine trusts the
+path-loss model, so a beacon reading weaker than its calibration
+says looks farther away than it is, and the estimate is pulled
+towards it. `BatteryModel` describes one beacon's decline — a
+linear drain (`drain_rate_per_hour`, a fraction of a full charge
+per hour), a loss that grows with the square of the charge used
+(up to `max_rssi_loss_db`, 6 dB by default, so the beacon looks
+about twice as far away on an empty cell) and extra RSSI noise
+that grows linearly with the charge used (up to
+`max_extra_noise_db`, 3 dB by default), and a `cutoff` (0.05 by
+default) below which the beacon goes dark:
+
+```python
+from beacon import BatteryModel
+from beacon.simulate import rectangular_walk, simulate_walk
+
+model = BatteryModel(drain_rate_per_hour=1.2)   # ~50 minutes left
+steps = simulate_walk(rectangular_walk(20, 12, 10), beacons,
+                      noise_db=2.0, seed=7, batteries={"D": model},
+                      step_seconds=120.0)
+# steps[0]["battery"]["D"] == 1.0; D is unheard from step 24,
+# when its level crosses the 0.05 cutoff
+```
+
+`batteries` is one model for every beacon, or a dict of models
+by beacon id — a beacon with no model runs on a fresh cell and
+never degrades — and it works the same way in
+`simulate_multifloor_walk`. Each step carries `"battery":
+{id: level}`, so the walk's battery state can be fed straight
+into the tracker: `LiveTracker.feed(rssi, t,
+battery=step["battery"])` attaches the levels to the live
+position (`LivePosition.battery`), and a beacon that goes dark
+with an exhausted level is excluded with the battery named as
+the cause — `"battery exhausted at 0.04 — no reading for 120.0s
+(dark after 10.0s)"` — instead of only the silence, so a
+dashboard can tell a beacon that died from a drained cell from
+one that was shielded or unplugged. The battery rides into the
+exported track rows too (`track_rows`, JSON and CSV — files
+written before v0.25.0 load back with an empty battery dict),
+and the tracking demo drains beacon D on request:
+
+```sh
+python3 -m beacon.tracking --demo --battery-drain-per-hour 150
+```
+
+The demo walk is 40 seconds, so the drain rate is a
+time-compression knob — 150 per hour drains D from full to its
+cutoff in about 23 seconds of it.
+
+Measured behaviour (simulator, 2 dB RSSI noise, default ward
+walk, seed 7, beacon D draining at 1.2 per hour over 120 s
+steps): the live track's mean error is 5.09 m against 2.16 m
+with D healthy, and the coverage stays 1.0 — the track never
+stops locating. The error grows while D is dying, not after it
+is dead: steps 0–5 (D healthy) average 2.19 m, steps 12–19 (D
+at 0.52 down to 0.24) average 13.66 m, and once D goes dark at
+step 24 the three-beacon track recovers to 3.36 m over the rest
+of the walk. Across seeds 1, 2, 3, 7, 11 the degraded mean is
+4.51, 4.85, 47.70, 5.09 and 3.24 m against a healthy 1.97,
+2.57, 2.63, 2.16 and 1.83 m — seed 3 is the warning: while D is
+nearly dead but still heard, the estimate diverges to about
+280 m, the same distance-inversion explosion a wrong path-loss
+model causes, so a dying beacon is worse for the track than a
+dead one, and the drift alarm is the tool that catches it
+before the battery does.
+
 ## Measured accuracy (simulator, not the real world)
 
 Default ward walk, 2 dB RSSI noise: mean error about 2.2 m (1.8-2.6 m
@@ -1322,6 +1399,26 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   advisor's mean-optimal layout validates `thin` at its far
   corner (worst 11.16 m), three coincident beacons validate
   `cannot_triangulate`, and three beacons on one line validate
-  `thin` with the test points on the line undefined. The
-  roadmap grows as new needs surface — per-floor layout
-  validation is the latest addition.
+  `thin` with the test points on the line reported as undefined.
+- Battery degradation (a beacon's RSSI as its battery drains) —
+  done: `BatteryModel` drains a beacon's charge linearly
+  (`drain_rate_per_hour`), weakens its RSSI with the square of
+  the charge used (up to 6 dB by default) and adds noise linearly
+  with the charge used (up to 3 dB by default), and goes dark
+  below the 0.05 cutoff; `simulate_walk` and
+  `simulate_multifloor_walk` take `batteries` (one model, or one
+  per beacon id) and `step_seconds`, report each step's levels,
+  and leave a dark beacon out of the readings; `LiveTracker.feed`
+  takes the step's battery state, `LivePosition` carries it, a
+  beacon that goes dark with an exhausted level is excluded with
+  the battery named as the cause, and the battery rides into the
+  exported track rows (JSON and CSV, with pre-v0.25.0 files still
+  loading); `python -m beacon.tracking --demo
+  --battery-drain-per-hour 150` drains beacon D mid-demo
+  (v0.25.0); on the default ward walk, seed 7, with D draining
+  at 1.2 per hour over 120 s steps, the live track's mean error
+  is 5.09 m against 2.16 m healthy — 2.19 m over steps 0–5,
+  13.66 m over steps 12–19 while D is dying, 3.36 m over steps
+  24–39 once D is dark and the track runs on three beacons — at
+  coverage 1.0 throughout. The roadmap grows as new needs
+  surface — battery degradation is the latest addition.

@@ -11,29 +11,75 @@ reproducible run.
 import math
 import random
 
+from .battery import BatteryModel
 from .beacon import Beacon
 from .rssi import distance_to_rssi
+
+
+def _battery_for(batteries: BatteryModel | dict[str, BatteryModel] | None,
+                 beacon_id: str) -> BatteryModel | None:
+    """The battery model for one beacon, or None.
+
+    ``batteries`` is one model for every beacon, or a dict of
+    models by beacon id — a beacon with no entry runs on a fresh
+    cell and never degrades.
+    """
+    if batteries is None:
+        return None
+    if isinstance(batteries, BatteryModel):
+        return batteries
+    return batteries.get(beacon_id)
 
 
 def simulate_walk(path: list[tuple[float, float]], beacons: list[Beacon],
                   noise_db: float = 2.0,
                   path_loss_exponent: float = 2.0,
-                  seed: int | None = None) -> list[dict]:
+                  seed: int | None = None,
+                  batteries: BatteryModel | dict[str, BatteryModel] | None = None,
+                  step_seconds: float = 1.0) -> list[dict]:
     """Simulate RSSI observations along ``path``.
 
     Returns one dict per step: ``{"true": (x, y), "rssi": {id: rssi}}``.
+    With ``batteries`` given, each step also carries ``"battery":
+    {id: level}`` — the charge left on each beacon at that step —
+    and a beacon's RSSI degrades as its battery drains: weaker
+    (up to ``max_rssi_loss_db`` down) and noisier, and once its
+    level reaches the model's cutoff it goes dark and is left out
+    of that step's readings entirely. ``step_seconds`` is how
+    much simulated time passes per step (1 s by default), which
+    is what the drain runs against — a walk of 40 steps at the
+    default is 40 seconds of battery, so a fast drain rate is
+    needed to see a beacon die on one walk.
     """
+    if step_seconds <= 0:
+        raise ValueError("step_seconds must be positive")
     rng = random.Random(seed)
     steps = []
-    for x, y in path:
+    for i, (x, y) in enumerate(path):
+        t = i * step_seconds
         observations: dict[str, float] = {}
+        levels: dict[str, float] = {}
         for beacon in beacons:
+            model = _battery_for(batteries, beacon.id)
+            level = None if model is None else model.level_at(t)
+            if level is not None:
+                levels[beacon.id] = level
             d = math.hypot(x - beacon.x, y - beacon.y)
             rssi = distance_to_rssi(d, beacon.rssi_at_1m, path_loss_exponent)
-            if noise_db:
-                rssi += rng.gauss(0.0, noise_db)
+            if model is None:
+                if noise_db:
+                    rssi += rng.gauss(0.0, noise_db)
+            else:
+                degraded = model.apply(rssi, level, rng,
+                                       base_noise_db=noise_db)
+                if degraded is None:
+                    continue
+                rssi = degraded
             observations[beacon.id] = rssi
-        steps.append({"true": (x, y), "rssi": observations})
+        step: dict = {"true": (x, y), "rssi": observations}
+        if levels:
+            step["battery"] = levels
+        steps.append(step)
     return steps
 
 
@@ -43,7 +89,9 @@ def simulate_multifloor_walk(path: list[tuple[float, float, int]],
                              path_loss_exponent: float = 2.0,
                              floor_height_m: float = 3.0,
                              floor_attenuation_db: float = 15.0,
-                             seed: int | None = None) -> list[dict]:
+                             seed: int | None = None,
+                             batteries: BatteryModel | dict[str, BatteryModel] | None = None,
+                             step_seconds: float = 1.0) -> list[dict]:
     """Simulate RSSI observations along a multi-floor ``path``.
 
     ``path`` is a list of ``(x, y, floor)`` points. The distance to a
@@ -57,23 +105,46 @@ def simulate_multifloor_walk(path: list[tuple[float, float, int]],
     as one a few metres away on the same floor.
 
     Returns one dict per step: ``{"true": (x, y, floor),
-    "rssi": {id: rssi}}``.
+    "rssi": {id: rssi}}``. With ``batteries`` given, each step
+    also carries ``"battery": {id: level}`` and a beacon's RSSI
+    degrades as its battery drains — weaker and noisier, and
+    silent once its level reaches the model's cutoff — exactly
+    as in ``simulate_walk``. ``step_seconds`` is how much
+    simulated time passes per step (1 s by default).
     """
+    if step_seconds <= 0:
+        raise ValueError("step_seconds must be positive")
     rng = random.Random(seed)
     steps = []
-    for x, y, floor in path:
+    for i, (x, y, floor) in enumerate(path):
+        t = i * step_seconds
         observations: dict[str, float] = {}
+        levels: dict[str, float] = {}
         for beacon in beacons:
+            model = _battery_for(batteries, beacon.id)
+            level = None if model is None else model.level_at(t)
+            if level is not None:
+                levels[beacon.id] = level
             dz = floor_height_m * abs(floor - beacon.floor)
             d = math.hypot(x - beacon.x, y - beacon.y, dz)
             rssi = distance_to_rssi(d, beacon.rssi_at_1m,
                                     path_loss_exponent)
             if beacon.floor != floor:
                 rssi -= floor_attenuation_db
-            if noise_db:
-                rssi += rng.gauss(0.0, noise_db)
+            if model is None:
+                if noise_db:
+                    rssi += rng.gauss(0.0, noise_db)
+            else:
+                degraded = model.apply(rssi, level, rng,
+                                       base_noise_db=noise_db)
+                if degraded is None:
+                    continue
+                rssi = degraded
             observations[beacon.id] = rssi
-        steps.append({"true": (x, y, floor), "rssi": observations})
+        step: dict = {"true": (x, y, floor), "rssi": observations}
+        if levels:
+            step["battery"] = levels
+        steps.append(step)
     return steps
 
 
