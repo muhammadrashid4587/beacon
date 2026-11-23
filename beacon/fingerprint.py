@@ -193,6 +193,41 @@ class FingerprintMap:
             weighted_y += weight * y
         return (weighted_x / total_weight, weighted_y / total_weight)
 
+    def to_dict(self) -> dict:
+        """Serialise the map to plain JSON-ready data.
+
+        Each cell records its point plus the per-beacon RSSI sums
+        and sample counts, not just the averaged fingerprint — so a
+        round trip restores the exact internal state, and samples
+        added after an import are averaged with the original
+        weights instead of with the averaged value.
+        """
+        return {
+            "beacon_ids": list(self.beacon_ids),
+            "cells": [
+                {"point": [point[0], point[1]],
+                 "sums": list(sums), "counts": list(counts)}
+                for point, (sums, counts) in self._cells.items()
+            ],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "FingerprintMap":
+        """Rebuild a map from ``to_dict`` output. Lossless."""
+        if not isinstance(data, dict) or "beacon_ids" not in data:
+            raise ValueError("not a fingerprint map dict")
+        radio_map = cls(data["beacon_ids"])
+        for cell in data.get("cells", []):
+            point = (cell["point"][0], cell["point"][1])
+            sums = [float(s) for s in cell["sums"]]
+            counts = [int(c) for c in cell["counts"]]
+            if len(sums) != len(radio_map.beacon_ids) or \
+                    len(counts) != len(radio_map.beacon_ids):
+                raise ValueError(
+                    "fingerprint cell does not match the beacon list")
+            radio_map._cells[point] = (sums, counts)
+        return radio_map
+
 
 def build_fingerprint_map(beacons, steps: list[dict]) -> FingerprintMap:
     """Build a radio map from a walked survey.
@@ -360,6 +395,26 @@ class MultiFloorFingerprintMap:
         """
         position = self.locate_with_floor(observations, k)
         return (position.x, position.y)
+
+    def to_dict(self) -> dict:
+        """Serialise every floor's map to plain JSON-ready data."""
+        return {
+            "floors": [
+                {"floor": floor, "map": radio_map.to_dict()}
+                for floor, radio_map in self._maps.items()
+            ],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "MultiFloorFingerprintMap":
+        """Rebuild the per-floor maps from ``to_dict`` output. Lossless."""
+        if not isinstance(data, dict) or "floors" not in data:
+            raise ValueError("not a multi-floor fingerprint map dict")
+        floor_maps = {}
+        for entry in data["floors"]:
+            floor_maps[int(entry["floor"])] = FingerprintMap.from_dict(
+                entry["map"])
+        return cls(floor_maps)
 
 
 def build_multifloor_fingerprint_map(beacons,

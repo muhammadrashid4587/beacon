@@ -43,6 +43,10 @@ library, no dependencies, no BLE hardware needed.
   Rauch-Tung-Striebel smoother, which revises each past position
   with the observations that came after it, so the replayed path
   is steadier and closer to the true path than the live estimates.
+- Survey export/import: a walked survey (beacons with their
+  calibration, the steps, and the built radio map) saves to a
+  portable JSON file and loads back losslessly, so a survey can be
+  shared or reused across runs without re-walking the ward.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -343,6 +347,42 @@ smoothing cuts the mean error on every seed 1, 2, 3, 7, 11 — seed 1:
 stationary device's jitter (3 dB noise, 60 steps) drops from 5.32 m
 to 3.15 m of combined axis standard deviation.
 
+## Survey export/import
+
+Walking a ward once is the expensive part of fingerprinting, so
+the survey should survive the run that collected it. A `Survey`
+bundles the beacons (positions plus their fitted calibration
+constants), the walked steps, and the radio map built from them,
+and saves the whole thing as one JSON file:
+
+```python
+from beacon import Survey
+from beacon.simulate import simulate_walk, grid_points
+
+cells = grid_points(20.0, 12.0, spacing=2.0)
+steps = simulate_walk(cells, beacons, noise_db=2.0, seed=7)
+survey = Survey.build(beacons, steps)   # builds the radio map
+survey.save("ward-a-survey.json")
+
+loaded = Survey.load("ward-a-survey.json")
+x, y = loaded.fingerprint_map().locate({"A": -62.1, "B": -71.4})
+```
+
+The round trip is lossless: beacons keep their calibrated
+`rssi_at_1m` and path-loss exponent, steps keep their exact
+positions and RSSI values, and the radio map keeps its per-cell
+sums and sample counts rather than just the averaged fingerprints
+— so samples added after an import are averaged with the original
+weights, and the imported map locates identically to the original.
+A survey imported without a map (`Survey(beacons, steps)`,
+`radio_map=None`) rebuilds it from the steps on demand, and a
+map-only survey (no steps) still locates. Multi-floor surveys
+round-trip the same way, one map per floor. `Survey.from_dict`
+rejects files that are not beacon surveys and versions it does
+not understand, instead of loading garbage. `calibrated_beacons()`
+fits the beacons from the survey's steps; it refuses multi-floor
+surveys, whose cross-floor readings would corrupt the fit.
+
 ## Measured accuracy (simulator, not the real world)
 
 Default ward walk, 2 dB RSSI noise: mean error about 2.2 m (1.8-2.6 m
@@ -419,4 +459,15 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   that changes floor is rejected (split it per floor), and the
   moving-average opt-out raises, since it keeps no forward-pass
   history to smooth over.
-  The roadmap is now complete.
+- Survey export/import (share a walked survey across runs) —
+  done: `Survey` bundles the beacons (positions plus fitted
+  calibration), the walked steps, and the built radio map into one
+  JSON file (`save`/`load`, `to_dict`/`from_dict`), and the round
+  trip is lossless — the map keeps its per-cell sums and sample
+  counts, so samples added after an import average with the
+  original weights, and the imported map locates identically to
+  the original (v0.11.0); a map-less survey rebuilds its map from
+  the steps on demand, a map-only survey still locates, and
+  multi-floor surveys round-trip one map per floor.
+  The roadmap grows as new needs surface — survey export/import is
+  the latest addition.

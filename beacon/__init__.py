@@ -16,9 +16,10 @@ from .fingerprint import (FingerprintMap, MultiFloorFingerprintMap,
 from .floors import FloorEstimate, Position, estimate_floor
 from .rssi import distance_to_rssi, rssi_to_distance
 from .simulate import simulate_multifloor_walk, simulate_walk, two_floor_walk
+from .survey import Survey
 from .trilateration import trilaterate
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 __all__ = [
     "Beacon",
@@ -44,6 +45,7 @@ __all__ = [
     "simulate_walk",
     "simulate_multifloor_walk",
     "two_floor_walk",
+    "Survey",
     "trilaterate",
     "__version__",
 ]

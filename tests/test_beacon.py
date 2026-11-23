@@ -1,8 +1,11 @@
 """Tests for beacon: trilateration, RSSI model, engine, simulator."""
 
+import json
 import math
+import os
 import random
 import statistics
+import tempfile
 import unittest
 
 from beacon import (
@@ -28,6 +31,7 @@ from beacon import (
     rssi_to_distance,
     simulate_multifloor_walk,
     simulate_walk,
+    Survey,
     trilaterate,
     two_floor_walk,
 )
@@ -1195,6 +1199,140 @@ class TestBeaconHealth(unittest.TestCase):
         report = assess_beacon_health(BEACONS, self._survey(BEACONS))
         with self.assertRaises(ValueError):
             healthy_beacons(BEACONS[:3], report)
+
+
+class TestSurveyExport(unittest.TestCase):
+    def _survey(self, noise_db=0.0):
+        cells = grid_points(20.0, 12.0, spacing=2.0)
+        steps = simulate_walk(cells, BEACONS, noise_db=noise_db, seed=7)
+        return Survey.build(BEACONS, steps)
+
+    def test_round_trip_is_lossless(self):
+        survey = self._survey(noise_db=2.0)
+        restored = Survey.from_dict(survey.to_dict())
+        # The serialised forms are identical, so nothing was lost.
+        self.assertEqual(restored.to_dict(), survey.to_dict())
+        self.assertEqual(restored.beacons, survey.beacons)
+        self.assertEqual(restored.steps, survey.steps)
+
+    def test_imported_map_locates_identically(self):
+        survey = self._survey(noise_db=2.0)
+        restored = Survey.from_dict(survey.to_dict())
+        observation = {"A": -62.1, "B": -71.4, "C": -68.0, "D": -59.8}
+        self.assertEqual(restored.fingerprint_map().locate(observation),
+                         survey.fingerprint_map().locate(observation))
+
+    def test_calibration_survives_round_trip(self):
+        # Beacons whose true constants differ from the defaults, so
+        # the export has fitted values worth carrying.
+        beacons = [Beacon(b.id, b.x, b.y, rssi_at_1m=-65.0,
+                          path_loss_exponent=3.0) for b in BEACONS]
+        cells = grid_points(20.0, 12.0, spacing=2.0)
+        steps = simulate_walk(cells, beacons, noise_db=0.0,
+                              path_loss_exponent=3.0, seed=7)
+        survey = Survey.build(beacons, steps)
+        calibrated = survey.calibrated_beacons()
+        self.assertAlmostEqual(calibrated[0].rssi_at_1m, -65.0, places=6)
+        self.assertAlmostEqual(calibrated[0].path_loss_exponent, 3.0,
+                               places=6)
+        exported = Survey.build(calibrated, survey.steps)
+        restored = Survey.from_dict(exported.to_dict())
+        self.assertEqual(restored.beacons, calibrated)
+
+    def test_repeated_samples_keep_their_weight(self):
+        # Two passes over the same cell, then export/import, then a
+        # third pass: the average must weight all three samples
+        # equally, not average the imported average with the new one.
+        radio_map = FingerprintMap(["A", "B"])
+        radio_map.add((5.0, 5.0), {"A": -60.0, "B": -70.0})
+        radio_map.add((5.0, 5.0), {"A": -62.0, "B": -72.0})
+        restored = FingerprintMap.from_dict(radio_map.to_dict())
+        restored.add((5.0, 5.0), {"A": -63.0, "B": -69.0})
+        fingerprint = restored.fingerprint((5.0, 5.0))
+        self.assertAlmostEqual(fingerprint["A"], (-60 - 62 - 63) / 3)
+        self.assertAlmostEqual(fingerprint["B"], (-70 - 72 - 69) / 3)
+
+    def test_multifloor_round_trip(self):
+        beacons = [Beacon(b.id, b.x, b.y, floor=0) for b in BEACONS] + [
+            Beacon("E", 0.0, 0.0, floor=1),
+            Beacon("F", 20.0, 0.0, floor=1),
+            Beacon("G", 20.0, 12.0, floor=1),
+            Beacon("H", 0.0, 12.0, floor=1),
+        ]
+        cells = grid_points(20.0, 12.0, spacing=2.0)
+        path = ([(x, y, 0) for x, y in cells]
+                + [(x, y, 1) for x, y in cells])
+        steps = simulate_multifloor_walk(path, beacons, noise_db=2.0,
+                                         seed=7)
+        survey = Survey.build(beacons, steps)
+        restored = Survey.from_dict(survey.to_dict())
+        self.assertEqual(restored.to_dict(), survey.to_dict())
+        observation = {"A": -80.1, "B": -84.3, "C": -82.0, "D": -79.5,
+                       "E": -62.4, "F": -70.8, "G": -68.2, "H": -60.1}
+        self.assertEqual(
+            restored.fingerprint_map().locate_with_floor(observation),
+            survey.fingerprint_map().locate_with_floor(observation))
+
+    def test_save_and_load_file_round_trip(self):
+        survey = self._survey(noise_db=2.0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "ward-a-survey.json")
+            survey.save(path)
+            with open(path, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle)["format"],
+                                 "beacon-survey")
+            restored = Survey.load(path)
+        self.assertEqual(restored.to_dict(), survey.to_dict())
+
+    def test_survey_without_radio_map_round_trips(self):
+        steps = simulate_walk(grid_points(20.0, 12.0, spacing=2.0),
+                              BEACONS, noise_db=0.0, seed=7)
+        survey = Survey(BEACONS, steps)
+        restored = Survey.from_dict(survey.to_dict())
+        self.assertIsNone(restored.radio_map)
+        # The map rebuilds from the steps on demand.
+        self.assertEqual(len(restored.fingerprint_map()), 60)
+
+    def test_map_only_survey_locates_after_import(self):
+        survey = self._survey(noise_db=0.0)
+        map_only = Survey(survey.beacons, [],
+                          radio_map=survey.fingerprint_map())
+        restored = Survey.from_dict(map_only.to_dict())
+        self.assertEqual(restored.steps, [])
+        self.assertEqual(
+            restored.fingerprint_map().locate(
+                {"A": -59.0, "B": -79.0, "C": -79.0, "D": -59.0}),
+            survey.fingerprint_map().locate(
+                {"A": -59.0, "B": -79.0, "C": -79.0, "D": -59.0}))
+
+    def test_wrong_format_raises(self):
+        with self.assertRaises(ValueError):
+            Survey.from_dict({"format": "not-a-survey", "version": 1})
+
+    def test_unsupported_version_raises(self):
+        data = self._survey().to_dict()
+        data["version"] = 99
+        with self.assertRaises(ValueError):
+            Survey.from_dict(data)
+
+    def test_empty_beacons_raises(self):
+        data = self._survey().to_dict()
+        data["beacons"] = []
+        with self.assertRaises(ValueError):
+            Survey.from_dict(data)
+
+    def test_empty_survey_cannot_build_map(self):
+        with self.assertRaises(ValueError):
+            Survey(BEACONS, []).fingerprint_map()
+
+    def test_calibrated_beacons_rejects_multifloor(self):
+        beacons = [Beacon(b.id, b.x, b.y, floor=0) for b in BEACONS] + [
+            Beacon("E", 0.0, 0.0, floor=1),
+        ]
+        steps = simulate_multifloor_walk([(5.0, 5.0, 0), (5.0, 5.0, 1)],
+                                         beacons, noise_db=0.0, seed=7)
+        with self.assertRaises(ValueError):
+            Survey(beacons, steps).calibrated_beacons()
 
 
 if __name__ == "__main__":
