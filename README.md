@@ -106,6 +106,12 @@ library, no dependencies, no BLE hardware needed.
   separate live track per device id — a patient tag, a nurse's
   badge, a pump on a trolley — each with its own filter and floor
   state, so the tracks never smear into each other.
+- Per-floor layout validation: check every floor's beacons before
+  deployment — a floor with fewer than three beacons, or with
+  beacons so clustered they cannot triangulate, is flagged
+  `cannot_triangulate`, and a floor whose worst 95% error is above
+  the 10 m limit is flagged `thin`, with a plain-language warning
+  saying which floor to fix and why.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -974,6 +980,78 @@ own), the reverse device's is 1.72 m, and the two tracks stay
 9.43 m apart on average, so they are genuinely two tracks
 rather than one smeared position.
 
+## Per-floor layout validation
+
+The engine localises within one floor's 2D plane, so each floor
+needs its own beacons — three at least, spread out enough that
+the geometry pins a device down. A floor that fails that test
+does not fail loudly today: with fewer than three beacons heard
+on the winning floor the engine falls back to beacons from other
+floors, whose cross-floor distances are inflated by the slab
+attenuation, so positions on that floor degrade silently. A
+floor whose beacons are clustered on one wall is just as quiet
+about it — the estimates still come out, only with a very wide
+confidence ellipse in the thin corners. `validate_floor_layouts`
+scores every floor before deployment, with the same 95%
+confidence-ellipse model as the placement advisor, and reports a
+verdict per floor:
+
+```python
+from beacon import Beacon, validate_floor_layouts
+
+beacons = [Beacon("A", 0, 0, floor=0), Beacon("B", 20, 0, floor=0),
+           Beacon("C", 20, 12, floor=0), Beacon("D", 0, 12, floor=0),
+           Beacon("E", 0, 0, floor=1), Beacon("F", 20, 0, floor=1)]
+validation = validate_floor_layouts(beacons, 20.0, 12.0)
+validation.ok   # False — floor 1 has only two beacons
+validation.by_floor(1).status   # "cannot_triangulate"
+validation.warnings()
+# ["floor 1 has only 2 beacons — the engine needs 3 to
+#  triangulate, so it falls back to beacons on other floors,
+#  whose cross-floor distances are inflated by the slab
+#  attenuation"]
+```
+
+Each verdict is a `FloorLayoutVerdict`: the floor, how many
+beacons it carries, a status — `ok`, `thin` (it triangulates,
+but the worst point in the room is looser than the limit), or
+`cannot_triangulate` (fewer than three beacons, or a geometry —
+collinear or coincident beacons — under which no test point
+gives a defined uncertainty) — the floor's `LayoutScore`, or
+`None` when it cannot triangulate, and the plain-language
+warnings behind the status. A floor with no beacons at all
+never appears as a verdict: only floors that carry beacons are
+validated, so a missing floor is a deployment gap, not a
+verdict. The worst-error limit is 10 m by default
+(`max_worst_semi_major`), and the test grid uses the placement
+advisor's 0.5 m margin, so a beacon never lands exactly on a
+test point and is never reported as a coverage hole for merely
+coinciding with the grid. The CLI validates the default layout:
+
+```sh
+python3 -m beacon.cli --validate-layout
+# floor 0: ok (4 beacons, mean 95% error 6.30 m, worst 8.32 m)
+```
+
+The check carries the same honest limits as the placement
+advisor: it assumes the log-distance path-loss model with the
+beacons' own exponents and the stated RSSI noise, and it knows
+nothing about walls, metal beds, or dead zones in the real ward
+— a floor that validates `ok` still needs a walked survey and
+calibration before the numbers are trusted.
+
+Measured behaviour: the default four-corner layout validates
+`ok` on the 20 x 12 m ward (mean 6.30 m, worst 8.32 m), and a
+two-floor building with four beacons downstairs and two upstairs
+validates `ok` downstairs and `cannot_triangulate` upstairs. The
+placement advisor's mean-optimal layout validates `thin` — its
+worst 95% error is 11.16 m at its far corner, above the 10 m
+limit, which is the same trade the advisor's own notes describe
+(it trades the worst point for the mean); raising the limit to
+12 m accepts it. Three beacons mounted at the same spot validate
+`cannot_triangulate`, and three beacons on one line validate
+`thin` with test points on the line reported as undefined.
+
 ## Measured accuracy (simulator, not the real world)
 
 Default ward walk, 2 dB RSSI noise: mean error about 2.2 m (1.8-2.6 m
@@ -1227,3 +1305,23 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   tracks stay 9.43 m apart on average. The roadmap grows as
   new needs surface — multi-device tracking is the latest
   addition.
+- Per-floor layout validation (can every floor triangulate?) —
+  done: `validate_floor_layouts` scores each floor's beacons
+  with the same 95% ellipse model as the placement advisor and
+  reports a `FloorLayoutVerdict` per floor — `ok`, `thin` (the
+  worst 95% error is above the 10 m default limit), or
+  `cannot_triangulate` (fewer than three beacons, or a
+  collinear/coincident geometry under which no test point gives
+  a defined uncertainty) — with plain-language warnings naming
+  the floor to fix and why, and `python -m beacon.cli
+  --validate-layout` validates the default layout from the
+  command line, exiting non-zero when a floor is thin or cannot
+  triangulate (v0.24.0); the default four-corner layout
+  validates `ok` (mean 6.30 m, worst 8.32 m), a floor with two
+  beacons validates `cannot_triangulate`, the placement
+  advisor's mean-optimal layout validates `thin` at its far
+  corner (worst 11.16 m), three coincident beacons validate
+  `cannot_triangulate`, and three beacons on one line validate
+  `thin` with the test points on the line undefined. The
+  roadmap grows as new needs surface — per-floor layout
+  validation is the latest addition.

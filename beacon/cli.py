@@ -20,6 +20,7 @@ from .engine import PositioningEngine
 from .map_overlay import load_track_for_overlay, render_map_overlay
 from .replay import render_track_replay
 from .simulate import rectangular_walk, simulate_walk
+from .validation import validate_floor_layouts
 
 WARD_WIDTH_M = 20.0
 WARD_HEIGHT_M = 12.0
@@ -69,7 +70,30 @@ def main(argv=None) -> int:
     parser.add_argument("--replay-step-seconds", type=float, default=1.0,
                         help="replay time per step in seconds "
                         "(default: 1.0)")
+    parser.add_argument("--validate-layout", action="store_true",
+                        help="validate the default beacon layout "
+                        "floor by floor (can every floor "
+                        "triangulate?) instead of simulating a walk; "
+                        "exits non-zero when a floor is thin or "
+                        "cannot triangulate")
     args = parser.parse_args(argv)
+
+    if args.validate_layout:
+        validation = validate_floor_layouts(
+            default_beacons(), WARD_WIDTH_M, WARD_HEIGHT_M)
+        for verdict in validation.verdicts:
+            if verdict.score is None:
+                print(f"floor {verdict.floor}: "
+                      f"{verdict.status} "
+                      f"({verdict.n_beacons} beacons)")
+            else:
+                print(f"floor {verdict.floor}: {verdict.status} "
+                      f"({verdict.n_beacons} beacons, mean 95% error "
+                      f"{verdict.score.mean_semi_major:.2f} m, worst "
+                      f"{verdict.score.worst_semi_major:.2f} m)")
+            for warning in verdict.warnings:
+                print(f"  warning: {warning}")
+        return 0 if validation.ok else 1
 
     if args.map_overlay is not None:
         rows = load_track_for_overlay(args.map_overlay)

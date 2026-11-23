@@ -33,8 +33,11 @@ from .tracking import (ExcludedBeacon, LivePosition, LiveTracker,
                        TrackReport, evaluate_live_track)
 from .trilateration import trilaterate
 from .uncertainty import PositionUncertainty, estimate_uncertainty
+from .validation import (DEFAULT_MAX_WORST_SEMI_MAJOR_M,
+                         FloorLayoutVerdict, LayoutValidation,
+                         validate_floor_layouts)
 
-__version__ = "0.23.0"
+__version__ = "0.24.0"
 
 __all__ = [
     "Beacon",
@@ -91,6 +94,10 @@ __all__ = [
     "estimate_uncertainty",
     "LayoutScore",
     "PlacementAdvice",
+    "FloorLayoutVerdict",
+    "LayoutValidation",
+    "DEFAULT_MAX_WORST_SEMI_MAJOR_M",
+    "validate_floor_layouts",
     "advise_placement",
     "placement_uncertainty",
     "score_layout",

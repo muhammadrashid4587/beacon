@@ -13,7 +13,9 @@ from beacon import (
     BeaconHealth,
     FingerprintMap,
     FloorEstimate,
+    FloorLayoutVerdict,
     KalmanFilter,
+    LayoutValidation,
     LayoutScore,
     LivePosition,
     LiveTracker,
@@ -56,6 +58,7 @@ from beacon import (
     TrackReport,
     trilaterate,
     two_floor_walk,
+    validate_floor_layouts,
     write_map_overlay,
     write_track_replay,
 )
@@ -2813,6 +2816,123 @@ class TestMultiDeviceTracking(unittest.TestCase):
             self.assertGreaterEqual(last.y, -5.0)
             self.assertLessEqual(last.y, 17.0)
             self.assertEqual(last.floor, 0)
+class TestFloorLayoutValidation(unittest.TestCase):
+    def _two_floor_beacons(self):
+        ground = [Beacon("A", 0.0, 0.0, floor=0),
+                  Beacon("B", 20.0, 0.0, floor=0),
+                  Beacon("C", 20.0, 12.0, floor=0),
+                  Beacon("D", 0.0, 12.0, floor=0)]
+        upper = [Beacon("E", 0.0, 0.0, floor=1),
+                 Beacon("F", 20.0, 0.0, floor=1),
+                 Beacon("G", 20.0, 12.0, floor=1),
+                 Beacon("H", 0.0, 12.0, floor=1)]
+        return ground + upper
+
+    def test_corner_layout_validates_ok_on_one_floor(self):
+        validation = validate_floor_layouts(BEACONS, 20.0, 12.0)
+        self.assertIsInstance(validation, LayoutValidation)
+        self.assertTrue(validation.ok)
+        self.assertEqual(len(validation.verdicts), 1)
+        verdict = validation.verdicts[0]
+        self.assertIsInstance(verdict, FloorLayoutVerdict)
+        self.assertEqual(verdict.floor, 0)
+        self.assertEqual(verdict.n_beacons, 4)
+        self.assertEqual(verdict.status, "ok")
+        self.assertEqual(verdict.warnings, ())
+        self.assertIsNotNone(verdict.score)
+        self.assertLess(verdict.score.worst_semi_major, 10.0)
+        self.assertEqual(validation.warnings(), [])
+        self.assertIs(validation.by_floor(0), verdict)
+        self.assertIsNone(validation.by_floor(1))
+
+    def test_two_floors_get_one_verdict_each(self):
+        validation = validate_floor_layouts(
+            self._two_floor_beacons(), 20.0, 12.0)
+        self.assertTrue(validation.ok)
+        self.assertEqual([v.floor for v in validation.verdicts], [0, 1])
+        self.assertTrue(all(v.status == "ok"
+                            for v in validation.verdicts))
+
+    def test_floor_with_two_beacons_cannot_triangulate(self):
+        beacons = self._two_floor_beacons()[:4] + [
+            Beacon("E", 0.0, 0.0, floor=1),
+            Beacon("F", 20.0, 12.0, floor=1)]
+        validation = validate_floor_layouts(beacons, 20.0, 12.0)
+        self.assertFalse(validation.ok)
+        self.assertEqual(validation.by_floor(0).status, "ok")
+        upper = validation.by_floor(1)
+        self.assertEqual(upper.status, "cannot_triangulate")
+        self.assertEqual(upper.n_beacons, 2)
+        self.assertIsNone(upper.score)
+        self.assertEqual(len(upper.warnings), 1)
+        self.assertIn("only 2 beacons", upper.warnings[0])
+        self.assertIn("falls back", upper.warnings[0])
+        # The failure is in the warnings list, floor-ordered.
+        self.assertEqual(validation.warnings(), list(upper.warnings))
+
+    def test_floor_with_no_beacons_at_all_is_not_a_verdict(self):
+        # A floor with no beacons at all never appears: only floors
+        # that carry beacons are validated, so a missing floor is a
+        # deployment gap, not a verdict.
+        validation = validate_floor_layouts(BEACONS, 20.0, 12.0)
+        self.assertIsNone(validation.by_floor(1))
+
+    def test_coincident_beacons_cannot_triangulate(self):
+        beacons = [Beacon("A", 10.0, 6.0),
+                   Beacon("B", 10.0, 6.0),
+                   Beacon("C", 10.0, 6.0)]
+        validation = validate_floor_layouts(beacons, 20.0, 12.0)
+        self.assertFalse(validation.ok)
+        verdict = validation.verdicts[0]
+        self.assertEqual(verdict.status, "cannot_triangulate")
+        self.assertIsNone(verdict.score)
+        self.assertIn("collinear or coincide", verdict.warnings[0])
+
+    def test_collinear_beacons_leave_degenerate_points(self):
+        # Three beacons on one line: points on the line have an
+        # undefined ellipse, so the floor is thin, not ok. The
+        # 1 m margin puts test points on the beacon line (y = 6);
+        # the default 0.5 m margin would step over it.
+        beacons = [Beacon("A", 0.0, 6.0),
+                   Beacon("B", 10.0, 6.0),
+                   Beacon("C", 20.0, 6.0)]
+        validation = validate_floor_layouts(beacons, 20.0, 12.0,
+                                            margin=1.0)
+        verdict = validation.verdicts[0]
+        self.assertEqual(verdict.status, "thin")
+        self.assertGreater(verdict.score.degenerate_points, 0)
+        self.assertIn("undefined", verdict.warnings[0])
+
+    def test_advised_layout_is_thin_at_its_worst_corner(self):
+        # The placement advisor's mean-optimal layout trades the
+        # worst point for the mean: its worst 95% error is 11.16 m,
+        # above the 10 m default limit, so it validates thin — and
+        # raising the limit accepts it.
+        advice = advise_placement(20.0, 12.0, 4)
+        self.assertGreater(advice.score.worst_semi_major, 10.0)
+        validation = validate_floor_layouts(
+            advice.beacons, 20.0, 12.0)
+        self.assertEqual(validation.verdicts[0].status, "thin")
+        self.assertFalse(validation.ok)
+        self.assertIn("worst 95% error is",
+                      validation.verdicts[0].warnings[-1])
+        relaxed = validate_floor_layouts(
+            advice.beacons, 20.0, 12.0, max_worst_semi_major=12.0)
+        self.assertTrue(relaxed.ok)
+
+    def test_bad_inputs_raise(self):
+        with self.assertRaises(ValueError):
+            validate_floor_layouts([], 20.0, 12.0)
+        with self.assertRaises(ValueError):
+            validate_floor_layouts(BEACONS, 0.0, 12.0)
+        with self.assertRaises(ValueError):
+            validate_floor_layouts(
+                BEACONS, 20.0, 12.0, max_worst_semi_major=0.0)
+
+    def test_cli_validate_layout_flag(self):
+        from beacon.cli import main
+
+        self.assertEqual(main(["--validate-layout"]), 0)
 
 
 if __name__ == "__main__":
