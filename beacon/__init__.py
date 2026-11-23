@@ -15,13 +15,15 @@ from .fingerprint import (FingerprintMap, MultiFloorFingerprintMap,
                           build_fingerprint_map,
                           build_multifloor_fingerprint_map, grid_points)
 from .floors import FloorEstimate, Position, estimate_floor
+from .placement import (LayoutScore, PlacementAdvice, advise_placement,
+                        placement_uncertainty, score_layout)
 from .rssi import distance_to_rssi, rssi_to_distance
 from .simulate import simulate_multifloor_walk, simulate_walk, two_floor_walk
 from .survey import Survey
 from .trilateration import trilaterate
 from .uncertainty import PositionUncertainty, estimate_uncertainty
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"
 
 __all__ = [
     "Beacon",
@@ -53,5 +55,10 @@ __all__ = [
     "trilaterate",
     "PositionUncertainty",
     "estimate_uncertainty",
+    "LayoutScore",
+    "PlacementAdvice",
+    "advise_placement",
+    "placement_uncertainty",
+    "score_layout",
     "__version__",
 ]

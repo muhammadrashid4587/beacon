@@ -14,10 +14,13 @@ from beacon import (
     FingerprintMap,
     FloorEstimate,
     KalmanFilter,
+    LayoutScore,
     MovingAverageFilter,
     MultiFloorFingerprintMap,
+    PlacementAdvice,
     Position,
     PositioningEngine,
+    advise_placement,
     assess_beacon_health,
     build_fingerprint_map,
     build_multifloor_fingerprint_map,
@@ -30,8 +33,10 @@ from beacon import (
     fit_path_loss,
     grid_points,
     healthy_beacons,
+    placement_uncertainty,
     PositionUncertainty,
     rssi_to_distance,
+    score_layout,
     simulate_multifloor_walk,
     simulate_walk,
     Survey,
@@ -1559,6 +1564,87 @@ class TestPositionUncertainty(unittest.TestCase):
         engine = PositioningEngine(BEACONS)
         with self.assertRaises(ValueError):
             engine.estimate_with_uncertainty({"Z": -60.0})
+
+
+class TestPlacementAdvisor(unittest.TestCase):
+    def test_centre_ellipse_is_near_circular(self):
+        unc = placement_uncertainty(BEACONS, 10.0, 6.0)
+        self.assertIsInstance(unc, PositionUncertainty)
+        self.assertGreater(unc.semi_major, 0.0)
+        # Symmetric four-corner layout: the centre ellipse is
+        # near-circular, within a factor of two on its axes.
+        self.assertLess(unc.semi_major / unc.semi_minor, 2.0)
+
+    def test_corner_ellipse_is_stretched_along_weak_axis(self):
+        centre = placement_uncertainty(BEACONS, 10.0, 6.0)
+        corner = placement_uncertainty(BEACONS, 1.0, 1.0)
+        # Near a corner the beacons all lie on one side, so the
+        # ellipse stretches: much more eccentric than at the
+        # centre, and its minor axis is much tighter.
+        self.assertGreater(corner.semi_major / corner.semi_minor, 5.0)
+        self.assertLess(corner.semi_minor, centre.semi_minor)
+
+    def test_placement_uncertainty_needs_three_beacons(self):
+        with self.assertRaises(ValueError):
+            placement_uncertainty(BEACONS[:2], 10.0, 6.0)
+
+    def test_score_layout_corner_ward(self):
+        score = score_layout(BEACONS, 20.0, 12.0, margin=0.5)
+        self.assertIsInstance(score, LayoutScore)
+        self.assertGreater(score.mean_semi_major, 0.0)
+        self.assertGreaterEqual(score.worst_semi_major,
+                                score.mean_semi_major)
+        self.assertEqual(score.degenerate_points, 0)
+        self.assertGreater(score.n_points, 100)
+        self.assertIsNotNone(score.worst_point)
+
+    def test_score_layout_needs_three_beacons(self):
+        with self.assertRaises(ValueError):
+            score_layout(BEACONS[:2], 20.0, 12.0)
+
+    def test_advise_returns_n_beacons_inside_room(self):
+        advice = advise_placement(20.0, 12.0, 4)
+        self.assertIsInstance(advice, PlacementAdvice)
+        self.assertEqual(len(advice.beacons), 4)
+        self.assertEqual([b.id for b in advice.beacons],
+                         ["P1", "P2", "P3", "P4"])
+        positions = {(b.x, b.y) for b in advice.beacons}
+        self.assertEqual(len(positions), 4)
+        for beacon in advice.beacons:
+            self.assertGreaterEqual(beacon.x, 0.0)
+            self.assertLessEqual(beacon.x, 20.0)
+            self.assertGreaterEqual(beacon.y, 0.0)
+            self.assertLessEqual(beacon.y, 12.0)
+        self.assertEqual(advice.score.degenerate_points, 0)
+
+    def test_greedy_beats_corners_on_mean_uncertainty(self):
+        corners = score_layout(BEACONS, 20.0, 12.0, margin=0.5)
+        advice = advise_placement(20.0, 12.0, 4)
+        self.assertLess(advice.score.mean_semi_major,
+                        corners.mean_semi_major)
+
+    def test_more_beacons_never_hurts_mean_uncertainty(self):
+        four = advise_placement(20.0, 12.0, 4)
+        six = advise_placement(20.0, 12.0, 6)
+        self.assertLessEqual(six.score.mean_semi_major,
+                             four.score.mean_semi_major)
+        # Six beacons also beat the four-corner layout on the
+        # worst point, not just the mean.
+        corners = score_layout(BEACONS, 20.0, 12.0, margin=0.5)
+        self.assertLess(six.score.worst_semi_major,
+                        corners.worst_semi_major)
+
+    def test_advise_rejects_too_few_beacons(self):
+        with self.assertRaises(ValueError):
+            advise_placement(20.0, 12.0, 2)
+
+    def test_advise_rejects_more_beacons_than_spots(self):
+        with self.assertRaises(ValueError):
+            advise_placement(4.0, 4.0, 10)
+
+    def test_advise_rejects_bad_dimensions(self):
+        with self.assertRaises(ValueError):
+            advise_placement(0.0, 12.0, 4)
 
 
 if __name__ == "__main__":

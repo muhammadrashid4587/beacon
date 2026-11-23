@@ -58,6 +58,11 @@ library, no dependencies, no BLE hardware needed.
   each position — tight in the middle of the ward, stretched along
   the weak axis near an edge or where the beacons cluster on one
   side.
+- Beacon placement advisor: given a room and a beacon count, it
+  suggests where to mount the beacons so the 95% ellipse stays
+  small across the whole room, instead of mounting them where it
+  is convenient and finding out later that one corner is barely
+  located.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -484,6 +489,45 @@ distances are themselves noisy. A symmetric four-beacon square
 gives a near-circular ellipse; beacons clustered on one wall
 stretch the ellipse more than 2:1 along the weak axis.
 
+## Beacon placement
+
+Beacons usually end up where it is convenient to mount them —
+the corners, the walls — not where the geometry is good, and
+geometry is what decides how well a device can be located. The
+confidence ellipse measures that directly: at any point in the
+room, the ellipse's semi-major axis is the worst-case 95%
+positioning error there. `score_layout` averages that axis (and
+reports the worst point) over a grid of test points, and
+`advise_placement` picks the layout greedily — the first beacon
+nearest the room centre, the second as far from it as possible,
+each further beacon where it most reduces the mean semi-major
+axis:
+
+```python
+from beacon import advise_placement, score_layout
+
+advice = advise_placement(20.0, 12.0, 4)   # a 20 x 12 m ward
+# advice.beacons: P1 (9, 5), P2 (19, 11), P3 (5, 11), P4 (9, 1)
+# advice.score.mean_semi_major: 4.30 m
+score_layout(beacons, 20.0, 12.0)          # score any layout
+```
+
+The greedy choice optimises the mean, so it trades the worst
+point for the average one: on the default ward the four-corner
+layout averages 6.30 m with a worst point of 8.33 m, while the
+advised layout averages 4.30 m but its worst point (the far
+corner, thinly covered) is 11.16 m. If worst-case coverage
+matters, add beacons instead of rearranging four: six advised
+beacons average 2.78 m with a worst point of 7.20 m, better than
+the corners on both measures. Adding a beacon can only add
+information to the least-squares system, so the mean uncertainty
+never gets worse as beacons are added. The advice assumes the
+log-distance model with the beacons' own exponents and the
+stated RSSI noise (2.0 dB by default), and it knows nothing
+about walls, metal beds, or dead zones in the real ward — treat
+the suggested spots as a starting point, then survey and
+calibrate.
+
 ## Measured accuracy (simulator, not the real world)
 
 Default ward walk, 2 dB RSSI noise: mean error about 2.2 m (1.8-2.6 m
@@ -591,5 +635,19 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   seeds 1, 2, 3, 7, 11, a symmetric layout gives a near-circular
   ellipse, and beacons clustered on one wall stretch it more
   than 2:1 along the weak axis.
-  The roadmap grows as new needs surface — the confidence
-  ellipse is the latest addition.
+- Beacon placement advisor (where to mount the beacons) —
+  done: `placement_uncertainty` gives the 95% ellipse a layout
+  would give at any point in the room, `score_layout` averages
+  that semi-major axis (and reports the worst point) over a
+  test grid, and `advise_placement` picks the layout greedily —
+  first beacon nearest the room centre, second farthest from
+  it, each further beacon where it most reduces the mean
+  semi-major axis (v0.14.0); on the default 20 x 12 m ward the
+  advised four-beacon layout averages 4.30 m against the
+  corners' 6.30 m, though its worst point is worse (11.16 m
+  vs 8.33 m) since the mean-optimal layout leaves the far
+  corner thin — six advised beacons beat the corners on both
+  measures (2.78 m mean, 7.20 m worst), and adding a beacon
+  never worsens the mean.
+  The roadmap grows as new needs surface — the placement
+  advisor is the latest addition.
