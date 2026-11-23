@@ -309,6 +309,108 @@ class TestEngineKalmanFilter(unittest.TestCase):
                             f"Kalman did not beat moving average on seed {seed}")
 
 
+class TestTrajectorySmoothing(unittest.TestCase):
+    def test_smoother_beats_filter_across_seeds(self):
+        # A recorded walk can be revised with the observations that
+        # came after each step, so the RTS-smoothed path must beat
+        # the causal filtered path on every seed, not just seed 7.
+        path = rectangular_walk(20.0, 12.0, 10)
+        for seed in (1, 2, 3, 7, 11):
+            steps = simulate_walk(path, BEACONS, noise_db=2.0, seed=seed)
+            filtered = PositioningEngine(BEACONS)
+            ferr = []
+            for step in steps:
+                est = filtered.estimate(step["rssi"])
+                ferr.append(math.hypot(est[0] - step["true"][0],
+                                       est[1] - step["true"][1]))
+            smoothed = PositioningEngine(BEACONS).smooth_walk(
+                [step["rssi"] for step in steps])
+            serr = [math.hypot(p[0] - step["true"][0],
+                               p[1] - step["true"][1])
+                    for p, step in zip(smoothed, steps)]
+            # Measured smoothed means: 1.18-1.83 m against filtered
+            # 1.83-2.63 m. Bound is ~2x the worst measured seed.
+            self.assertLess(statistics.mean(serr), 4.0,
+                            f"smoothed mean error too high on seed {seed}")
+            self.assertLess(statistics.mean(serr), statistics.mean(ferr),
+                            f"smoother did not beat filter on seed {seed}")
+
+    def test_last_smoothed_equals_last_filtered(self):
+        # Nothing comes after the last step to revise it with, so
+        # the last smoothed position is the last filtered one.
+        path = rectangular_walk(20.0, 12.0, 10)
+        steps = simulate_walk(path, BEACONS, noise_db=2.0, seed=7)
+        filtered = PositioningEngine(BEACONS)
+        last_filtered = None
+        for step in steps:
+            last_filtered = filtered.estimate(step["rssi"])
+        smoothed = PositioningEngine(BEACONS).smooth_walk(
+            [step["rssi"] for step in steps])
+        self.assertEqual(len(smoothed), len(steps))
+        self.assertAlmostEqual(smoothed[-1][0], last_filtered[0])
+        self.assertAlmostEqual(smoothed[-1][1], last_filtered[1])
+
+    def test_empty_walk_returns_empty(self):
+        self.assertEqual(PositioningEngine(BEACONS).smooth_walk([]), [])
+
+    def test_single_step_returns_the_estimate(self):
+        step = simulate_walk([(10.0, 6.0)], BEACONS, noise_db=0.0, seed=1)[0]
+        smoothed = PositioningEngine(BEACONS).smooth_walk([step["rssi"]])
+        self.assertEqual(len(smoothed), 1)
+        self.assertAlmostEqual(smoothed[0][0], 10.0)
+        self.assertAlmostEqual(smoothed[0][1], 6.0)
+
+    def test_stationary_jitter_reduced_further(self):
+        # Smoothing a stationary device must jitter less than the
+        # already-filtered estimates.
+        steps = simulate_walk([(10.0, 6.0)] * 60, BEACONS,
+                              noise_db=3.0, seed=11)
+        filtered = PositioningEngine(BEACONS)
+        filt = [filtered.estimate(step["rssi"]) for step in steps]
+        smoothed = PositioningEngine(BEACONS).smooth_walk(
+            [step["rssi"] for step in steps])
+        filt_jitter = (statistics.pstdev([p[0] for p in filt])
+                       + statistics.pstdev([p[1] for p in filt]))
+        sm_jitter = (statistics.pstdev([p[0] for p in smoothed])
+                     + statistics.pstdev([p[1] for p in smoothed]))
+        self.assertLess(sm_jitter, filt_jitter)
+
+    def test_moving_average_engine_rejects_smooth_walk(self):
+        # The moving average keeps no forward-pass history, so there
+        # is nothing for the RTS recursion to run over.
+        engine = PositioningEngine(BEACONS, filter="moving_average")
+        steps = simulate_walk(rectangular_walk(20.0, 12.0, 5), BEACONS,
+                              noise_db=2.0, seed=7)
+        with self.assertRaises(ValueError):
+            engine.smooth_walk([step["rssi"] for step in steps])
+
+    def test_floor_changing_walk_is_rejected(self):
+        # A floor change resets the filter mid-walk, so only the
+        # final segment's history would survive — reject instead of
+        # silently returning a partial smoothing.
+        floors = ([Beacon("A", 0.0, 0.0, floor=0),
+                   Beacon("B", 20.0, 0.0, floor=0),
+                   Beacon("C", 20.0, 12.0, floor=0),
+                   Beacon("D", 0.0, 12.0, floor=0),
+                   Beacon("E", 0.0, 0.0, floor=1),
+                   Beacon("F", 20.0, 0.0, floor=1),
+                   Beacon("G", 20.0, 12.0, floor=1),
+                   Beacon("H", 0.0, 12.0, floor=1)])
+        steps = simulate_multifloor_walk(
+            two_floor_walk(20.0, 12.0, 5), floors, noise_db=2.0, seed=7)
+        with self.assertRaises(ValueError):
+            PositioningEngine(floors).smooth_walk(
+                [step["rssi"] for step in steps])
+
+    def test_reset_clears_smoother_history(self):
+        filt = KalmanFilter()
+        filt.update((10.0, 6.0))
+        filt.update((11.0, 6.0))
+        self.assertEqual(len(filt.smooth()), 2)
+        filt.reset()
+        self.assertEqual(filt.smooth(), [])
+
+
 class TestSimulator(unittest.TestCase):
     def test_simulated_walk_stays_within_error_bound(self):
         # Default ward walk, 2 dB RSSI noise, seed fixed for reproducibility.

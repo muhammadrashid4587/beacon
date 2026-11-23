@@ -155,6 +155,36 @@ class PositioningEngine:
         position = self.estimate_with_floor(observations)
         return (position.x, position.y)
 
+    def smooth_walk(self, observations: list[dict[str, float]]
+                    ) -> list[tuple[float, float]]:
+        """Rauch-Tung-Striebel smoothed positions for a recorded walk.
+
+        Runs the whole walk through the live (causal) filter, then
+        revises every past position with the observations that came
+        after it, so the returned path is steadier and closer to the
+        true path than the step-by-step estimates. Returns one
+        (x, y) per observation, in order; [] for an empty walk. The
+        engine is reset first, so a previous walk does not leak into
+        this one. Requires the Kalman filter: the moving-average
+        opt-out keeps no forward-pass history to smooth over. A walk
+        that changes floor is rejected — split it per floor instead,
+        since a floor change resets the filter and would leave only
+        the final segment's history to smooth.
+        """
+        if self.filter != "kalman":
+            raise ValueError(
+                "smooth_walk needs the Kalman filter "
+                f"(engine uses {self.filter!r})")
+        self.reset()
+        floors: set[int] = set()
+        for obs in observations:
+            floors.add(self.estimate_with_floor(obs).floor)
+        if len(floors) > 1:
+            raise ValueError(
+                "smooth_walk does not support a walk that changes "
+                "floor; split the walk per floor")
+        return self._filter.smooth()
+
     def reset(self) -> None:
         """Forget filter history (e.g. when tracking a new device)."""
         self._filter.reset()

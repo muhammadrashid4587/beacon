@@ -39,6 +39,10 @@ library, no dependencies, no BLE hardware needed.
   (its RSSI no longer matches its calibrated constants), or dead
   (never heard), so a broken beacon can be recalibrated or excluded
   from the engine instead of poisoning every estimate.
+- Trajectory smoothing: a recorded walk can be re-run through the
+  Rauch-Tung-Striebel smoother, which revises each past position
+  with the observations that came after it, so the replayed path
+  is steadier and closer to the true path than the live estimates.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -299,6 +303,46 @@ power rose 15 dB pulls a noiseless estimate 5.6 m off; dropping
 it brings the error back to 0 m. Multi-floor surveys are
 rejected: the slab attenuation would look like drift.
 
+## Trajectory smoothing
+
+The live filter is causal: each estimate only uses the observations
+up to that step, so it lags behind turns and keeps some jitter. For
+a recorded walk the future is already known, so the walk can be
+smoothed after the fact. `smooth_walk` runs the whole walk through
+the Kalman filter, then runs the Rauch-Tung-Striebel backward
+recursion over the recorded forward pass, revising each past
+position with the observations that came after it:
+
+```python
+from beacon import Beacon, PositioningEngine
+from beacon.simulate import rectangular_walk, simulate_walk
+
+beacons = [Beacon("A", 0, 0), Beacon("B", 20, 0),
+           Beacon("C", 20, 12), Beacon("D", 0, 12)]
+steps = simulate_walk(rectangular_walk(20, 12, 10), beacons,
+                      noise_db=2.0, seed=7)
+engine = PositioningEngine(beacons)
+smoothed = engine.smooth_walk([step["rssi"] for step in steps])
+# one (x, y) per step, in order; the last one equals the last live
+# estimate, since nothing comes after it to revise it with
+```
+
+`KalmanFilter.smooth()` exposes the same recursion directly for a
+filter fed by hand, and returns `[]` before any update or after a
+reset. Smoothing needs the Kalman filter: the moving-average
+opt-out keeps no forward-pass history, so `smooth_walk` raises on
+an engine built with `filter="moving_average"`. A walk that changes
+floor is rejected too — the floor change resets the filter
+mid-walk, so only the final segment's history would survive; split
+the walk per floor instead.
+
+Measured accuracy (simulator, 2 dB RSSI noise, default ward walk):
+smoothing cuts the mean error on every seed 1, 2, 3, 7, 11 — seed 1:
+1.97 m to 1.31 m; seed 2: 2.57 m to 1.71 m; seed 3: 2.63 m to
+1.83 m; seed 7: 2.16 m to 1.48 m; seed 11: 1.83 m to 1.18 m. A
+stationary device's jitter (3 dB noise, 60 steps) drops from 5.32 m
+to 3.15 m of combined axis standard deviation.
+
 ## Measured accuracy (simulator, not the real world)
 
 Default ward walk, 2 dB RSSI noise: mean error about 2.2 m (1.8-2.6 m
@@ -363,4 +407,16 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   `healthy_beacons` builds the engine from the `ok` beacons only
   (v0.9.0); excluding a beacon whose transmit power rose 15 dB
   brings a noiseless estimate from 5.6 m off back to 0 m.
+- Trajectory smoothing (replay a recorded walk with the future
+  known) — done: `PositioningEngine.smooth_walk` runs a walk
+  through the Kalman filter and then the Rauch-Tung-Striebel
+  backward recursion over the recorded forward pass, revising each
+  past position with the observations that came after it, and
+  `KalmanFilter.smooth()` exposes the recursion directly (v0.10.0);
+  mean error falls on every seed 1, 2, 3, 7, 11 (1.97→1.31 m,
+  2.57→1.71 m, 2.63→1.83 m, 2.16→1.48 m, 1.83→1.18 m), and a
+  stationary device's jitter drops from 5.32 m to 3.15 m. A walk
+  that changes floor is rejected (split it per floor), and the
+  moving-average opt-out raises, since it keeps no forward-pass
+  history to smooth over.
   The roadmap is now complete.
