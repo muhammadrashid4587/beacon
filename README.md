@@ -39,6 +39,12 @@ library, no dependencies, no BLE hardware needed.
   (its RSSI no longer matches its calibrated constants), or dead
   (never heard), so a broken beacon can be recalibrated or excluded
   from the engine instead of poisoning every estimate.
+- Calibration drift alarm: a live monitor watches the observation
+  stream and raises an alarm when a beacon's rolling mean RSSI
+  residual crosses the 5 dB threshold, so a beacon that goes bad
+  mid-shift is caught while the ward is running, not at the next
+  re-walk — and the alarm clears on its own when the beacon
+  recovers.
 - Trajectory smoothing: a recorded walk can be re-run through the
   Rauch-Tung-Striebel smoother, which revises each past position
   with the observations that came after it, so the replayed path
@@ -307,6 +313,51 @@ power rose 15 dB pulls a noiseless estimate 5.6 m off; dropping
 it brings the error back to 0 m. Multi-floor surveys are
 rejected: the slab attenuation would look like drift.
 
+## Calibration drift alarm
+
+The health check above is a one-shot verdict on a finished survey.
+A ward that is already running needs the same verdict live: a
+beacon whose transmit power changed, that was moved, or that a
+trolley is now shielding starts poisoning estimates the moment it
+goes bad, and nobody re-walks the ward every hour to find out.
+`DriftMonitor` watches the observation stream — feed it each
+observation as it arrives, together with the device's position
+(from a reference tag at a known spot, or any ground truth the
+deployment has), and it keeps a rolling window of RSSI residuals
+per beacon and alarms when a beacon's rolling mean residual
+crosses the 5 dB threshold:
+
+```python
+from beacon import DriftMonitor
+from beacon.simulate import rectangular_walk, simulate_walk
+
+monitor = DriftMonitor(beacons)   # window=20 readings, 5 dB threshold
+for step in simulate_walk(rectangular_walk(20, 12, 10), beacons,
+                          noise_db=2.0, seed=7):
+    monitor.feed(step)
+monitor.alarms()   # [] while every beacon matches its calibration
+```
+
+`alarms()` returns the beacons currently alarming, each with its
+rolling mean residual in dB and how many readings are in its
+window; `alarm(id)` and `is_alarming(id)` check one beacon, and
+`status(id)` reports the rolling mean even when it is not alarming.
+A beacon needs at least 5 readings in its window before it can
+alarm, so a single noisy reading never trips it — only a sustained
+shift does. The alarm clears on its own when the rolling mean
+comes back inside the threshold, so a beacon that recovers (the
+trolley moved away) stops alarming without anyone resetting the
+monitor. Unknown beacon ids in an observation are ignored rather
+than failing the stream, and multi-floor positions are rejected,
+since the slab attenuation would look like drift.
+
+Measured behaviour (simulator, 2 dB RSSI noise): a healthy walk
+raises no alarms; a beacon reading 12 dB too loud alarms with a
+rolling mean of about +12 dB while the other three stay silent; a
+beacon reading 8 dB too quiet alarms the other way. A short drift
+that leaves the 5-reading window stops alarming on its own, and
+feeding a healthy walk after a drifted one clears the alarm.
+
 ## Trajectory smoothing
 
 The live filter is causal: each estimate only uses the observations
@@ -469,5 +520,15 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   the original (v0.11.0); a map-less survey rebuilds its map from
   the steps on demand, a map-only survey still locates, and
   multi-floor surveys round-trip one map per floor.
-  The roadmap grows as new needs surface — survey export/import is
+- Calibration drift alarm (catch a beacon going bad while the
+  ward is running) — done: `DriftMonitor` watches the live
+  observation stream, keeps a rolling window of RSSI residuals
+  per beacon (window 20, 5 dB threshold, 5 readings before it
+  can alarm), and raises a `DriftAlarm` when a beacon's rolling
+  mean residual crosses the threshold, clearing it on its own
+  when the beacon recovers (v0.12.0); a healthy walk raises no
+  alarms, a beacon 12 dB too loud alarms at about +12 dB while
+  the others stay silent, and a short drift that leaves the
+  window stops alarming by itself.
+  The roadmap grows as new needs surface — the drift alarm is
   the latest addition.

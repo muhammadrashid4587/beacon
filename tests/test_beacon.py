@@ -24,6 +24,7 @@ from beacon import (
     calibrate_beacon,
     calibrate_survey,
     distance_to_rssi,
+    DriftMonitor,
     estimate_floor,
     fit_path_loss,
     grid_points,
@@ -1333,6 +1334,119 @@ class TestSurveyExport(unittest.TestCase):
                                          beacons, noise_db=0.0, seed=7)
         with self.assertRaises(ValueError):
             Survey(beacons, steps).calibrated_beacons()
+
+
+class TestDriftMonitor(unittest.TestCase):
+    def test_healthy_walk_raises_no_alarm(self):
+        monitor = DriftMonitor(BEACONS)
+        steps = simulate_walk(rectangular_walk(20, 12, 10), BEACONS,
+                              noise_db=2.0, seed=7)
+        for step in steps:
+            monitor.feed(step)
+        self.assertEqual(monitor.alarms(), [])
+        for beacon in BEACONS:
+            self.assertFalse(monitor.is_alarming(beacon.id))
+
+    def test_drifted_beacon_alarms_and_others_do_not(self):
+        monitor = DriftMonitor(BEACONS)
+        steps = simulate_walk(rectangular_walk(20, 12, 10), BEACONS,
+                              noise_db=2.0, seed=7)
+        for step in steps:
+            step["rssi"]["A"] += 12.0  # beacon A reads 12 dB too loud
+            monitor.feed(step)
+        alarms = monitor.alarms()
+        self.assertEqual([a.id for a in alarms], ["A"])
+        self.assertAlmostEqual(alarms[0].mean_residual_db, 12.0, delta=2.0)
+        self.assertEqual(alarms[0].samples, 20)
+
+    def test_negative_drift_alarms_too(self):
+        monitor = DriftMonitor(BEACONS)
+        steps = simulate_walk(rectangular_walk(20, 12, 10), BEACONS,
+                              noise_db=0.0, seed=7)
+        for step in steps:
+            step["rssi"]["C"] -= 8.0  # beacon C reads 8 dB too quiet
+            monitor.feed(step)
+        alarm = monitor.alarm("C")
+        self.assertIsNotNone(alarm)
+        self.assertAlmostEqual(alarm.mean_residual_db, -8.0, places=6)
+
+    def test_single_bad_reading_does_not_alarm(self):
+        monitor = DriftMonitor(BEACONS)
+        monitor.observe((10.0, 6.0), {"A": -30.0, "B": -70.0,
+                                      "C": -70.0, "D": -70.0})
+        self.assertEqual(monitor.alarms(), [])
+
+    def test_alarm_clears_when_beacon_recovers(self):
+        monitor = DriftMonitor(BEACONS, window=10)
+        drifted = simulate_walk(rectangular_walk(20, 12, 10), BEACONS,
+                                noise_db=0.0, seed=7)
+        for step in drifted:
+            step["rssi"]["B"] += 12.0
+            monitor.feed(step)
+        self.assertTrue(monitor.is_alarming("B"))
+        healthy = simulate_walk(rectangular_walk(20, 12, 10), BEACONS,
+                                noise_db=0.0, seed=7)
+        for step in healthy:
+            monitor.feed(step)
+        self.assertFalse(monitor.is_alarming("B"))
+        self.assertEqual(monitor.alarms(), [])
+
+    def test_rolling_window_forgets_old_drift(self):
+        # A short drift that leaves the window stops alarming on its own.
+        monitor = DriftMonitor(BEACONS, window=5, min_samples=5)
+        steps = simulate_walk(rectangular_walk(20, 12, 10), BEACONS,
+                              noise_db=0.0, seed=7)
+        for step in steps[:5]:
+            step["rssi"]["D"] += 12.0
+            monitor.feed(step)
+        self.assertTrue(monitor.is_alarming("D"))
+        for step in steps[5:10]:
+            monitor.feed(step)
+        self.assertFalse(monitor.is_alarming("D"))
+
+    def test_status_reports_rolling_mean(self):
+        monitor = DriftMonitor(BEACONS)
+        steps = simulate_walk([(10.0, 6.0)] * 6, BEACONS,
+                              noise_db=0.0, seed=7)
+        for step in steps:
+            monitor.feed(step)
+        state = monitor.status("A")
+        self.assertIsNotNone(state)
+        self.assertAlmostEqual(state.mean_residual_db, 0.0, places=6)
+        self.assertEqual(state.samples, 6)
+        self.assertIsNone(monitor.alarm("A"))
+
+    def test_unheard_beacon_has_no_status(self):
+        monitor = DriftMonitor(BEACONS)
+        self.assertIsNone(monitor.status("A"))
+        self.assertIsNone(monitor.alarm("A"))
+
+    def test_unknown_beacon_in_observation_is_ignored(self):
+        monitor = DriftMonitor(BEACONS)
+        monitor.observe((10.0, 6.0), {"Z": -60.0})
+        self.assertIsNone(monitor.status("A"))
+
+    def test_unknown_beacon_status_raises(self):
+        monitor = DriftMonitor(BEACONS)
+        with self.assertRaises(ValueError):
+            monitor.status("Z")
+
+    def test_bad_parameters_raise(self):
+        with self.assertRaises(ValueError):
+            DriftMonitor([])
+        with self.assertRaises(ValueError):
+            DriftMonitor(BEACONS, window=0)
+        with self.assertRaises(ValueError):
+            DriftMonitor(BEACONS, drift_threshold_db=0)
+        with self.assertRaises(ValueError):
+            DriftMonitor(BEACONS, min_samples=0)
+        with self.assertRaises(ValueError):
+            DriftMonitor(BEACONS, window=5, min_samples=6)
+
+    def test_multifloor_position_raises(self):
+        monitor = DriftMonitor(BEACONS)
+        with self.assertRaises(ValueError):
+            monitor.observe((5.0, 5.0, 0), {"A": -60.0})
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from .beacon import Beacon
 from .calibration import calibrate_beacon, calibrate_survey, fit_path_loss
 from .engine import PositioningEngine
 from .filter import KalmanFilter, MovingAverageFilter
+from .drift import DriftAlarm, DriftMonitor
 from .health import BeaconHealth, assess_beacon_health, healthy_beacons
 from .fingerprint import (FingerprintMap, MultiFloorFingerprintMap,
                           build_fingerprint_map,
@@ -19,7 +20,7 @@ from .simulate import simulate_multifloor_walk, simulate_walk, two_floor_walk
 from .survey import Survey
 from .trilateration import trilaterate
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 __all__ = [
     "Beacon",
@@ -29,6 +30,8 @@ __all__ = [
     "BeaconHealth",
     "assess_beacon_health",
     "healthy_beacons",
+    "DriftAlarm",
+    "DriftMonitor",
     "FingerprintMap",
     "MultiFloorFingerprintMap",
     "build_fingerprint_map",
