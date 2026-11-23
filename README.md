@@ -91,6 +91,11 @@ library, no dependencies, no BLE hardware needed.
   and one 95% confidence ellipse per point, coloured by how wide
   it is, with a legend — so a dashboard can show where the
   device went and how much to trust each point.
+- A per-beacon coverage heatmap on the ward-map overlay: shade
+  the ward grid by the positioning quality the beacon layout
+  gives at each cell, so a dashboard can see where the ward is
+  well covered and where a device would be guessing — before
+  any device walks there.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -816,6 +821,35 @@ Measured behaviour: the default demo export
 renders 40 track points, 40 ellipses, all four beacons, and the
 same SVG from the CSV export — JSON and CSV are the same track.
 
+## Coverage heatmap
+
+The overlay above shows where a device *went*; it says nothing
+about where a device *could* be located well. The heatmap fills
+that gap: `coverage_heatmap` grids the ward (2 m cells, 1 m off
+the walls) and scores each cell with the 95% ellipse semi-major
+axis the beacon layout would give there — the same uncertainty
+model behind the placement advisor and the overlay's per-point
+ellipses, so the heatmap and the track agree about where the
+ward is thin. `render_map_overlay(..., heatmap=True)` shades
+each cell in the same confidence colours as the ellipses (green
+tight, amber loose, red very loose), under the track, and adds
+a summary line to the legend — mean and worst semi-major axis
+over the cells, and where the worst cell is. Degenerate cells
+are left unshaded rather than coloured as if they were covered.
+The CLI renders it directly:
+
+```sh
+python3 -m beacon.cli --map-overlay ward-a-track.json --map-output ward-a-track.svg --map-heatmap
+```
+
+Measured behaviour: on the default four-corner layout the
+heatmap is 60 cells with a mean 95% semi-major axis of 6.26 m
+and a worst cell of 7.78 m at (9, 1) m — the corners cover the
+ward thinly everywhere, which is exactly what the placement
+advisor's advised layout (mean 4.30 m) improves on. The heatmap
+is a layout verdict, not a track verdict: it depends only on
+the beacons, so it is the same for every track on that ward.
+
 ## Measured accuracy (simulator, not the real world)
 
 Default ward walk, 2 dB RSSI noise: mean error about 2.2 m (1.8-2.6 m
@@ -1016,5 +1050,19 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   command line (v0.20.0); on the default demo export (40 rows,
   coverage 1.0) the overlay renders 40 points, 40 ellipses and
   all four beacons, and the JSON and CSV exports render the
-  identical SVG. The roadmap grows as new needs surface — the
-  ward-map overlay is the latest addition.
+  identical SVG.
+- Per-beacon coverage heatmap on the ward-map overlay — done:
+  `coverage_heatmap` grids the ward and scores each cell with
+  the 95% ellipse semi-major axis the beacon layout would give
+  there, from the same uncertainty model as the placement
+  advisor, and `render_map_overlay(..., heatmap=True)` shades
+  each cell in the same confidence colours as the per-point
+  ellipses, under the track, with a mean/worst summary line in
+  the legend; `python -m beacon.cli --map-overlay track.json
+  --map-heatmap` renders it from the command line (v0.21.0); on
+  the default four-corner layout the heatmap is 60 cells with a
+  mean semi-major axis of 6.26 m and a worst cell of 7.78 m at
+  (9, 1) m — the corners cover the ward thinly everywhere, which
+  the advised layout (mean 4.30 m) improves on. The roadmap
+  grows as new needs surface — the coverage heatmap is the
+  latest addition.

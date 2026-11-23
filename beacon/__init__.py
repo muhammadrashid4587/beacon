@@ -23,14 +23,16 @@ from .survey import Survey
 from .export import (export_track_csv, export_track_json,
                      load_track_csv, load_track_json, track_from_dict,
                      track_rows, track_to_dict)
-from .map_overlay import (confidence_colour, load_track_for_overlay,
-                        render_map_overlay, write_map_overlay)
+from .map_overlay import (CoverageCell, HeatmapSummary, confidence_colour,
+                        coverage_heatmap, heatmap_summary,
+                        load_track_for_overlay, render_map_overlay,
+                        write_map_overlay)
 from .tracking import (ExcludedBeacon, LivePosition, LiveTracker,
                        TrackReport, evaluate_live_track)
 from .trilateration import trilaterate
 from .uncertainty import PositionUncertainty, estimate_uncertainty
 
-__version__ = "0.20.0"
+__version__ = "0.21.0"
 
 __all__ = [
     "Beacon",
@@ -73,6 +75,10 @@ __all__ = [
     "track_to_dict",
     "trilaterate",
     "confidence_colour",
+    "coverage_heatmap",
+    "CoverageCell",
+    "heatmap_summary",
+    "HeatmapSummary",
     "load_track_for_overlay",
     "render_map_overlay",
     "write_map_overlay",

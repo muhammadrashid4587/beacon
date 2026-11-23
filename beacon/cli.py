@@ -55,6 +55,10 @@ def main(argv=None) -> int:
     parser.add_argument("--map-floor", type=int, default=None,
                         help="floor to plot on the overlay (default: "
                         "the track's most common floor)")
+    parser.add_argument("--map-heatmap", action="store_true",
+                        help="shade the overlay with a per-cell "
+                        "coverage heatmap (positioning quality from "
+                        "the beacon layout)")
     args = parser.parse_args(argv)
 
     if args.map_overlay is not None:
@@ -62,7 +66,8 @@ def main(argv=None) -> int:
         svg = render_map_overlay(rows, default_beacons(),
                                  width_m=WARD_WIDTH_M,
                                  height_m=WARD_HEIGHT_M,
-                                 floor=args.map_floor)
+                                 floor=args.map_floor,
+                                 heatmap=args.map_heatmap)
         if args.map_output is not None:
             with open(args.map_output, "w", encoding="utf-8") as handle:
                 handle.write(svg)

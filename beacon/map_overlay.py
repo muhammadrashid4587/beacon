@@ -21,10 +21,13 @@ Pure standard library, no dependencies.
 """
 
 import os
+from dataclasses import dataclass
 from xml.sax.saxutils import escape
 
 from .beacon import Beacon
 from .export import load_track_csv, load_track_json
+from .fingerprint import grid_points
+from .placement import placement_uncertainty
 
 # SVG canvas: the ward is drawn inside the margin, keeping its
 # aspect ratio, so a 20 x 12 m ward does not stretch.
@@ -45,6 +48,94 @@ NO_ELLIPSE_LABEL = "no ellipse (degenerate geometry)"
 
 BEACON_COLOUR = "#1565c0"
 TRACK_COLOUR = "#212121"
+
+HEATMAP_FILL_OPACITY = "0.22"
+
+
+@dataclass(frozen=True)
+class CoverageCell:
+    """One heatmap cell: the positioning quality at ``(x, y)``.
+
+    ``semi_major`` is the 95% confidence ellipse's semi-major axis
+    in metres that the beacon layout would give at this cell (see
+    :func:`beacon.placement.placement_uncertainty`) — ``None``
+    where the ellipse is undefined, a degenerate geometry the
+    heatmap makes no claim about.
+    """
+
+    x: float
+    y: float
+    semi_major: float | None
+
+
+@dataclass(frozen=True)
+class HeatmapSummary:
+    """A heatmap's coverage in one line.
+
+    ``mean_semi_major`` / ``worst_semi_major`` are the mean and
+    worst 95% ellipse semi-major axis over the cells that gave a
+    defined ellipse; ``worst_point`` is where the worst axis
+    occurs; ``degenerate_cells`` counts cells with no defined
+    ellipse, left out of both figures; ``n_cells`` is the grid
+    size.
+    """
+
+    mean_semi_major: float
+    worst_semi_major: float
+    worst_point: tuple[float, float] | None
+    degenerate_cells: int
+    n_cells: int
+
+
+def coverage_heatmap(beacons: list[Beacon], width_m: float = 20.0,
+                     height_m: float = 12.0, spacing: float = 2.0,
+                     sigma_rssi_db: float = 2.0
+                     ) -> list[CoverageCell]:
+    """Per-cell positioning quality for a beacon layout.
+
+    The ward is gridded at ``spacing`` (1 m off the walls, so no
+    cell sits on a corner beacon) and each cell gets the 95%
+    ellipse semi-major axis the layout would give there, from
+    :func:`beacon.placement.placement_uncertainty` — the same
+    uncertainty model behind the placement advisor and the
+    overlay's per-point ellipses, so the heatmap and the track
+    agree about where the ward is well covered and where it is
+    thin. Raises ValueError for fewer than three beacons or
+    non-positive dimensions or spacing.
+    """
+    if len(beacons) < 3:
+        raise ValueError("a coverage heatmap needs at least 3 beacons")
+    if spacing <= 0:
+        raise ValueError("spacing must be positive")
+    cells = []
+    for x, y in grid_points(width_m, height_m, spacing):
+        try:
+            unc = placement_uncertainty(beacons, x, y, sigma_rssi_db)
+        except ValueError:
+            cells.append(CoverageCell(x, y, None))
+            continue
+        cells.append(CoverageCell(x, y, unc.semi_major))
+    return cells
+
+
+def heatmap_summary(cells: list[CoverageCell]) -> HeatmapSummary:
+    """Summarise a heatmap: mean and worst semi-major axis.
+
+    Cells with no defined ellipse are counted in
+    ``degenerate_cells`` and left out of the mean and worst.
+    Raises ValueError when no cell gave a defined ellipse.
+    """
+    defined = [cell for cell in cells if cell.semi_major is not None]
+    if not defined:
+        raise ValueError("no heatmap cell gave a defined uncertainty")
+    worst = max(defined, key=lambda cell: cell.semi_major)
+    return HeatmapSummary(
+        mean_semi_major=sum(cell.semi_major for cell in defined)
+        / len(defined),
+        worst_semi_major=worst.semi_major,
+        worst_point=(worst.x, worst.y),
+        degenerate_cells=len(cells) - len(defined),
+        n_cells=len(cells))
 
 
 def confidence_colour(semi_major: float | None) -> str:
@@ -78,7 +169,10 @@ def _project(x: float, y: float, scale: float,
 def render_map_overlay(rows: list[dict], beacons: list[Beacon],
                        width_m: float = 20.0, height_m: float = 12.0,
                        floor: int | None = None,
-                       title: str | None = None) -> str:
+                       title: str | None = None,
+                       heatmap: bool = False,
+                       heatmap_spacing: float = 2.0,
+                       sigma_rssi_db: float = 2.0) -> str:
     """Render an exported live track as a ward-map SVG string.
 
     ``rows`` are the row dicts ``load_track_json`` /
@@ -86,7 +180,13 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
     at their known positions; beacons on other floors are drawn
     too, since the plan is the same ward — only the track is
     filtered to one floor. ``width_m`` / ``height_m`` are the
-    ward's size in metres.
+    ward's size in metres. With ``heatmap`` the overlay also
+    shades the ward grid by the positioning quality the beacon
+    layout gives at each cell (see :func:`coverage_heatmap`),
+    coloured by the same confidence bands as the per-point
+    ellipses, so a dashboard can see at a glance where the ward
+    is well covered and where a device would be guessing — before
+    any device walks there.
 
     Raises ValueError on an empty track, with no beacons, or when
     the chosen floor has no located points.
@@ -147,6 +247,28 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
             f'font-family="sans-serif" font-size="10" fill="#757575" '
             f'text-anchor="end">{grid_y:g} m</text>')
         grid_y += 5.0
+
+    # Coverage heatmap, under everything else: one shaded cell
+    # per grid point, coloured by the same confidence bands as
+    # the per-point ellipses. Degenerate cells are left unshaded
+    # rather than coloured as if they were covered.
+    summary = None
+    if heatmap:
+        cells = coverage_heatmap(beacons, width_m, height_m,
+                                 heatmap_spacing, sigma_rssi_db)
+        summary = heatmap_summary(cells)
+        cell_px = heatmap_spacing * scale
+        for cell in cells:
+            if cell.semi_major is None:
+                continue
+            cx, cy = _project(cell.x, cell.y, scale, width_m, height_m)
+            parts.append(
+                f'<rect x="{cx - cell_px / 2:.1f}" '
+                f'y="{cy - cell_px / 2:.1f}" width="{cell_px:.1f}" '
+                f'height="{cell_px:.1f}" '
+                f'fill="{confidence_colour(cell.semi_major)}" '
+                f'fill-opacity="{HEATMAP_FILL_OPACITY}" '
+                f'data-heatmap-cell="{cell.x:g},{cell.y:g}"/>')
 
     # Confidence ellipses, then the track path, then the points —
     # the path sits on top of the ellipses, the points on top of
@@ -232,6 +354,19 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
         if lx > SVG_WIDTH - MARGIN - 120:
             lx = MARGIN
             legend_y += 24
+    if summary is not None:
+        legend_y += 24
+        parts.append(
+            f'<text x="{MARGIN}" y="{legend_y + 18}" '
+            f'font-family="sans-serif" font-size="11" '
+            f'fill="#757575">Coverage heatmap: mean 95% semi-major '
+            f'{summary.mean_semi_major:.2f} m, worst '
+            f'{summary.worst_semi_major:.2f} m at '
+            f'({summary.worst_point[0]:g}, {summary.worst_point[1]:g}) m'
+            f" — {summary.n_cells} cells"
+            + (f", {summary.degenerate_cells} degenerate"
+               if summary.degenerate_cells else "")
+            + "</text>")
     parts.append("</svg>")
     return "\n".join(parts) + "\n"
 
@@ -256,12 +391,18 @@ def load_track_for_overlay(path: str) -> list[dict]:
 def write_map_overlay(track_path: str, beacons: list[Beacon],
                       output_path: str, width_m: float = 20.0,
                       height_m: float = 12.0,
-                      floor: int | None = None) -> str:
+                      floor: int | None = None,
+                      heatmap: bool = False,
+                      heatmap_spacing: float = 2.0,
+                      sigma_rssi_db: float = 2.0) -> str:
     """Render the overlay for ``track_path`` and write it to
     ``output_path``. Returns the SVG string."""
     svg = render_map_overlay(load_track_for_overlay(track_path),
                              beacons, width_m=width_m,
-                             height_m=height_m, floor=floor)
+                             height_m=height_m, floor=floor,
+                             heatmap=heatmap,
+                             heatmap_spacing=heatmap_spacing,
+                             sigma_rssi_db=sigma_rssi_db)
     with open(output_path, "w", encoding="utf-8") as handle:
         handle.write(svg)
     return svg

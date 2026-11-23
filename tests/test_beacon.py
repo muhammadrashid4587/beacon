@@ -2412,6 +2412,64 @@ class TestWardMapOverlay(unittest.TestCase):
                 self.assertEqual(handle.read(), svg)
             self.assertEqual(svg.count('data-index="'), 40)
 
+    def test_coverage_heatmap_grids_the_ward(self):
+        from beacon import coverage_heatmap, heatmap_summary
+
+        cells = coverage_heatmap(BEACONS)
+        # 20 x 12 m ward at 2 m spacing, 1 m off the walls: 10 x 6.
+        self.assertEqual(len(cells), 60)
+        self.assertTrue(all(cell.semi_major is not None for cell in cells))
+        summary = heatmap_summary(cells)
+        self.assertEqual(summary.n_cells, 60)
+        self.assertEqual(summary.degenerate_cells, 0)
+        # The corner layout is thin everywhere, so the mean sits
+        # in the loose band and the worst cell is worse than it.
+        self.assertGreater(summary.mean_semi_major, 2.0)
+        self.assertGreater(summary.worst_semi_major,
+                           summary.mean_semi_major)
+        self.assertIsNotNone(summary.worst_point)
+
+    def test_coverage_heatmap_rejects_bad_inputs(self):
+        from beacon import coverage_heatmap, heatmap_summary
+
+        with self.assertRaises(ValueError):
+            coverage_heatmap(BEACONS[:2])
+        with self.assertRaises(ValueError):
+            coverage_heatmap(BEACONS, spacing=0)
+        with self.assertRaises(ValueError):
+            heatmap_summary([])
+
+    def test_heatmap_layer_renders_on_the_overlay(self):
+        rows = self._example_rows()
+        svg = render_map_overlay(rows, BEACONS, heatmap=True)
+        # One shaded cell per grid point, under the track.
+        self.assertEqual(svg.count("data-heatmap-cell="), 60)
+        self.assertIn("Coverage heatmap:", svg)
+        self.assertIn("mean 95% semi-major", svg)
+        # The track still renders on top of the heatmap.
+        self.assertEqual(svg.count('data-index="'), len(rows))
+        # Off by default: no heatmap cells, no summary line.
+        plain = render_map_overlay(rows, BEACONS)
+        self.assertNotIn("data-heatmap-cell=", plain)
+        self.assertNotIn("Coverage heatmap:", plain)
+
+    def test_cli_map_heatmap_flag_writes_svg(self):
+        from beacon.cli import main
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        track = os.path.join(here, "..", "examples",
+                             "live-track-export.json")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "map.svg")
+            self.assertEqual(main(argv=["--map-overlay", track,
+                                       "--map-output", out,
+                                       "--map-heatmap"]), 0)
+            with open(out, encoding="utf-8") as handle:
+                svg = handle.read()
+            self.assertIn("<svg", svg)
+            self.assertEqual(svg.count("data-heatmap-cell="), 60)
+            self.assertIn("Coverage heatmap:", svg)
+
     def test_cli_map_overlay_flag_writes_svg(self):
         from beacon.cli import main
 
