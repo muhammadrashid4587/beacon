@@ -63,6 +63,11 @@ library, no dependencies, no BLE hardware needed.
   small across the whole room, instead of mounting them where it
   is convenient and finding out later that one corner is barely
   located.
+- Live tracking mode: a tracker that consumes a stream of RSSI
+  readings as they arrive and emits a live position per reading,
+  with the 95% confidence ellipse attached — partial scans merge
+  across beacons, stale readings age out, and a beacon dropping
+  out mid-stream degrades the track instead of breaking it.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -83,12 +88,14 @@ library, no dependencies, no BLE hardware needed.
 ```sh
 make test   # run the tests
 make demo   # simulated walk through a 20 x 12 m ward
+make live-demo   # the same walk, streamed through live tracking mode
 ```
 
 Or directly:
 
 ```sh
 python3 -m beacon.cli --steps 10 --noise 2.0 --seed 7
+python3 -m beacon.tracking --demo   # live tracking on a simulated walk
 ```
 
 The CLI uses the Kalman filter by default; pass
@@ -528,6 +535,65 @@ about walls, metal beds, or dead zones in the real ward — treat
 the suggested spots as a starting point, then survey and
 calibrate.
 
+## Live tracking
+
+Everything above answers one-shot questions: one observation set,
+one position. A ward dashboard needs the opposite — a device that
+keeps reporting, and a position that keeps updating as readings
+arrive. `LiveTracker` wraps a `PositioningEngine` and turns the
+observation stream into a live track:
+
+```python
+from beacon import Beacon, LiveTracker, PositioningEngine
+
+beacons = [Beacon("A", 0, 0), Beacon("B", 20, 0),
+           Beacon("C", 20, 12), Beacon("D", 0, 12)]
+tracker = LiveTracker(PositioningEngine(beacons))
+live = tracker.feed({"A": -62.1, "B": -71.4, "C": -68.0, "D": -59.8}, t=0.0)
+# live.x, live.y, live.floor, live.floor_confidence,
+# live.uncertainty (the 95% ellipse), live.heard
+```
+
+Readings merge across beacons, so a scan that only hears two
+beacons still updates the track from the beacons heard a moment
+ago — BLE scans rarely hear every beacon on every scan. A reading
+older than `stale_after` seconds (5 s by default) ages out of the
+merged set, so a beacon that has gone quiet stops anchoring the
+track to where the device was when it was last heard. When fewer
+than three fresh beacons remain, `feed` returns `None` instead of
+a made-up position, and the last good position stays available as
+`tracker.last_position` until a fresh reading revives the track.
+Unknown beacon ids are ignored rather than failing the stream,
+and timestamps must not go backwards — a replayed or misordered
+scan is rejected. The ellipse comes from the same beacon subset
+the engine localised on (the winning floor's beacons, or every
+heard beacon when fewer than three were heard there), and is
+`None` on the rare step whose geometry is degenerate.
+
+The stream format is JSON lines, one reading per line — the shape
+a BLE scanner would emit:
+
+```sh
+python3 -m beacon.tracking < examples/live-stream.jsonl
+```
+
+Each input line produces one output line with the live position
+attached (`"position": null` on a reading too thin to locate, with
+the fresh beacons listed either way so a dashboard can see the
+track starving). `examples/live-stream.jsonl` is twelve readings
+from a simulated walk in which beacon D dies after step 7, so the
+last four lines arrive without it. `python3 -m beacon.tracking
+--demo` runs a full simulated walk through the tracker instead,
+with no scanner and no input file.
+
+Measured behaviour (simulator, 2 dB RSSI noise, default ward walk,
+seed 7): the live track's mean error is 2.16 m over the 40-step
+walk, the same as the one-shot engine's — the tracker adds no
+error of its own. With beacon D dropping out at step 20 the mean
+error is 2.43 m and the track keeps emitting on three beacons; the
+ellipse widens as the geometry thins (mean semi-major axis 6.32 m
+with four beacons, 7.42 m after D drops).
+
 ## Measured accuracy (simulator, not the real world)
 
 Default ward walk, 2 dB RSSI noise: mean error about 2.2 m (1.8-2.6 m
@@ -649,5 +715,19 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   corner thin — six advised beacons beat the corners on both
   measures (2.78 m mean, 7.20 m worst), and adding a beacon
   never worsens the mean.
-  The roadmap grows as new needs surface — the placement
-  advisor is the latest addition.
+- Live tracking mode (stream RSSI readings, emit a live position
+  per reading) — done: `LiveTracker` wraps the engine, merges
+  partial scans across beacons, ages out readings older than
+  `stale_after` (5 s by default), returns `None` instead of a
+  made-up position when fewer than three fresh beacons remain
+  (`last_position` keeps the last good one), and attaches the
+  95% confidence ellipse from the same beacon subset the engine
+  localised on; `python -m beacon.tracking` reads JSON-line
+  readings from stdin and prints one JSON line per reading
+  (`--demo` runs a simulated walk, `examples/live-stream.jsonl`
+  is twelve readings in which beacon D dies after step 7)
+  (v0.15.0); on the default ward walk the live track's mean error
+  is 2.16 m, and 2.43 m with beacon D dropping out at step 20 —
+  the tracker adds no error of its own.
+  The roadmap grows as new needs surface — live tracking is the
+  latest addition.

@@ -6,5 +6,8 @@ test:
 demo:
 	python3 -m beacon.cli
 
+live-demo:
+	python3 -m beacon.tracking --demo
+
 clean:
 	rm -rf __pycache__ beacon/__pycache__ tests/__pycache__ *.db

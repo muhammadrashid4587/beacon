@@ -15,6 +15,8 @@ from beacon import (
     FloorEstimate,
     KalmanFilter,
     LayoutScore,
+    LivePosition,
+    LiveTracker,
     MovingAverageFilter,
     MultiFloorFingerprintMap,
     PlacementAdvice,
@@ -1645,6 +1647,187 @@ class TestPlacementAdvisor(unittest.TestCase):
     def test_advise_rejects_bad_dimensions(self):
         with self.assertRaises(ValueError):
             advise_placement(0.0, 12.0, 4)
+
+
+class TestLiveTracking(unittest.TestCase):
+    def _walk(self, steps_per_side=10, seed=7):
+        return simulate_walk(rectangular_walk(20.0, 12.0, steps_per_side),
+                             BEACONS, noise_db=2.0, seed=seed)
+
+    def test_streaming_updates_move_the_estimate(self):
+        tracker = LiveTracker(PositioningEngine(BEACONS))
+        positions = []
+        errors = []
+        for i, step in enumerate(self._walk()):
+            live = tracker.feed(step["rssi"], float(i))
+            self.assertIsNotNone(live)
+            positions.append((live.x, live.y))
+            errors.append(math.hypot(live.x - step["true"][0],
+                                     live.y - step["true"][1]))
+        # The estimate follows the walk: it moves metres, not
+        # centimetres, and stays within the usual accuracy guard.
+        spread = max(math.hypot(x - positions[0][0], y - positions[0][1])
+                     for x, y in positions)
+        self.assertGreater(spread, 5.0)
+        self.assertLess(statistics.mean(errors), 4.0)
+
+    def test_position_carries_95_ellipse(self):
+        tracker = LiveTracker(PositioningEngine(BEACONS))
+        live = tracker.feed(self._walk()[0]["rssi"], 0.0)
+        self.assertIsNotNone(live.uncertainty)
+        self.assertGreater(live.uncertainty.semi_major, 0.0)
+        self.assertGreaterEqual(live.uncertainty.semi_major,
+                                live.uncertainty.semi_minor)
+        self.assertGreater(live.uncertainty.semi_minor, 0.0)
+        self.assertGreaterEqual(live.uncertainty.angle_deg, -90.0)
+        self.assertLessEqual(live.uncertainty.angle_deg, 90.0)
+        self.assertEqual(live.heard, ("A", "B", "C", "D"))
+        self.assertEqual(live.floor, 0)
+
+    def test_partial_scans_merge_across_beacons(self):
+        tracker = LiveTracker(PositioningEngine(BEACONS))
+        step = self._walk()[0]["rssi"]
+        # A scan hearing only two beacons is not enough on its own,
+        # but a second scan hearing the other two completes the set.
+        self.assertIsNone(tracker.feed({"A": step["A"], "B": step["B"]}, 0.0))
+        live = tracker.feed({"C": step["C"], "D": step["D"]}, 1.0)
+        self.assertIsNotNone(live)
+        self.assertEqual(live.heard, ("A", "B", "C", "D"))
+
+    def test_stale_readings_age_out(self):
+        tracker = LiveTracker(PositioningEngine(BEACONS), stale_after=5.0)
+        step = self._walk()[0]["rssi"]
+        tracker.feed(step, 0.0)
+        # Ten seconds later only B, C, D are heard: A aged out of
+        # the merged set, and the track continues on three beacons.
+        live = tracker.feed({k: v for k, v in step.items() if k != "A"}, 10.0)
+        self.assertIsNotNone(live)
+        self.assertEqual(live.heard, ("B", "C", "D"))
+        # A reading exactly at the stale boundary is still fresh.
+        live = tracker.feed({"A": step["A"]}, 15.0)
+        self.assertIsNotNone(live)
+        self.assertEqual(live.heard, ("A", "B", "C", "D"))
+
+    def test_beacon_dropping_out_mid_stream(self):
+        tracker = LiveTracker(PositioningEngine(BEACONS))
+        steps = self._walk()
+        errors = []
+        for i, step in enumerate(steps):
+            rssi = dict(step["rssi"])
+            if i >= 20:
+                del rssi["D"]  # beacon D dies halfway through the walk
+            live = tracker.feed(rssi, float(i))
+            self.assertIsNotNone(live, f"no position at step {i}")
+            errors.append(math.hypot(live.x - step["true"][0],
+                                     live.y - step["true"][1]))
+        self.assertLess(statistics.mean(errors), 4.0)
+        self.assertEqual(tracker.last_position.heard, ("A", "B", "C"))
+
+    def test_too_few_fresh_beacons_returns_none_and_keeps_last(self):
+        tracker = LiveTracker(PositioningEngine(BEACONS), stale_after=5.0)
+        step = self._walk()[0]["rssi"]
+        self.assertIsNone(tracker.feed({"A": step["A"], "B": step["B"]}, 0.0))
+        self.assertIsNone(tracker.last_position)
+        live = tracker.feed(step, 1.0)
+        self.assertIsNotNone(live)
+        # Ten seconds later only A and B are heard and C, D aged
+        # out: no position, but the last good one is still there.
+        self.assertIsNone(
+            tracker.feed({"A": step["A"], "B": step["B"]}, 11.0))
+        self.assertEqual(tracker.last_position, live)
+
+    def test_unknown_beacon_is_ignored(self):
+        tracker = LiveTracker(PositioningEngine(BEACONS))
+        step = self._walk()[0]["rssi"]
+        live = tracker.feed({**step, "Z": -50.0}, 0.0)
+        self.assertIsNotNone(live)
+        self.assertEqual(live.heard, ("A", "B", "C", "D"))
+
+    def test_timestamps_must_not_go_backwards(self):
+        tracker = LiveTracker(PositioningEngine(BEACONS))
+        step = self._walk()[0]["rssi"]
+        tracker.feed(step, 5.0)
+        with self.assertRaises(ValueError):
+            tracker.feed(step, 4.0)
+
+    def test_bad_parameters_raise(self):
+        with self.assertRaises(ValueError):
+            LiveTracker(PositioningEngine(BEACONS), stale_after=0.0)
+        with self.assertRaises(ValueError):
+            LiveTracker(PositioningEngine(BEACONS), sigma_rssi_db=0.0)
+
+    def test_reset_forgets_the_track(self):
+        tracker = LiveTracker(PositioningEngine(BEACONS))
+        step = self._walk()[0]["rssi"]
+        tracker.feed(step, 0.0)
+        tracker.reset()
+        self.assertIsNone(tracker.last_position)
+        self.assertEqual(tracker.heard, ())
+        live = tracker.feed(step, 0.0)
+        self.assertIsNotNone(live)
+
+    def test_stream_json_lines_round_trip(self):
+        import io
+
+        from beacon.tracking import main
+
+        steps = self._walk()
+        lines = "".join(
+            json.dumps({"t": float(i), "rssi": step["rssi"]}) + "\n"
+            for i, step in enumerate(steps[:5]))
+        out = io.StringIO()
+        self.assertEqual(main(argv=[], input_stream=io.StringIO(lines),
+                              output_stream=out), 0)
+        records = [json.loads(line) for line in out.getvalue().splitlines()]
+        self.assertEqual(len(records), 5)
+        for record, step in zip(records, steps[:5]):
+            position = record["position"]
+            self.assertIsNotNone(position)
+            self.assertEqual(position["floor"], 0)
+            self.assertIn("uncertainty", position)
+            self.assertGreater(
+                position["uncertainty"]["semi_major"], 0.0)
+            self.assertLess(
+                math.hypot(position["x"] - step["true"][0],
+                           position["y"] - step["true"][1]), 4.0)
+
+    def test_stream_emits_null_position_when_too_thin(self):
+        import io
+
+        from beacon.tracking import main
+
+        step = self._walk()[0]["rssi"]
+        lines = (json.dumps({"t": 0.0, "rssi": {"A": step["A"]}}) + "\n"
+                  + json.dumps({"t": 1.0, "rssi": step}) + "\n")
+        out = io.StringIO()
+        self.assertEqual(main(argv=[], input_stream=io.StringIO(lines),
+                              output_stream=out), 0)
+        records = [json.loads(line) for line in out.getvalue().splitlines()]
+        self.assertIsNone(records[0]["position"])
+        self.assertEqual(records[0]["heard"], ["A"])
+        self.assertIsNotNone(records[1]["position"])
+
+    def test_bad_stream_lines_raise(self):
+        from beacon.tracking import parse_line
+
+        for bad in ("not json", "[]",
+                    json.dumps({"rssi": {"A": -60.0}}),
+                    json.dumps({"t": 0.0}),
+                    json.dumps({"t": "0", "rssi": {"A": -60.0}}),
+                    json.dumps({"t": 0.0, "rssi": {}})):
+            with self.assertRaises(ValueError, msg=bad):
+                parse_line(bad)
+
+    def test_demo_emits_one_line_per_step(self):
+        import io
+
+        from beacon.tracking import main
+
+        out = io.StringIO()
+        self.assertEqual(main(argv=["--demo"], output_stream=out), 0)
+        records = [json.loads(line) for line in out.getvalue().splitlines()]
+        self.assertEqual(len(records), 40)
+        self.assertTrue(all(r["position"] is not None for r in records))
 
 
 if __name__ == "__main__":
