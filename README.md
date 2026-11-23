@@ -123,6 +123,12 @@ library, no dependencies, no BLE hardware needed.
   plus when the ward drops below three lit beacons and can no
   longer triangulate at all, so replacement cells are scheduled
   before the ward goes blind instead of after.
+- Battery-swap replacement schedule: the planner's forecasts as
+  a work order — each beacon's swap-by time, soonest first, with
+  the milestone that drives it (dark, 3 dB loss, or 2 dB noise)
+  and an optional lead time so the cells are ordered ahead of
+  the failure, plus the ward's hard deadline for keeping
+  triangulation.
 - A planner-aware ward-map overlay: the overlay takes a
   deployment plan — each beacon is annotated with its forecast
   horizon and coloured by its forecast status, and the planner
@@ -581,6 +587,65 @@ starts lying well before it disappears. With measured levels
 hours, when C goes dark — four hours of warning between the
 first beacon dying and triangulation failing. A drain rate of
 zero reports every horizon as `never`.
+
+## Battery-swap replacement schedule
+
+A forecast is not a work order: nobody schedules a battery
+change from "dark in 19.0 hours". `replacement_schedule` turns
+a `DeploymentPlan` into the list a technician actually works
+from — one entry per beacon, soonest swap first, each with the
+swap-by time in hours from now, the milestone that drives it,
+and the forecast's own status:
+
+```python
+from beacon import BatteryModel, plan_deployment, replacement_schedule
+
+plan = plan_deployment({
+    "A": BatteryModel(drain_rate_per_hour=0.05),
+    "B": BatteryModel(drain_rate_per_hour=0.05),
+    "C": BatteryModel(drain_rate_per_hour=0.05),
+    "D": BatteryModel(drain_rate_per_hour=0.05),
+}, levels={"D": 0.2})   # D measured at 20% charge, the rest fresh
+schedule = replacement_schedule(plan)
+# schedule.entries — D first, swap by 0.0h, reason "3 dB loss"
+# (D is already past both the loss and the noise thresholds, and
+# the loss wins the tie); then C, B, A, each on its 2 dB noise
+# milestone. schedule.ward_deadline_hours — 7.0, when the ward
+# drops below three lit beacons.
+schedule.to_dict()   # JSON-friendly; a never-due swap is null
+entry.due_at()       # the swap-by time as a clock time, or None
+```
+
+The swap is due at the beacon's *first* milestone, not at the
+dark: by the time a beacon goes dark it has already been lying
+for hours, so the schedule replaces it when it first starts
+lying. `lead_time_hours` pulls every swap earlier by the same
+margin — order the cells a day ahead and the schedule says so —
+floored at zero, so a beacon already past a milestone is due
+now, not in the past; a negative lead time is rejected, since a
+schedule cannot push a swap later than the beacon's own
+forecast. A beacon that never drains never needs a swap
+(`swap_by_hours` is `math.inf`, reason `never`), and the
+schedule carries the ward deadline from the plan, so the swaps
+can be checked against the hard date triangulation fails. The
+CLI prints the same list, with clock times, reusing
+`--battery-levels` and `--drain-rate` from the planner:
+
+```sh
+python3 -m beacon.cli --replacement-schedule
+python3 -m beacon.cli --replacement-schedule --battery-levels A=0.9,B=0.6,C=0.4,D=0.2
+python3 -m beacon.cli --replacement-schedule --swap-lead-hours 24
+```
+
+Measured behaviour: four fresh beacons at 0.05 per hour are all
+due in 13.3 hours on their 2 dB noise milestone, and the ward
+deadline is 19.0 hours. With measured levels 0.9, 0.6, 0.4, 0.2
+the order is D now (3 dB loss), C in 1.3 hours, B in 5.3 hours,
+A in 11.3 hours — all on the 2 dB noise milestone except D —
+and the ward deadline is 7.0 hours, so the C swap at 1.3 hours
+is the one that keeps the ward triangulating. A 24-hour lead
+puts every fresh beacon's swap at now, which is the honest
+answer when the cells should already have been ordered.
 
 ## Planner-aware ward-map overlay
 

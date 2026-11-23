@@ -15,12 +15,16 @@ Usage:
         [--battery-degrade D] [--move-beacon D:5,-5]
     python -m beacon.cli --deployment-plan
         [--battery-levels A=0.9,B=0.6] [--drain-rate 0.05]
+    python -m beacon.cli --replacement-schedule
+        [--battery-levels A=0.9,B=0.6] [--drain-rate 0.05]
+        [--swap-lead-hours 2]
 """
 
 import argparse
 import math
 import statistics
 import sys
+from datetime import datetime
 
 from .battery import BatteryModel
 from .beacon import Beacon
@@ -31,6 +35,7 @@ from .drift import DriftMonitor
 from .engine import PositioningEngine
 from .map_overlay import load_track_for_overlay, render_map_overlay
 from .replay import render_track_replay
+from .schedule import replacement_schedule
 from .simulate import rectangular_walk, simulate_walk
 from .validation import validate_floor_layouts
 
@@ -190,6 +195,44 @@ def run_deployment_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_replacement_schedule(args: argparse.Namespace) -> int:
+    """Print the battery-swap work order for the default ward.
+
+    Each beacon is due a new cell by its soonest forecast
+    milestone — dark, 3 dB of RSSI loss, or 2 dB of extra noise —
+    pulled earlier by ``--swap-lead-hours`` so the cells can be
+    ordered ahead of the failure. The swap-by time is printed as
+    hours from now and as a clock time, soonest first, with the
+    ward's hard deadline — when it drops below three lit beacons
+    — at the bottom.
+    """
+    try:
+        plan = _deployment_plan(args)
+        schedule = replacement_schedule(
+            plan, lead_time_hours=args.swap_lead_hours)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    now = datetime.now()
+    print(f"{'beacon':>6} {'swap by':>30} {'reason':>9} {'status':>9}")
+    for entry in schedule.entries:
+        due = entry.due_at(now)
+        if due is None:
+            when = "never"
+        elif entry.swap_by_hours == 0.0:
+            when = "now"
+        else:
+            when = (f"in {entry.swap_by_hours:.1f}h "
+                    f"({due:%Y-%m-%d %H:%M})")
+        print(f"{entry.beacon_id:>6} {when:>30} {entry.reason:>9} "
+              f"{entry.status:>9}")
+    deadline = schedule.ward_deadline_hours
+    print("ward drops below 3 lit beacons: "
+          f"{'never' if math.isinf(deadline) else f'in {deadline:.1f} hours'}")
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Simulate a BLE indoor-positioning walk.")
@@ -263,6 +306,18 @@ def main(argv=None) -> int:
                         "until 3 dB of RSSI loss, and until 2 dB of "
                         "extra noise, plus when the ward drops "
                         "below three lit beacons")
+    parser.add_argument("--replacement-schedule", action="store_true",
+                        help="print the battery-swap work order for "
+                        "the default ward instead of simulating a "
+                        "walk — each beacon's swap-by time, soonest "
+                        "first, with the forecast milestone that "
+                        "drives it; uses --battery-levels, "
+                        "--drain-rate and --swap-lead-hours")
+    parser.add_argument("--swap-lead-hours", type=float, default=0.0,
+                        help="with --replacement-schedule, pull every "
+                        "swap earlier by this many hours so the "
+                        "cells are ordered ahead of the failure "
+                        "(default: 0)")
     parser.add_argument("--battery-levels", default=None,
                         metavar="ID=LEVEL,...",
                         help="with --deployment-plan or --map-planner, "
@@ -277,6 +332,9 @@ def main(argv=None) -> int:
 
     if args.deployment_plan:
         return run_deployment_plan(args)
+
+    if args.replacement_schedule:
+        return run_replacement_schedule(args)
 
     if args.drift_classify:
         return run_drift_classify(args)

@@ -36,6 +36,9 @@ from .map_overlay import (CoverageCell, HeatmapSummary, PlannerCell,
                         planner_heatmap, planner_heatmap_summary,
                         render_map_overlay, write_map_overlay)
 from .multi_device import MultiDeviceTracker
+from .schedule import (REASON_DARK, REASON_LOSS, REASON_NEVER,
+                       REASON_NOISE, ReplacementSchedule, SwapEntry,
+                       replacement_schedule)
 from .tracking import (ExcludedBeacon, LivePosition, LiveTracker,
                        TrackReport, evaluate_live_track)
 from .trilateration import trilaterate
@@ -44,7 +47,7 @@ from .validation import (DEFAULT_MAX_WORST_SEMI_MAJOR_M,
                          FloorLayoutVerdict, LayoutValidation,
                          validate_floor_layouts)
 
-__version__ = "0.28.0"
+__version__ = "0.29.0"
 
 __all__ = [
     "BatteryModel",
@@ -65,6 +68,13 @@ __all__ = [
     "MIN_BEACONS_TO_TRIANGULATE",
     "forecast_beacon",
     "plan_deployment",
+    "ReplacementSchedule",
+    "SwapEntry",
+    "REASON_DARK",
+    "REASON_LOSS",
+    "REASON_NOISE",
+    "REASON_NEVER",
+    "replacement_schedule",
     "FingerprintMap",
     "MultiFloorFingerprintMap",
     "build_fingerprint_map",
