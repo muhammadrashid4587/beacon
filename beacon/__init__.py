@@ -8,6 +8,10 @@ generates noisy RSSI readings from a true path for testing.
 from .battery import BatteryModel
 from .beacon import Beacon
 from .calibration import calibrate_beacon, calibrate_survey, fit_path_loss
+from .deployment import (DEFAULT_LOSS_THRESHOLD_DB,
+                         DEFAULT_NOISE_THRESHOLD_DB,
+                         MIN_BEACONS_TO_TRIANGULATE, BeaconForecast,
+                         DeploymentPlan, forecast_beacon, plan_deployment)
 from .engine import PositioningEngine
 from .filter import KalmanFilter, MovingAverageFilter
 from .drift import DriftAlarm, DriftClassification, DriftMonitor
@@ -38,7 +42,7 @@ from .validation import (DEFAULT_MAX_WORST_SEMI_MAJOR_M,
                          FloorLayoutVerdict, LayoutValidation,
                          validate_floor_layouts)
 
-__version__ = "0.26.0"
+__version__ = "0.27.0"
 
 __all__ = [
     "BatteryModel",
@@ -52,6 +56,13 @@ __all__ = [
     "DriftAlarm",
     "DriftClassification",
     "DriftMonitor",
+    "BeaconForecast",
+    "DeploymentPlan",
+    "DEFAULT_LOSS_THRESHOLD_DB",
+    "DEFAULT_NOISE_THRESHOLD_DB",
+    "MIN_BEACONS_TO_TRIANGULATE",
+    "forecast_beacon",
+    "plan_deployment",
     "FingerprintMap",
     "MultiFloorFingerprintMap",
     "build_fingerprint_map",

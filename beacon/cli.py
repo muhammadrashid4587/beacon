@@ -10,6 +10,8 @@ Usage:
         [--map-output replay.svg] [--replay-step-seconds 0.5]
     python -m beacon.cli --drift-classify [--seed 7]
         [--battery-degrade D] [--move-beacon D:5,-5]
+    python -m beacon.cli --deployment-plan
+        [--battery-levels A=0.9,B=0.6] [--drain-rate 0.05]
 """
 
 import argparse
@@ -19,6 +21,8 @@ import sys
 
 from .battery import BatteryModel
 from .beacon import Beacon
+from .deployment import (DEFAULT_LOSS_THRESHOLD_DB,
+                         DEFAULT_NOISE_THRESHOLD_DB, plan_deployment)
 from .drift import DriftMonitor
 from .engine import PositioningEngine
 from .map_overlay import load_track_for_overlay, render_map_overlay
@@ -112,6 +116,67 @@ def run_drift_classify(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_battery_levels(spec: str) -> dict[str, float]:
+    """Parse a --battery-levels ID=LEVEL,... spec, or raise ValueError."""
+    levels = {}
+    for part in spec.split(","):
+        beacon_id, level_text = part.split("=", 1)
+        levels[beacon_id] = float(level_text)
+    return levels
+
+
+def run_deployment_plan(args: argparse.Namespace) -> int:
+    """Forecast when each default beacon goes dark.
+
+    Every beacon drains at ``--drain-rate`` per hour from its
+    ``--battery-levels`` charge (1.0, fresh, unless listed), and the
+    table prints the hours until each one goes dark, until its RSSI
+    loss crosses 3 dB, and until its extra noise crosses 2 dB —
+    plus when the ward drops below three lit beacons and can no
+    longer triangulate at all.
+    """
+    beacons = default_beacons()
+    known_ids = {b.id for b in beacons}
+    try:
+        levels = _parse_battery_levels(args.battery_levels) \
+            if args.battery_levels is not None else {}
+    except ValueError:
+        print("--battery-levels takes ID=LEVEL,... e.g. A=0.9,D=0.2",
+              file=sys.stderr)
+        return 2
+    unknown = sorted(set(levels) - known_ids)
+    if unknown:
+        print(f"unknown beacon: {unknown[0]!r}", file=sys.stderr)
+        return 2
+    try:
+        plan = plan_deployment(
+            {b.id: BatteryModel(drain_rate_per_hour=args.drain_rate)
+             for b in beacons},
+            levels=levels)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    def _hours(value: float) -> str:
+        return "never" if math.isinf(value) else f"{value:.1f}"
+
+    def _hours_label(value: float) -> str:
+        return "never" if math.isinf(value) else f"{value:.1f} hours"
+
+    print(f"{'beacon':>6} {'level':>5} {'dark in':>8} "
+          f"{'3 dB loss in':>12} {'2 dB noise in':>13} {'status':>9}")
+    for forecast in plan.forecasts:
+        print(f"{forecast.beacon_id:>6} {forecast.level:5.2f} "
+              f"{_hours(forecast.hours_to_dark):>8} "
+              f"{_hours(forecast.hours_to_rssi_loss_db):>12} "
+              f"{_hours(forecast.hours_to_extra_noise_db):>13} "
+              f"{forecast.status:>9}")
+    print(f"earliest dark: {_hours_label(plan.earliest_dark_hours)}")
+    below_three = plan.hours_until_fewer_than(3)
+    print(f"below 3 lit beacons: {_hours_label(below_three)}")
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Simulate a BLE indoor-positioning walk.")
@@ -170,7 +235,27 @@ def main(argv=None) -> int:
                         "beacon displaced by (DX, DY) metres from "
                         "its calibrated position, e.g. D:5,-5, so "
                         "the classifier has a real move to find")
+    parser.add_argument("--deployment-plan", action="store_true",
+                        help="forecast when each default beacon goes "
+                        "dark from the battery model instead of "
+                        "simulating a walk — hours until dark, "
+                        "until 3 dB of RSSI loss, and until 2 dB of "
+                        "extra noise, plus when the ward drops "
+                        "below three lit beacons")
+    parser.add_argument("--battery-levels", default=None,
+                        metavar="ID=LEVEL,...",
+                        help="with --deployment-plan, each beacon's "
+                        "current charge as a fraction of full, e.g. "
+                        "A=0.9,D=0.2 (default: 1.0, fresh, for "
+                        "every beacon)")
+    parser.add_argument("--drain-rate", type=float, default=0.05,
+                        help="with --deployment-plan, the fraction "
+                        "of a full charge every beacon burns per "
+                        "hour (default: 0.05)")
     args = parser.parse_args(argv)
+
+    if args.deployment_plan:
+        return run_deployment_plan(args)
 
     if args.drift_classify:
         return run_drift_classify(args)

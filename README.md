@@ -117,6 +117,12 @@ library, no dependencies, no BLE hardware needed.
   — so a walk with a draining beacon shows the error growing
   while the beacon is dying, and the battery level rides on the
   live positions and the exported track rows.
+- Deployment planner: from each beacon's battery model and its
+  current charge, the hours until it goes dark, until its RSSI
+  loss crosses 3 dB, and until its extra noise crosses 2 dB —
+  plus when the ward drops below three lit beacons and can no
+  longer triangulate at all, so replacement cells are scheduled
+  before the ward goes blind instead of after.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -508,6 +514,67 @@ with no revisits, the fallback catches the fast 1.2-per-hour sag
 on 4/5 seeds (seed 11's decline is buried in the noise: slope
 -0.05 dB per reading) and a beacon moved away from the ward
 reads like a steady offset, so it comes back `uncertain`.
+
+## Deployment planner
+
+The drift classifier says why a beacon is already misbehaving; a
+ward that has to schedule battery replacements needs to know
+*when* each beacon will go dark, before it does. `plan_deployment`
+forecasts that from the same `BatteryModel` the simulator uses —
+no new model, no simulation, just the model's own algebra: the
+level falls linearly, so the hours until any target level are
+`(level now - level target) / drain rate`, and the RSSI loss and
+extra noise at that level follow from the model's square and
+linear laws:
+
+```python
+from beacon import BatteryModel, plan_deployment
+
+plan = plan_deployment({
+    "A": BatteryModel(drain_rate_per_hour=0.05),
+    "B": BatteryModel(drain_rate_per_hour=0.05),
+    "C": BatteryModel(drain_rate_per_hour=0.05),
+    "D": BatteryModel(drain_rate_per_hour=0.05),
+}, levels={"D": 0.2})   # D measured at 20% charge, the rest fresh
+# plan.forecasts — soonest-dark first, each with hours_to_dark,
+# hours_to_rssi_loss_db (3 dB by default), hours_to_extra_noise_db
+# (2 dB by default), and a status: ok, degrading or dark
+# plan.earliest_dark_hours — 3.0 for D above
+# plan.hours_until_fewer_than(3) — when fewer than three beacons
+# are still lit, and the ward can no longer triangulate at all
+plan.to_dict()   # JSON-friendly; never-reached horizons are null
+```
+
+A milestone a beacon never reaches is `math.inf`, not a made-up
+number: a beacon that does not drain never goes dark, and a
+beacon whose loss at its cutoff level is below the threshold
+never reads that weak — it just goes quiet first (at the 0.05
+cutoff the loss is 6 × 0.95² = 5.42 dB, so a 6 dB loss threshold
+is never reached). A beacon already past a threshold reports 0
+hours for it, and a beacon measured below its cutoff is `dark`
+with 0 hours to dark; a beacon already past the 3 dB loss
+threshold is `degrading`. `levels` takes measured charges — a
+beacon cannot be forecast above its model's initial charge, and
+a level for an unknown beacon id is rejected rather than
+silently ignored. The CLI plans the default ward:
+
+```sh
+python3 -m beacon.cli --deployment-plan
+python3 -m beacon.cli --deployment-plan --battery-levels A=0.9,B=0.6,C=0.4,D=0.2
+python3 -m beacon.cli --deployment-plan --drain-rate 0.1
+```
+
+Measured behaviour: four fresh beacons draining at 0.05 per hour
+go dark in 19.0 hours each, cross 3 dB of RSSI loss in 14.1 hours
+and 2 dB of extra noise in 13.3 hours — the noise and the loss
+arrive hours before the dark, which is the point: the beacon
+starts lying well before it disappears. With measured levels
+0.9, 0.6, 0.4, 0.2 the ward's earliest dark is D at 3.0 hours
+(D is already past both thresholds at 20% charge, so it reads
+`degrading`), and the ward drops below three lit beacons at 7.0
+hours, when C goes dark — four hours of warning between the
+first beacon dying and triangulation failing. A drain rate of
+zero reports every horizon as `never`.
 
 ## Trajectory smoothing
 
@@ -1525,5 +1592,23 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   called `uncertain` 4/5 and misread as a sag on seed 11, where
   the noise itself drifts down — while a move under about 2 m
   is invisible at 2 dB noise and comes back `healthy` or
-  `uncertain`. The roadmap grows as new needs surface — drift
-  classification is the latest addition.
+  `uncertain`.
+- Deployment planner (when does each beacon go dark?) — done:
+  `plan_deployment` forecasts each beacon's hours to dark, to 3 dB
+  of RSSI loss, and to 2 dB of extra noise from its `BatteryModel`
+  and its measured charge — closed-form on the model's own laws
+  (linear drain, loss with the square of the charge used, noise
+  linear in it), with `math.inf` for a milestone the beacon never
+  reaches (no drain, or dark before the loss gets that bad), a
+  `dark` / `degrading` / `ok` status per beacon, and
+  `hours_until_fewer_than(3)` for when the ward can no longer
+  triangulate; `python -m beacon.cli --deployment-plan` plans the
+  default ward, with `--battery-levels` for measured charges and
+  `--drain-rate` for the burn rate (v0.27.0); four fresh beacons
+  at 0.05 per hour go dark in 19.0 hours, cross 3 dB of loss in
+  14.1 hours and 2 dB of noise in 13.3 hours — the beacon starts
+  lying hours before it disappears — and with measured levels
+  0.9, 0.6, 0.4, 0.2 the earliest dark is 3.0 hours and the ward
+  drops below three lit beacons at 7.0 hours. The roadmap grows
+  as new needs surface — the deployment planner is the latest
+  addition.
