@@ -2750,6 +2750,198 @@ class TestWardMapOverlay(unittest.TestCase):
             self.assertEqual(svg.count('data-index="'), 40)
 
 
+class TestPlannerMapOverlay(unittest.TestCase):
+    def _example_rows(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        return load_track_json(
+            os.path.join(here, "..", "examples", "live-track-export.json"))
+
+    def _plan(self, levels=None, drain_rate=0.05):
+        from beacon import plan_deployment
+
+        return plan_deployment(
+            {b.id: BatteryModel(drain_rate_per_hour=drain_rate)
+             for b in BEACONS},
+            levels=levels)
+
+    def test_planner_heatmap_grids_the_ward(self):
+        from beacon import planner_heatmap, planner_heatmap_summary
+
+        # Four fresh beacons at 0.05 per hour: the 2 dB noise
+        # milestone comes first for every one, at 13.33 h, so
+        # every cell's horizon is that — the ward degrades evenly.
+        cells = planner_heatmap(BEACONS, self._plan())
+        self.assertEqual(len(cells), 60)
+        for cell in cells:
+            self.assertAlmostEqual(cell.hours_to_degrade, 13.3333,
+                                   places=3)
+            self.assertEqual(cell.limiting_milestone, "extra_noise")
+        summary = planner_heatmap_summary(cells)
+        self.assertEqual(summary.n_cells, 60)
+        self.assertEqual(summary.never_degrade_cells, 0)
+        self.assertAlmostEqual(summary.earliest_hours, 13.3333,
+                               places=3)
+        self.assertEqual(summary.earliest_milestone, "extra_noise")
+
+    def test_planner_heatmap_uneven_levels(self):
+        from beacon import planner_heatmap, planner_heatmap_summary
+
+        # D at 20% is already past 3 dB of loss, so the cells near
+        # it degrade now; the far corner holds until C's noise
+        # milestone at 1.33 h.
+        plan = self._plan(levels={"A": 0.9, "B": 0.6,
+                                  "C": 0.4, "D": 0.2})
+        cells = planner_heatmap(BEACONS, plan)
+        by_point = {(cell.x, cell.y): cell for cell in cells}
+        near_d = by_point[(1.0, 11.0)]
+        self.assertEqual(near_d.hours_to_degrade, 0.0)
+        self.assertEqual(near_d.limiting_beacon, "D")
+        self.assertEqual(near_d.limiting_milestone, "rssi_loss")
+        far_corner = by_point[(19.0, 1.0)]
+        self.assertAlmostEqual(far_corner.hours_to_degrade, 1.3333,
+                               places=3)
+        self.assertEqual(far_corner.limiting_beacon, "C")
+        self.assertEqual(far_corner.limiting_milestone, "extra_noise")
+        summary = planner_heatmap_summary(cells)
+        self.assertEqual(summary.earliest_hours, 0.0)
+        self.assertEqual(summary.earliest_point, (1.0, 1.0))
+        self.assertEqual(summary.earliest_beacon, "D")
+        self.assertEqual(summary.earliest_milestone, "rssi_loss")
+        self.assertEqual(summary.never_degrade_cells, 0)
+
+    def test_planner_heatmap_never_degrades_without_drain(self):
+        from beacon import planner_heatmap, planner_heatmap_summary
+
+        cells = planner_heatmap(BEACONS, self._plan(drain_rate=0.0))
+        self.assertTrue(all(cell.hours_to_degrade is None
+                            for cell in cells))
+        self.assertTrue(all(cell.limiting_beacon is None
+                            for cell in cells))
+        summary = planner_heatmap_summary(cells)
+        self.assertIsNone(summary.earliest_hours)
+        self.assertIsNone(summary.earliest_point)
+        self.assertEqual(summary.never_degrade_cells, 60)
+
+    def test_planner_colour_bands(self):
+        from beacon import planner_colour
+
+        self.assertEqual(planner_colour(2.0), "#c0392b")
+        self.assertEqual(planner_colour(8.0), "#e6a817")
+        self.assertEqual(planner_colour(20.0), "#2e7d32")
+        self.assertEqual(planner_colour(None), "#00897b")
+
+    def test_planner_heatmap_rejects_bad_inputs(self):
+        from beacon import (planner_heatmap, planner_heatmap_summary)
+
+        with self.assertRaises(ValueError):
+            planner_heatmap(BEACONS[:2], self._plan())
+        with self.assertRaises(ValueError):
+            planner_heatmap(BEACONS, self._plan(), spacing=0)
+        # A beacon in the layout with no forecast in the plan is
+        # a gap in the plan, not a stable beacon.
+        from beacon import plan_deployment
+
+        partial = plan_deployment(
+            {b.id: BatteryModel(drain_rate_per_hour=0.05)
+             for b in BEACONS[:3]})
+        with self.assertRaises(ValueError):
+            planner_heatmap(BEACONS, partial)
+        with self.assertRaises(ValueError):
+            planner_heatmap_summary([])
+
+    def test_overlay_with_plan_annotates_beacons(self):
+        rows = self._example_rows()
+        # D measured at 4% charge is already dark.
+        plan = self._plan(levels={"D": 0.04})
+        svg = render_map_overlay(rows, BEACONS, plan=plan)
+        # Every beacon carries its forecast horizon; D is dark now
+        # and its diamond is red, while the fresh beacons stay blue.
+        self.assertEqual(svg.count('data-forecast="'), 4)
+        self.assertIn("dark now", svg)
+        self.assertIn("2 dB noise in 13.3h", svg)
+        self.assertIn("Deployment plan: earliest dark 0.0h (D)", svg)
+        self.assertIn("below 3 lit beacons in 19.0h", svg)
+        self.assertIn('fill="#c0392b"', svg)
+        # Plan only: no planner shading, no planner summary line.
+        self.assertNotIn("data-planner-cell=", svg)
+        self.assertNotIn("Planner heatmap:", svg)
+
+    def test_planner_heatmap_layer_renders_on_the_overlay(self):
+        rows = self._example_rows()
+        plan = self._plan(levels={"A": 0.9, "B": 0.6,
+                                  "C": 0.4, "D": 0.2})
+        svg = render_map_overlay(rows, BEACONS, plan=plan, planner=True)
+        # One shaded cell per grid point, with the limiting beacon
+        # and milestone on each, and the summary line naming the
+        # ward's first degradation.
+        self.assertEqual(svg.count("data-planner-cell="), 60)
+        self.assertIn('data-limiting-beacon="D"', svg)
+        self.assertIn('data-limiting-milestone="rssi_loss"', svg)
+        self.assertIn("Planner heatmap: earliest degradation 0.0h "
+                      "at (1, 1) m (D, 3 dB loss)", svg)
+        self.assertIn("Deployment plan: earliest dark 3.0h (D)", svg)
+        # The track still renders on top of the planner shading.
+        self.assertEqual(svg.count('data-index="'), len(rows))
+        # Off by default: no planner cells, no plan lines.
+        plain = render_map_overlay(rows, BEACONS)
+        self.assertNotIn("data-planner-cell=", plain)
+        self.assertNotIn("Deployment plan:", plain)
+
+    def test_planner_heatmap_needs_a_plan_and_conflicts(self):
+        rows = self._example_rows()
+        with self.assertRaises(ValueError):
+            render_map_overlay(rows, BEACONS, planner=True)
+        with self.assertRaises(ValueError):
+            render_map_overlay(rows, BEACONS, plan=self._plan(),
+                               planner=True, heatmap=True)
+        # A beacon in the layout with no forecast in the plan.
+        from beacon import plan_deployment
+
+        partial = plan_deployment(
+            {b.id: BatteryModel(drain_rate_per_hour=0.05)
+             for b in BEACONS[:3]})
+        with self.assertRaises(ValueError):
+            render_map_overlay(rows, BEACONS, plan=partial)
+
+    def test_cli_map_planner_flag_writes_svg(self):
+        from beacon.cli import main
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        track = os.path.join(here, "..", "examples",
+                             "live-track-export.json")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "map.svg")
+            self.assertEqual(main(argv=["--map-overlay", track,
+                                       "--map-output", out,
+                                       "--map-planner",
+                                       "--battery-levels",
+                                       "A=0.9,B=0.6,C=0.4,D=0.2"]), 0)
+            with open(out, encoding="utf-8") as handle:
+                svg = handle.read()
+            self.assertIn("<svg", svg)
+            self.assertEqual(svg.count("data-planner-cell="), 60)
+            self.assertIn("Deployment plan: earliest dark 3.0h (D)",
+                          svg)
+            self.assertIn("Planner heatmap:", svg)
+
+    def test_cli_map_planner_conflicts(self):
+        from beacon.cli import main
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        track = os.path.join(here, "..", "examples",
+                             "live-track-export.json")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "map.svg")
+            self.assertEqual(main(argv=["--map-overlay", track,
+                                       "--map-output", out,
+                                       "--map-planner",
+                                       "--map-heatmap"]), 2)
+            self.assertEqual(main(argv=["--map-overlay", track,
+                                       "--map-output", out,
+                                       "--map-planner",
+                                       "--map-replay"]), 2)
+
+
 class TestLiveTrackReplay(unittest.TestCase):
     def _example_rows(self):
         here = os.path.dirname(os.path.abspath(__file__))

@@ -8,6 +8,9 @@ Usage:
     python -m beacon.cli --map-overlay track.json [--map-output map.svg]
     python -m beacon.cli --map-overlay track.json --map-replay
         [--map-output replay.svg] [--replay-step-seconds 0.5]
+    python -m beacon.cli --map-overlay track.json --map-planner
+        [--map-output map.svg] [--battery-levels A=0.9,B=0.6]
+        [--drain-rate 0.05]
     python -m beacon.cli --drift-classify [--seed 7]
         [--battery-degrade D] [--move-beacon D:5,-5]
     python -m beacon.cli --deployment-plan
@@ -22,7 +25,8 @@ import sys
 from .battery import BatteryModel
 from .beacon import Beacon
 from .deployment import (DEFAULT_LOSS_THRESHOLD_DB,
-                         DEFAULT_NOISE_THRESHOLD_DB, plan_deployment)
+                         DEFAULT_NOISE_THRESHOLD_DB, DeploymentPlan,
+                         plan_deployment)
 from .drift import DriftMonitor
 from .engine import PositioningEngine
 from .map_overlay import load_track_for_overlay, render_map_overlay
@@ -125,6 +129,31 @@ def _parse_battery_levels(spec: str) -> dict[str, float]:
     return levels
 
 
+def _deployment_plan(args: argparse.Namespace) -> DeploymentPlan:
+    """Build the deployment plan for the default ward.
+
+    Every beacon drains at ``--drain-rate`` per hour from its
+    ``--battery-levels`` charge (1.0, fresh, unless listed).
+    Raises ValueError for a bad levels spec, an unknown beacon,
+    or a level the battery model rejects.
+    """
+    beacons = default_beacons()
+    known_ids = {b.id for b in beacons}
+    try:
+        levels = _parse_battery_levels(args.battery_levels) \
+            if args.battery_levels is not None else {}
+    except ValueError:
+        raise ValueError(
+            "--battery-levels takes ID=LEVEL,... e.g. A=0.9,D=0.2")
+    unknown = sorted(set(levels) - known_ids)
+    if unknown:
+        raise ValueError(f"unknown beacon: {unknown[0]!r}")
+    return plan_deployment(
+        {b.id: BatteryModel(drain_rate_per_hour=args.drain_rate)
+         for b in beacons},
+        levels=levels)
+
+
 def run_deployment_plan(args: argparse.Namespace) -> int:
     """Forecast when each default beacon goes dark.
 
@@ -135,24 +164,8 @@ def run_deployment_plan(args: argparse.Namespace) -> int:
     plus when the ward drops below three lit beacons and can no
     longer triangulate at all.
     """
-    beacons = default_beacons()
-    known_ids = {b.id for b in beacons}
     try:
-        levels = _parse_battery_levels(args.battery_levels) \
-            if args.battery_levels is not None else {}
-    except ValueError:
-        print("--battery-levels takes ID=LEVEL,... e.g. A=0.9,D=0.2",
-              file=sys.stderr)
-        return 2
-    unknown = sorted(set(levels) - known_ids)
-    if unknown:
-        print(f"unknown beacon: {unknown[0]!r}", file=sys.stderr)
-        return 2
-    try:
-        plan = plan_deployment(
-            {b.id: BatteryModel(drain_rate_per_hour=args.drain_rate)
-             for b in beacons},
-            levels=levels)
+        plan = _deployment_plan(args)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -204,6 +217,14 @@ def main(argv=None) -> int:
                         help="shade the overlay with a per-cell "
                         "coverage heatmap (positioning quality from "
                         "the beacon layout)")
+    parser.add_argument("--map-planner", action="store_true",
+                        help="make the overlay planner-aware: annotate "
+                        "each beacon with its forecast horizon from "
+                        "the deployment plan and shade the cells by "
+                        "when their coverage first degrades — needs "
+                        "--map-overlay, conflicts with --map-heatmap "
+                        "and --map-replay; the plan uses "
+                        "--battery-levels and --drain-rate")
     parser.add_argument("--map-replay", action="store_true",
                         help="render the track as an animated replay "
                         "SVG (SMIL, no JavaScript) instead of the "
@@ -244,14 +265,14 @@ def main(argv=None) -> int:
                         "below three lit beacons")
     parser.add_argument("--battery-levels", default=None,
                         metavar="ID=LEVEL,...",
-                        help="with --deployment-plan, each beacon's "
-                        "current charge as a fraction of full, e.g. "
-                        "A=0.9,D=0.2 (default: 1.0, fresh, for "
-                        "every beacon)")
+                        help="with --deployment-plan or --map-planner, "
+                        "each beacon's current charge as a fraction "
+                        "of full, e.g. A=0.9,D=0.2 (default: 1.0, "
+                        "fresh, for every beacon)")
     parser.add_argument("--drain-rate", type=float, default=0.05,
-                        help="with --deployment-plan, the fraction "
-                        "of a full charge every beacon burns per "
-                        "hour (default: 0.05)")
+                        help="with --deployment-plan or --map-planner, "
+                        "the fraction of a full charge every beacon "
+                        "burns per hour (default: 0.05)")
     args = parser.parse_args(argv)
 
     if args.deployment_plan:
@@ -282,6 +303,22 @@ def main(argv=None) -> int:
         return 0 if validation.ok else 1
 
     if args.map_overlay is not None:
+        if args.map_planner and args.map_replay:
+            print("--map-planner works with the static overlay, not "
+                  "with --map-replay", file=sys.stderr)
+            return 2
+        if args.map_planner and args.map_heatmap:
+            print("--map-planner and --map-heatmap shade the same "
+                  "cells in different colours; pick one",
+                  file=sys.stderr)
+            return 2
+        plan = None
+        if args.map_planner:
+            try:
+                plan = _deployment_plan(args)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
         rows = load_track_for_overlay(args.map_overlay)
         if args.map_replay:
             svg = render_track_replay(
@@ -294,7 +331,9 @@ def main(argv=None) -> int:
                                      width_m=WARD_WIDTH_M,
                                      height_m=WARD_HEIGHT_M,
                                      floor=args.map_floor,
-                                     heatmap=args.map_heatmap)
+                                     heatmap=args.map_heatmap,
+                                     plan=plan,
+                                     planner=args.map_planner)
         if args.map_output is not None:
             with open(args.map_output, "w", encoding="utf-8") as handle:
                 handle.write(svg)

@@ -123,6 +123,12 @@ library, no dependencies, no BLE hardware needed.
   plus when the ward drops below three lit beacons and can no
   longer triangulate at all, so replacement cells are scheduled
   before the ward goes blind instead of after.
+- A planner-aware ward-map overlay: the overlay takes a
+  deployment plan — each beacon is annotated with its forecast
+  horizon and coloured by its forecast status, and the planner
+  heatmap shades each cell by when its coverage first degrades,
+  so the map shows not just the coverage now but when it will
+  thin.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -575,6 +581,52 @@ starts lying well before it disappears. With measured levels
 hours, when C goes dark — four hours of warning between the
 first beacon dying and triangulation failing. A drain rate of
 zero reports every horizon as `never`.
+
+## Planner-aware ward-map overlay
+
+The deployment planner says when each beacon goes dark; the ward
+map is where that forecast belongs, next to the coverage it
+threatens. `render_map_overlay(..., plan=plan)` annotates every
+beacon with its forecast horizon — the soonest of its three
+milestones, e.g. `2 dB noise in 13.3h`, `3 dB loss now`, or
+`dark now` — and colours its diamond by its forecast status
+(blue ok, amber degrading, red dark), with a legend line carrying
+the plan's earliest dark and when the ward drops below three lit
+beacons. `render_map_overlay(..., plan=plan, planner=True)`
+shades the ward grid the same way, but by time instead of by
+quality: `planner_heatmap` grids the ward (2 m cells, 1 m off
+the walls) and gives each cell the soonest forecast milestone
+among its three nearest beacons — the beacons whose RSSI would
+dominate the solve there, so the ones the cell depends on — with
+the limiting beacon and milestone on the cell, so the map shows
+not just the coverage now but when it will thin. The cells are
+coloured red inside 4 hours, amber inside 12, green beyond, and
+teal where the beacons never drain, so a dashboard can see at a
+glance which corner of the ward needs a battery first. The
+planner shading and the coverage heatmap cannot be combined —
+they would paint the same cells in different colours — and a
+beacon in the layout with no forecast in the plan raises instead
+of being drawn as if it were stable. The CLI renders it directly,
+reusing `--battery-levels` and `--drain-rate` for the plan:
+
+```sh
+python3 -m beacon.cli --map-overlay ward-a-track.json --map-output ward-a-track.svg --map-planner
+python3 -m beacon.cli --map-overlay ward-a-track.json --map-output ward-a-track.svg --map-planner --battery-levels A=0.9,B=0.6,C=0.4,D=0.2
+```
+
+Measured behaviour: on the default ward with four fresh beacons
+at 0.05 per hour every cell degrades at 13.3 hours (the 2 dB
+noise milestone comes first for all four), so the whole planner
+heatmap is green. With measured levels 0.9, 0.6, 0.4, 0.2 the
+earliest cell is (1, 1) m at 0.0 hours — D is already past 3 dB
+of loss — while the far corner (19, 1) m holds until 1.3 hours
+(C's 2 dB noise milestone), and all 60 cells are red: every
+cell's three nearest beacons include C or D, so the whole ward
+starts degrading within 1.3 hours. The overlay's canvas grows
+with its legend, so the plan and planner summary lines are never
+clipped below the SVG — the plain overlay's legend already
+overflowed its 560 px canvas before this change, and now renders
+at 594 px.
 
 ## Trajectory smoothing
 
@@ -1609,6 +1661,22 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   14.1 hours and 2 dB of noise in 13.3 hours — the beacon starts
   lying hours before it disappears — and with measured levels
   0.9, 0.6, 0.4, 0.2 the earliest dark is 3.0 hours and the ward
-  drops below three lit beacons at 7.0 hours. The roadmap grows
-  as new needs surface — the deployment planner is the latest
-  addition.
+  drops below three lit beacons at 7.0 hours.
+- Planner-aware ward-map overlay (the map shows when coverage
+  thins, not just where it is thin) — done: `render_map_overlay`
+  takes a `DeploymentPlan` and annotates each beacon with its
+  forecast horizon (`2 dB noise in 13.3h`, `3 dB loss now`,
+  `dark now`) with its diamond coloured by forecast status, and
+  `planner_heatmap` shades each cell by the soonest forecast
+  milestone among its three nearest beacons (red inside 4 hours,
+  amber inside 12, green beyond, teal where the beacons never
+  drain), with the limiting beacon and milestone on the cell and
+  the plan's earliest dark and below-three-lit-beacons horizons
+  in the legend; `python -m beacon.cli --map-overlay track.json
+  --map-planner` renders it, reusing `--battery-levels` and
+  `--drain-rate` for the plan (v0.28.0); four fresh beacons give
+  an all-green planner heatmap at 13.3 hours, while measured
+  levels 0.9, 0.6, 0.4, 0.2 turn all 60 cells red — every cell's
+  three nearest include C or D, so the whole ward starts
+  degrading within 1.3 hours. The roadmap grows as new needs
+  surface — the planner-aware overlay is the latest addition.
