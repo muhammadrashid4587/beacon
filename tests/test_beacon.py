@@ -34,6 +34,7 @@ from beacon import (
     calibrate_beacon,
     calibrate_survey,
     distance_to_rssi,
+    DriftClassification,
     DriftMonitor,
     estimate_floor,
     estimate_uncertainty,
@@ -1474,6 +1475,262 @@ class TestDriftMonitor(unittest.TestCase):
         monitor = DriftMonitor(BEACONS)
         with self.assertRaises(ValueError):
             monitor.observe((5.0, 5.0, 0), {"A": -60.0})
+
+
+class TestDriftClassification(unittest.TestCase):
+    """DriftMonitor.classify: sag vs move vs noise vs uncertain.
+
+    Every scenario runs the rectangular ward loop twice (80 steps,
+    2 dB noise) so the monitor can match each recent reading
+    against the same spot a loop earlier — that revisit delta is
+    what separates a draining battery from a moved beacon. The
+    expected verdicts below are the measured ones across seeds 1,
+    2, 3, 7, 11, including the two cases the classifier gets
+    wrong, which are asserted as such rather than hidden.
+    """
+
+    def _two_loops(self, seed, **kwargs):
+        """Two loops of the default walk, fed to a fresh monitor."""
+        loop = rectangular_walk(20.0, 12.0, 10)
+        steps = simulate_walk(loop + loop, BEACONS,
+                              noise_db=2.0, seed=seed, **kwargs)
+        monitor = DriftMonitor(BEACONS)
+        for step in steps:
+            monitor.feed(step)
+        return monitor
+
+    def _two_loops_with(self, seed, beacons, **kwargs):
+        """Two loops simulated with ``beacons`` but monitored
+        against the calibrated ``BEACONS`` — the moved-beacon
+        setup: the simulator knows where the beacon really is,
+        the monitor only knows where it should be."""
+        loop = rectangular_walk(20.0, 12.0, 10)
+        steps = simulate_walk(loop + loop, beacons,
+                              noise_db=2.0, seed=seed, **kwargs)
+        monitor = DriftMonitor(BEACONS)
+        for step in steps:
+            monitor.feed(step)
+        return monitor
+
+    def test_healthy_walk_classifies_healthy(self):
+        for seed in (1, 2, 3, 7, 11):
+            monitor = self._two_loops(seed)
+            for beacon in BEACONS:
+                result = monitor.classify(beacon.id)
+                self.assertEqual(result.verdict, "healthy", seed)
+                self.assertEqual(result.samples, 20)
+                self.assertEqual(result.revisit_pairs, 20)
+
+    def test_slow_battery_sag_classifies_as_battery_sag(self):
+        # D drains at 0.3 per hour over 120 s steps: level 1.0 down
+        # to 0.20 across the two loops, still heard throughout.
+        # The v0.25.0 alarm misses this (mean residual only
+        # -2.2 to -4.7 dB, under the 5 dB threshold); the revisit
+        # delta catches it on every seed.
+        for seed in (1, 2, 3, 7, 11):
+            monitor = self._two_loops(
+                seed, batteries={"D": BatteryModel(
+                    drain_rate_per_hour=0.3)}, step_seconds=120.0)
+            result = monitor.classify("D")
+            self.assertEqual(result.verdict, "battery-sag", seed)
+            self.assertLess(result.mean_residual_db, -1.5)
+            self.assertIsNotNone(result.revisit_delta_db)
+            self.assertLess(result.revisit_delta_db, -1.0)
+            for other in ("A", "B", "C"):
+                self.assertEqual(monitor.classify(other).verdict,
+                                 "healthy", (seed, other))
+
+    def test_moved_beacon_classifies_as_moved(self):
+        # D displaced from (0, 12) to (5, 7): stable at the same
+        # spot, wrong by a position-dependent amount.
+        moved = [Beacon(b.id, b.x, b.y) for b in BEACONS]
+        moved[3] = Beacon("D", 5.0, 7.0)
+        for seed in (1, 2, 3, 7):
+            monitor = self._two_loops_with(seed, moved)
+            result = monitor.classify("D")
+            self.assertEqual(result.verdict, "moved", seed)
+            self.assertGreater(result.mean_residual_db, 1.5)
+            self.assertGreater(result.residual_std_db, 2.5)
+            self.assertLess(abs(result.revisit_delta_db), 1.0)
+        # Seed 11 is the honest miss: the noise itself drifts down
+        # over the walk (revisit delta -1.84 dB), so the monitor
+        # cannot rule a decline out and says uncertain instead.
+        monitor = self._two_loops_with(11, moved)
+        self.assertEqual(monitor.classify("D").verdict, "uncertain")
+
+    def test_noisy_beacon_classifies_as_noisy(self):
+        for seed in (1, 2, 3, 7, 11):
+            loop = rectangular_walk(20.0, 12.0, 10)
+            steps = simulate_walk(loop + loop, BEACONS,
+                                  noise_db=2.0, seed=seed)
+            rng = random.Random(seed + 1000)
+            for step in steps:
+                step["rssi"]["D"] += rng.gauss(0.0, 5.0)
+            monitor = DriftMonitor(BEACONS)
+            for step in steps:
+                monitor.feed(step)
+            result = monitor.classify("D")
+            self.assertEqual(result.verdict, "noisy", seed)
+            self.assertGreater(result.residual_std_db, 4.0)
+
+    def test_constant_offset_is_uncertain_not_sag(self):
+        # A steady -6 dB offset alarms (mean beyond 5 dB) but is
+        # steady at revisited spots with no position pattern — a
+        # stabilised sag and a miscalibration look identical.
+        for seed in (1, 2, 3, 7):
+            loop = rectangular_walk(20.0, 12.0, 10)
+            steps = simulate_walk(loop + loop, BEACONS,
+                                  noise_db=2.0, seed=seed)
+            for step in steps:
+                step["rssi"]["D"] -= 6.0
+            monitor = DriftMonitor(BEACONS)
+            for step in steps:
+                monitor.feed(step)
+            result = monitor.classify("D")
+            self.assertEqual(result.verdict, "uncertain", seed)
+            self.assertIsNotNone(monitor.alarm("D"))
+        # Seed 11 is the known false positive, asserted as such:
+        # the noise drifts down -1.84 dB over the walk, which the
+        # revisit test reads as a real decline.
+        loop = rectangular_walk(20.0, 12.0, 10)
+        steps = simulate_walk(loop + loop, BEACONS,
+                              noise_db=2.0, seed=11)
+        for step in steps:
+            step["rssi"]["D"] -= 6.0
+        monitor = DriftMonitor(BEACONS)
+        for step in steps:
+            monitor.feed(step)
+        self.assertEqual(monitor.classify("D").verdict, "battery-sag")
+
+    def test_small_move_is_at_the_detection_floor(self):
+        # A 1.4 m move (D to (1, 11)) leaves a residual pattern
+        # smaller than the 2 dB RSSI noise: the classifier must
+        # never invent a cause for it — healthy or uncertain only.
+        moved = [Beacon(b.id, b.x, b.y) for b in BEACONS]
+        moved[3] = Beacon("D", 1.0, 11.0)
+        for seed in (1, 2, 3, 7, 11):
+            monitor = self._two_loops_with(seed, moved)
+            verdict = monitor.classify("D").verdict
+            self.assertIn(verdict, ("healthy", "uncertain"), seed)
+
+    def test_no_revisit_fallback_catches_fast_sag(self):
+        # One loop only, no revisits: the README fast-sag scenario
+        # (1.2 per hour, 120 s steps, D dark from step 24). The
+        # within-window decline carries the verdict on 4/5 seeds.
+        for seed in (1, 2, 3, 7):
+            steps = simulate_walk(rectangular_walk(20.0, 12.0, 10),
+                                  BEACONS, noise_db=2.0, seed=seed,
+                                  batteries={"D": BatteryModel(
+                                      drain_rate_per_hour=1.2)},
+                                  step_seconds=120.0)
+            monitor = DriftMonitor(BEACONS)
+            for step in steps:
+                monitor.feed(step)
+            self.assertEqual(monitor.classify("D").verdict,
+                             "battery-sag", seed)
+        # Seed 11's decline is buried in the noise on a single
+        # pass (slope -0.05 dB per reading) — no signature fires.
+        steps = simulate_walk(rectangular_walk(20.0, 12.0, 10),
+                              BEACONS, noise_db=2.0, seed=11,
+                              batteries={"D": BatteryModel(
+                                  drain_rate_per_hour=1.2)},
+                              step_seconds=120.0)
+        monitor = DriftMonitor(BEACONS)
+        for step in steps:
+            monitor.feed(step)
+        self.assertIn(monitor.classify("D").verdict,
+                      ("healthy", "uncertain"))
+
+    def test_fixed_position_decline_classifies_as_sag(self):
+        # No walk at all: a reference tag at one fixed spot hears
+        # D fade 0.3 dB per reading. Revisits are exact (same spot
+        # every reading), so the delta is unambiguous.
+        monitor = DriftMonitor(BEACONS)
+        for i in range(20):
+            rssi = {}
+            for beacon in BEACONS:
+                distance = math.hypot(10.0 - beacon.x, 6.0 - beacon.y)
+                rssi[beacon.id] = distance_to_rssi(distance)
+            rssi["D"] -= 0.3 * i
+            monitor.observe((10.0, 6.0), rssi)
+        result = monitor.classify("D")
+        self.assertEqual(result.verdict, "battery-sag")
+        # Each window reading pairs with the earliest reading at
+        # the same spot (10+ readings back): readings 11..20 pair
+        # with reading 1, so the deltas run -3.0 to -5.7 dB.
+        self.assertEqual(result.revisit_pairs, 10)
+        self.assertAlmostEqual(result.revisit_delta_db, -4.35, delta=0.01)
+        self.assertEqual(monitor.classify("A").verdict, "healthy")
+
+    def test_unheard_beacon_is_uncertain(self):
+        monitor = DriftMonitor(BEACONS)
+        result = monitor.classify("A")
+        self.assertEqual(result.verdict, "uncertain")
+        self.assertEqual(result.samples, 0)
+        self.assertIsNone(result.revisit_delta_db)
+        self.assertEqual(result.revisit_pairs, 0)
+
+    def test_too_few_readings_is_uncertain(self):
+        monitor = DriftMonitor(BEACONS)
+        steps = simulate_walk([(10.0, 6.0)] * 3, BEACONS,
+                              noise_db=0.0, seed=7)
+        for step in steps:
+            monitor.feed(step)
+        result = monitor.classify("A")
+        self.assertEqual(result.verdict, "uncertain")
+        self.assertEqual(result.samples, 3)
+
+    def test_unknown_beacon_classify_raises(self):
+        monitor = DriftMonitor(BEACONS)
+        with self.assertRaises(ValueError):
+            monitor.classify("Z")
+
+    def test_bad_parameters_raise(self):
+        with self.assertRaises(ValueError):
+            DriftMonitor(BEACONS, noise_db=0)
+        with self.assertRaises(ValueError):
+            DriftMonitor(BEACONS, history=10)
+        with self.assertRaises(ValueError):
+            DriftMonitor(BEACONS, revisit_gap=0)
+        with self.assertRaises(ValueError):
+            DriftMonitor(BEACONS, revisit_radius_m=0)
+
+    def test_classifications_returns_all_beacons_in_order(self):
+        monitor = self._two_loops(7)
+        results = monitor.classifications()
+        self.assertEqual([r.id for r in results], ["A", "B", "C", "D"])
+        self.assertTrue(all(isinstance(r, DriftClassification)
+                            for r in results))
+        self.assertTrue(all(r.verdict == "healthy" for r in results))
+
+    def test_cli_drift_classify_flags(self):
+        import io
+        from contextlib import redirect_stdout
+        from beacon.cli import main
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(main(["--drift-classify", "--seed", "7"]), 0)
+        self.assertIn("healthy", out.getvalue())
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(main(["--drift-classify", "--seed", "7",
+                                   "--battery-degrade", "D"]), 0)
+        self.assertIn("battery-sag", out.getvalue())
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(main(["--drift-classify", "--seed", "7",
+                                   "--move-beacon", "D:5,-5"]), 0)
+        self.assertIn("moved", out.getvalue())
+
+        with self.assertRaises(SystemExit):
+            main(["--battery-degrade", "D"])
+        with self.assertRaises(SystemExit):
+            main(["--move-beacon", "D:5,-5"])
+        self.assertEqual(main(["--drift-classify", "--move-beacon",
+                               "D:bad"]), 2)
 
 
 class TestPositionUncertainty(unittest.TestCase):

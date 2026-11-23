@@ -424,6 +424,91 @@ beacon reading 8 dB too quiet alarms the other way. A short drift
 that leaves the 5-reading window stops alarming on its own, and
 feeding a healthy walk after a drifted one clears the alarm.
 
+## Classifying drift: battery sag or a moved beacon
+
+An alarm says a beacon drifted, not why — and the fix depends on
+the why. A dying battery means send someone with a replacement
+cell; a moved beacon means re-survey its position; a noisy beacon
+means check the radio. `DriftMonitor.classify(id)` names the
+cause, as a `DriftClassification` with a `verdict` — `healthy`,
+`battery-sag`, `moved`, `noisy` or `uncertain` — plus the numbers
+the verdict rests on (window mean and spread, time slope and
+correlation, revisit delta and pair count) and a `reason` in
+words. `classifications()` classifies every beacon at once.
+
+The three causes leave different signatures, and the test that
+separates a sag from a move is the revisit: the monitor keeps a
+history (500 readings per beacon by default) alongside the
+rolling window, and pairs each recent reading with the closest
+earlier reading at (nearly) the same spot, at least 10 readings
+earlier. A draining battery reads weaker at the same spot over
+time — the `BatteryModel` loses RSSI with the square of the
+charge used and adds noise as the cell drains — while a move
+cannot change what a beacon reads like at a fixed spot, so a
+falling revisit delta means sag. A moved beacon is the opposite:
+its residual is stable at the same spot but wrong by a
+position-dependent amount, so the window's residuals spread out
+(std above 2.5 dB) around a shifted mean (beyond 1.5 dB). A
+noisy beacon's spread is more than twice the expected RSSI noise
+(2 dB by default, so above 4 dB) with no steady decline. A
+steady offset fits none of these — a battery that sagged and
+then stabilised looks exactly like a miscalibration — so the
+classifier says `uncertain` instead of guessing.
+
+The revisit test is what makes this work: within a single pass,
+time and position are confounded (the device walks from one side
+of the ward to the other as the battery drains), so a declining
+residual could be either a sag or a move. Walk the loop twice
+and the two come apart. Without revisits the classifier falls
+back to the within-window trend — a strong monotonic decline, or
+a second half much weaker than the first — which catches a fast
+sag most of the time but cannot rule a move out, and the reason
+says which evidence was used.
+
+```sh
+python3 -m beacon.cli --drift-classify --seed 7
+python3 -m beacon.cli --drift-classify --seed 7 --battery-degrade D
+python3 -m beacon.cli --drift-classify --seed 7 --move-beacon D:5,-5
+```
+
+`--drift-classify` walks the loop twice and prints each beacon's
+verdict with its mean and spread, revisit delta and pair count,
+and the reason. `--battery-degrade D` drains D at 0.3 per hour
+(120 s steps, level 1.0 down to 0.20 across the two loops, still
+heard throughout); `--move-beacon D:5,-5` simulates D displaced
+5 m east and 5 m south of its calibrated corner, at (5, 7).
+
+Measured behaviour (simulator, 2 dB RSSI noise, two-loop ward
+walk, beacon D, seeds 1, 2, 3, 7, 11 — the other three beacons
+stay `healthy` in every scenario):
+
+| scenario | verdicts |
+|---|---|
+| healthy | `healthy` 5/5 (mean -0.90 to +0.38 dB) |
+| D draining, 0.3/hr | `battery-sag` 5/5 (mean -2.17 to -4.73 dB, revisit delta -1.97 to -5.50 dB) |
+| D moved (0, 12) to (5, 7) | `moved` 4/5 (mean +3.12 to +4.21 dB, spread 2.60 to 3.23 dB, revisit delta near zero); seed 11 `uncertain` |
+| D moved 1.4 m, to (1, 11) | `uncertain` 3/5, `healthy` 2/5 — never `moved` or `battery-sag` |
+| D with 5 dB extra noise | `noisy` 5/5 (spread 4.33 to 6.68 dB) |
+| D steady -6 dB offset | `uncertain` 4/5; seed 11 misread as `battery-sag` |
+
+The misses are honest limits, not bugs to tune away. The slow
+sag's mean residual (-2.17 to -4.73 dB) never reaches the 5 dB
+alarm threshold, so the v0.25.0 alarm misses it entirely — the
+classifier catches it through the revisits. A move under about
+2 m is invisible at 2 dB noise: its residual pattern is smaller
+than the noise, so the classifier calls it `healthy` or
+`uncertain` rather than inventing a cause. And a steady offset
+on seed 11 is misread as a sag because the noise itself drifts
+down -1.84 dB over that walk — the same noise fluke also turns
+the moved beacon's seed-11 verdict `uncertain`, since the
+monitor cannot rule a decline out. No statistic in the window
+can tell a real decline from that fluke; the fix is a longer
+history (more loops), not a sharper threshold. On a single pass
+with no revisits, the fallback catches the fast 1.2-per-hour sag
+on 4/5 seeds (seed 11's decline is buried in the noise: slope
+-0.05 dB per reading) and a beacon moved away from the ward
+reads like a steady offset, so it comes back `uncertain`.
+
 ## Trajectory smoothing
 
 The live filter is causal: each estimate only uses the observations
@@ -1420,5 +1505,25 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   is 5.09 m against 2.16 m healthy — 2.19 m over steps 0–5,
   13.66 m over steps 12–19 while D is dying, 3.36 m over steps
   24–39 once D is dark and the track runs on three beacons — at
-  coverage 1.0 throughout. The roadmap grows as new needs
-  surface — battery degradation is the latest addition.
+  coverage 1.0 throughout.
+- Drift classification (battery sag or a moved beacon?) —
+  done: `DriftMonitor.classify` names the cause of a drift —
+  `healthy`, `battery-sag`, `moved`, `noisy` or `uncertain` —
+  from the residual signatures, with the revisit delta as the
+  test that separates a sag from a move (same spot, read again
+  later: a draining battery reads weaker, a move cannot change
+  what a beacon reads like at a fixed spot), a within-window
+  trend as the fallback when the device never revisits a spot,
+  and `uncertain` instead of a guess when no signature fits;
+  `python -m beacon.cli --drift-classify` walks the loop twice
+  and prints every beacon's verdict, with `--battery-degrade D`
+  and `--move-beacon D:5,-5` to show it a real sag and a real
+  move (v0.26.0); measured on two-loop ward walks, seeds 1, 2,
+  3, 7, 11: a slow sag is called `battery-sag` 5/5, a 7 m move
+  is called `moved` 4/5 (seed 11 `uncertain`), 5 dB of extra
+  noise is called `noisy` 5/5, and a steady -6 dB offset is
+  called `uncertain` 4/5 and misread as a sag on seed 11, where
+  the noise itself drifts down — while a move under about 2 m
+  is invisible at 2 dB noise and comes back `healthy` or
+  `uncertain`. The roadmap grows as new needs surface — drift
+  classification is the latest addition.

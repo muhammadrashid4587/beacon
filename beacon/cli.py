@@ -8,6 +8,8 @@ Usage:
     python -m beacon.cli --map-overlay track.json [--map-output map.svg]
     python -m beacon.cli --map-overlay track.json --map-replay
         [--map-output replay.svg] [--replay-step-seconds 0.5]
+    python -m beacon.cli --drift-classify [--seed 7]
+        [--battery-degrade D] [--move-beacon D:5,-5]
 """
 
 import argparse
@@ -15,7 +17,9 @@ import math
 import statistics
 import sys
 
+from .battery import BatteryModel
 from .beacon import Beacon
+from .drift import DriftMonitor
 from .engine import PositioningEngine
 from .map_overlay import load_track_for_overlay, render_map_overlay
 from .replay import render_track_replay
@@ -24,6 +28,12 @@ from .validation import validate_floor_layouts
 
 WARD_WIDTH_M = 20.0
 WARD_HEIGHT_M = 12.0
+
+# The drift-classification demo drains at this rate (120 s steps, two
+# loops): slow enough that the beacon survives both loops, fast
+# enough that the decline is visible — level 1.0 down to 0.20.
+DRIFT_BATTERY_DRAIN_PER_HOUR = 0.3
+DRIFT_STEP_SECONDS = 120.0
 
 
 def default_beacons() -> list[Beacon]:
@@ -34,6 +44,72 @@ def default_beacons() -> list[Beacon]:
         Beacon("C", WARD_WIDTH_M, WARD_HEIGHT_M),
         Beacon("D", 0.0, WARD_HEIGHT_M),
     ]
+
+
+def _parse_move_beacon(spec: str) -> tuple[str, float, float]:
+    """Parse a --move-beacon ID:DX,DY spec, or raise ValueError."""
+    beacon_id, displacement = spec.split(":", 1)
+    dx_text, dy_text = displacement.split(",", 1)
+    return beacon_id, float(dx_text), float(dy_text)
+
+
+def run_drift_classify(args: argparse.Namespace) -> int:
+    """Walk the loop twice and classify each beacon's drift.
+
+    The second loop is the point: the monitor matches each recent
+    reading against the same spot a loop earlier, so a beacon that
+    reads weaker at the same place over time is a draining battery,
+    while a beacon whose residual is stable at the same spot but
+    wrong by a position-dependent amount has moved. ``--battery-
+    degrade`` drains one beacon and ``--move-beacon`` displaces one,
+    so the classifier can be shown a real sag and a real move.
+    """
+    beacons = default_beacons()
+    known_ids = {b.id for b in beacons}
+    sim_beacons = list(beacons)
+    batteries = None
+    step_seconds = 1.0
+    if args.battery_degrade is not None:
+        if args.battery_degrade not in known_ids:
+            print(f"unknown beacon: {args.battery_degrade!r}",
+                  file=sys.stderr)
+            return 2
+        batteries = {args.battery_degrade: BatteryModel(
+            drain_rate_per_hour=DRIFT_BATTERY_DRAIN_PER_HOUR)}
+        step_seconds = DRIFT_STEP_SECONDS
+    if args.move_beacon is not None:
+        try:
+            beacon_id, dx, dy = _parse_move_beacon(args.move_beacon)
+        except ValueError:
+            print("--move-beacon takes ID:DX,DY, e.g. D:5,-5",
+                  file=sys.stderr)
+            return 2
+        if beacon_id not in known_ids:
+            print(f"unknown beacon: {beacon_id!r}", file=sys.stderr)
+            return 2
+        sim_beacons = [
+            Beacon(b.id, b.x + dx, b.y + dy) if b.id == beacon_id else b
+            for b in beacons]
+
+    loop = rectangular_walk(WARD_WIDTH_M, WARD_HEIGHT_M, args.steps)
+    steps = simulate_walk(loop + loop, sim_beacons,
+                          noise_db=args.noise, seed=args.seed,
+                          batteries=batteries, step_seconds=step_seconds)
+    monitor = DriftMonitor(beacons)
+    for step in steps:
+        monitor.feed(step)
+
+    print(f"{'beacon':>6} {'verdict':>11} {'mean dB':>8} {'std dB':>7} "
+          f"{'revisit dB':>10} {'pairs':>5}")
+    for result in monitor.classifications():
+        revisit = (f"{result.revisit_delta_db:+.2f}"
+                   if result.revisit_delta_db is not None else "—")
+        print(f"{result.id:>6} {result.verdict:>11} "
+              f"{result.mean_residual_db:+8.2f} "
+              f"{result.residual_std_db:7.2f} "
+              f"{revisit:>10} {result.revisit_pairs:5d}")
+        print(f"       {result.reason}")
+    return 0
 
 
 def main(argv=None) -> int:
@@ -76,7 +152,32 @@ def main(argv=None) -> int:
                         "triangulate?) instead of simulating a walk; "
                         "exits non-zero when a floor is thin or "
                         "cannot triangulate")
+    parser.add_argument("--drift-classify", action="store_true",
+                        help="walk the loop twice and classify each "
+                        "beacon's drift instead of simulating a "
+                        "walk — battery-sag, moved, noisy, "
+                        "uncertain or healthy (the second loop is "
+                        "what separates a sag from a move: the same "
+                        "spot, read again later)")
+    parser.add_argument("--battery-degrade", default=None, metavar="ID",
+                        help="with --drift-classify, drain this "
+                        "beacon's battery during the walk (0.3 per "
+                        "hour, 120 s steps) so the classifier has a "
+                        "real sag to find")
+    parser.add_argument("--move-beacon", default=None,
+                        metavar="ID:DX,DY",
+                        help="with --drift-classify, simulate this "
+                        "beacon displaced by (DX, DY) metres from "
+                        "its calibrated position, e.g. D:5,-5, so "
+                        "the classifier has a real move to find")
     args = parser.parse_args(argv)
+
+    if args.drift_classify:
+        return run_drift_classify(args)
+
+    if args.battery_degrade is not None or args.move_beacon is not None:
+        parser.error("--battery-degrade and --move-beacon need "
+                     "--drift-classify")
 
     if args.validate_layout:
         validation = validate_floor_layouts(

@@ -10,7 +10,7 @@ from .beacon import Beacon
 from .calibration import calibrate_beacon, calibrate_survey, fit_path_loss
 from .engine import PositioningEngine
 from .filter import KalmanFilter, MovingAverageFilter
-from .drift import DriftAlarm, DriftMonitor
+from .drift import DriftAlarm, DriftClassification, DriftMonitor
 from .health import BeaconHealth, assess_beacon_health, healthy_beacons
 from .fingerprint import (FingerprintMap, MultiFloorFingerprintMap,
                           build_fingerprint_map,
@@ -38,7 +38,7 @@ from .validation import (DEFAULT_MAX_WORST_SEMI_MAJOR_M,
                          FloorLayoutVerdict, LayoutValidation,
                          validate_floor_layouts)
 
-__version__ = "0.25.0"
+__version__ = "0.26.0"
 
 __all__ = [
     "BatteryModel",
@@ -50,6 +50,7 @@ __all__ = [
     "assess_beacon_health",
     "healthy_beacons",
     "DriftAlarm",
+    "DriftClassification",
     "DriftMonitor",
     "FingerprintMap",
     "MultiFloorFingerprintMap",
