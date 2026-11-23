@@ -68,6 +68,12 @@ library, no dependencies, no BLE hardware needed.
   with the 95% confidence ellipse attached — partial scans merge
   across beacons, stale readings age out, and a beacon dropping
   out mid-stream degrades the track instead of breaking it.
+- Beacon-failure fallback: a beacon that goes quiet mid-track is
+  excluded from the estimate once it has been unheard for longer
+  than the dark window, and the fallback is recorded on the live
+  position — which beacon went dark and why — so a dashboard can
+  see the track running on three beacons instead of four, and a
+  beacon heard again rejoins on its own.
 - A live track accuracy report: score a recorded walk against
   ground truth — mean, median, 90th percentile and worst error,
   plus coverage (how much of the walk was actually located) and
@@ -598,6 +604,58 @@ error is 2.43 m and the track keeps emitting on three beacons; the
 ellipse widens as the geometry thins (mean semi-major axis 6.32 m
 with four beacons, 7.42 m after D drops).
 
+## Beacon-failure fallback
+
+Stale readings already age out of the merged set, so a beacon
+that goes quiet stops anchoring the track — but nothing said so.
+A dashboard watching the track could see it drop from four
+beacons to three and not know whether a beacon died, was
+shielded, or was simply never installed. `LiveTracker` now
+names the fallback: a beacon heard before, then unheard for
+longer than `dark_after` (10 s by default), counts as dark, and
+the live position carries it as an `ExcludedBeacon` — the beacon
+id and the reason, e.g. `"no reading for 12.0s (dark after
+10.0s)"`:
+
+```python
+from beacon import Beacon, LiveTracker, PositioningEngine
+
+beacons = [Beacon("A", 0, 0), Beacon("B", 20, 0),
+           Beacon("C", 20, 12), Beacon("D", 0, 12)]
+tracker = LiveTracker(PositioningEngine(beacons))
+tracker.feed({"A": -62.1, "B": -71.4, "C": -68.0, "D": -59.8}, t=0.0)
+# ... D goes quiet; eleven seconds after its last reading:
+live = tracker.feed({"A": -62.1, "B": -71.4, "C": -68.0}, t=11.0)
+# live.heard == ("A", "B", "C")
+# live.excluded == (ExcludedBeacon(id="D",
+#     reason="no reading for 11.0s (dark after 10.0s)"),)
+tracker.excluded   # the same list, without a position in hand
+```
+
+The dark window is longer than the stale window (`dark_after`
+must be at least `stale_after`, 5 s by default), so a beacon is
+only called dark once it has already aged out of the estimate —
+the two windows never disagree about whether a beacon is in the
+position. A beacon never heard is not excluded: there is no
+fallback to record for a beacon that was never part of the track.
+A beacon heard again stops being excluded on its own, so a
+beacon that recovers (the trolley moved away, the battery was
+swapped) rejoins the track without anyone resetting the tracker.
+The exclusion travels with the position into its JSON form and
+into the stream output (`python -m beacon.tracking`), including
+on a line whose position is null, so a dashboard sees why a
+track is running thin. `--dark-after` tunes the window from the
+command line.
+
+Measured behaviour (simulator, 2 dB RSSI noise, default ward
+walk, seed 7, beacon D dying at step 20): D is first recorded
+excluded at step 30, eleven seconds after its last reading; the
+track keeps emitting on three beacons with coverage 1.0 and a
+mean error of 2.43 m — the same as before the fallback was
+recorded — and the degradation shows up where it should, in the
+uncertainty: the ellipse's semi-major axis widens from 7.65 m
+just before D drops to 8.68 m after it is excluded.
+
 ## Live track accuracy report
 
 The README's accuracy numbers above were measured by hand, once.
@@ -794,5 +852,16 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   mean 2.16 m, median 2.08 m, p90 4.14 m, worst 6.70 m, coverage
   1.0 — and a beacon dropout shows up in the error (mean 2.43 m)
   rather than the coverage, which stays 1.0 on three beacons.
-  The roadmap grows as new needs surface — the accuracy report is
-  the latest addition.
+- Beacon-failure fallback (record which beacon went dark and why)
+  — done: `LiveTracker` counts a beacon heard before, then
+  unheard for longer than `dark_after` (10 s by default, never
+  shorter than the 5 s stale window), as dark, and records it on
+  the `LivePosition` as an `ExcludedBeacon` with the reason, in
+  the position's JSON form, and in the stream output; a beacon
+  never heard is not excluded, and a beacon heard again rejoins
+  on its own (v0.17.0); on the default ward walk, seed 7, with
+  beacon D dying at step 20, D is first recorded excluded at
+  step 30, the track keeps coverage 1.0 at 2.43 m mean error, and
+  the ellipse's semi-major axis widens from 7.65 m to 8.68 m.
+  The roadmap grows as new needs surface — the fallback is the
+  latest addition.

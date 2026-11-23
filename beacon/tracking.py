@@ -21,6 +21,12 @@ observation stream into a live track:
   impossible and ``feed`` returns ``None`` instead of a made-up
   position; the last good position stays available as
   ``last_position`` until a fresh reading revives the track.
+- A beacon unheard for longer than ``dark_after`` (10 s by
+  default) counts as dark: it is already out of the estimate by
+  then, and the fallback is recorded on the position as an
+  ``ExcludedBeacon`` — which beacon went quiet and why — so the
+  track degrades gracefully and a dashboard can see it doing so.
+  A beacon heard again stops being excluded on its own.
 
 The stream format is JSON lines, one reading per line — the same
 shape a BLE scanner would emit, and easy to pipe from anything:
@@ -50,9 +56,35 @@ from .uncertainty import PositionUncertainty
 # the device is, so it leaves the merged observation set.
 DEFAULT_STALE_AFTER_S = 5.0
 
+# A beacon unheard for this long counts as dark: it has gone quiet
+# mid-track, so the estimate is built without it and the fallback is
+# recorded on the position. Longer than the stale window, so a dark
+# beacon has already aged out of the merged set before it is called
+# dark — the two windows never disagree about whether a beacon is
+# in the estimate.
+DEFAULT_DARK_AFTER_S = 10.0
+
 # Assumed RSSI noise for the confidence ellipse, matching the
 # simulator's default noise and the engine's default.
 DEFAULT_SIGMA_RSSI_DB = 2.0
+
+
+@dataclass(frozen=True)
+class ExcludedBeacon:
+    """A beacon left out of a live position, and why.
+
+    ``id`` is the beacon, ``reason`` says what happened to it —
+    for a beacon that went dark mid-track, how long it has been
+    unheard and the dark window it crossed, e.g.
+    ``"no reading for 12.0s (dark after 10.0s)"``.
+    """
+
+    id: str
+    reason: str
+
+    def to_dict(self) -> dict:
+        """JSON-friendly form, for the stream output and dashboards."""
+        return {"id": self.id, "reason": self.reason}
 
 
 @dataclass(frozen=True)
@@ -65,7 +97,11 @@ class LivePosition:
     confidence). ``uncertainty`` is the 95% confidence ellipse for
     this step's raw geometry — None when the geometry is degenerate
     (the filtered position is still valid). ``heard`` is the fresh
-    beacons the estimate was built from, in id order.
+    beacons the estimate was built from, in id order. ``excluded``
+    is the beacons left out because they went dark mid-track, with
+    the reason each was excluded — empty when no beacon is dark,
+    so a dashboard can tell a three-beacon estimate from a
+    four-beacon one and why.
     """
 
     t: float
@@ -75,6 +111,7 @@ class LivePosition:
     floor_confidence: float
     uncertainty: PositionUncertainty | None
     heard: tuple[str, ...]
+    excluded: tuple[ExcludedBeacon, ...] = ()
 
     def to_dict(self) -> dict:
         """JSON-friendly form, for the stream output and dashboards."""
@@ -91,6 +128,7 @@ class LivePosition:
                     "angle_deg": self.uncertainty.angle_deg,
                 }),
             "heard": list(self.heard),
+            "excluded": [b.to_dict() for b in self.excluded],
         }
 
 
@@ -100,22 +138,43 @@ class LiveTracker:
     ``engine`` is the ``PositioningEngine`` doing the localisation;
     one tracker tracks one device. ``stale_after`` is how long a
     reading stays in the merged observation set, in seconds.
-    ``sigma_rssi_db`` is the assumed RSSI noise for the confidence
-    ellipse (default 2.0 dB, matching the simulator).
+    ``dark_after`` is how long a beacon may go unheard before it
+    counts as dark: past that window it is excluded from the
+    estimate and recorded on the position as an ``ExcludedBeacon``
+    (with why), so a beacon dying mid-track degrades the track
+    instead of breaking it — and a dashboard can see which beacon
+    went quiet. ``dark_after`` must be at least ``stale_after``,
+    since a beacon still fresh enough to localise from cannot be
+    called dark. ``sigma_rssi_db`` is the assumed RSSI noise for
+    the confidence ellipse (default 2.0 dB, matching the
+    simulator).
     """
 
     def __init__(self, engine: PositioningEngine,
                  stale_after: float = DEFAULT_STALE_AFTER_S,
+                 dark_after: float = DEFAULT_DARK_AFTER_S,
                  sigma_rssi_db: float = DEFAULT_SIGMA_RSSI_DB):
         if stale_after <= 0:
             raise ValueError("stale_after must be positive")
+        if dark_after <= 0:
+            raise ValueError("dark_after must be positive")
+        if dark_after < stale_after:
+            raise ValueError(
+                f"dark_after ({dark_after}) must be at least "
+                f"stale_after ({stale_after}): a beacon still fresh "
+                "enough to localise from cannot count as dark")
         if sigma_rssi_db <= 0:
             raise ValueError("sigma_rssi_db must be positive")
         self.engine = engine
         self._stale_after = stale_after
+        self._dark_after = dark_after
         self._sigma_rssi_db = sigma_rssi_db
         # Beacon id -> (rssi, t) of its most recent reading.
         self._latest: dict[str, tuple[float, float]] = {}
+        # Beacon id -> t of its most recent reading, kept even
+        # after the reading ages out, so a beacon that goes quiet
+        # can be recognised as dark rather than never-heard.
+        self._seen: dict[str, float] = {}
         self._last_t: float | None = None
         self._last: LivePosition | None = None
 
@@ -130,6 +189,28 @@ class LiveTracker:
         """The beacons currently fresh enough to localise from,
         in id order."""
         return tuple(sorted(self._latest))
+
+    def _excluded_at(self, t: float) -> tuple[ExcludedBeacon, ...]:
+        """Beacons heard before but unheard for longer than
+        ``dark_after`` at time ``t``, in id order. A beacon never
+        heard is not excluded — there is nothing to fall back
+        from, it simply was never part of the track."""
+        return tuple(
+            ExcludedBeacon(
+                id=beacon_id,
+                reason=(f"no reading for {t - last_seen:.1f}s "
+                        f"(dark after {self._dark_after:.1f}s)"))
+            for beacon_id, last_seen in sorted(self._seen.items())
+            if t - last_seen > self._dark_after)
+
+    @property
+    def excluded(self) -> tuple[ExcludedBeacon, ...]:
+        """The beacons currently dark — heard before, unheard for
+        longer than ``dark_after`` — in id order. Empty before the
+        first reading."""
+        if self._last_t is None:
+            return ()
+        return self._excluded_at(self._last_t)
 
     def feed(self, rssi: dict[str, float], t: float) -> LivePosition | None:
         """Feed one reading and return the live position it gives.
@@ -153,6 +234,7 @@ class LiveTracker:
             if beacon_id not in self.engine.beacons:
                 continue
             self._latest[beacon_id] = (value, t)
+            self._seen[beacon_id] = t
         # Age out readings that no longer describe where the device
         # is: a beacon heard a while ago must not anchor the track.
         self._latest = {
@@ -184,13 +266,15 @@ class LiveTracker:
         live = LivePosition(
             t=t, x=position.x, y=position.y, floor=position.floor,
             floor_confidence=position.floor_confidence,
-            uncertainty=uncertainty, heard=tuple(sorted(fresh)))
+            uncertainty=uncertainty, heard=tuple(sorted(fresh)),
+            excluded=self._excluded_at(t))
         self._last = live
         return live
 
     def reset(self) -> None:
         """Forget the track (e.g. when tracking a new device)."""
         self._latest.clear()
+        self._seen.clear()
         self._last_t = None
         self._last = None
         self.engine.reset()
@@ -314,12 +398,17 @@ def parse_line(line: str) -> tuple[float, dict[str, float]]:
 
 
 def format_output(t: float, position: LivePosition | None,
-                  heard: tuple[str, ...]) -> dict:
+                  heard: tuple[str, ...],
+                  excluded: tuple[ExcludedBeacon, ...] = ()) -> dict:
     """One output line per input line: the live position, or null
     when the reading was too thin to locate, with the fresh beacons
-    listed either way so a dashboard can see the track starving."""
+    listed either way so a dashboard can see the track starving —
+    and the dark beacons excluded from the estimate, so it can see
+    why the track is running on fewer beacons than it started
+    with."""
     if position is None:
-        return {"t": t, "position": None, "heard": list(heard)}
+        return {"t": t, "position": None, "heard": list(heard),
+                "excluded": [b.to_dict() for b in excluded]}
     return {"t": t, "position": position.to_dict(),
             "heard": list(heard)}
 
@@ -334,8 +423,8 @@ def default_beacons() -> list[Beacon]:
     ]
 
 
-def run_demo(stale_after: float, sigma_rssi_db: float,
-             output_stream) -> int:
+def run_demo(stale_after: float, dark_after: float,
+             sigma_rssi_db: float, output_stream) -> int:
     """Feed a simulated ward walk through the tracker at 1 Hz and
     print one JSON line per step — the mode with no scanner needed."""
     beacons = default_beacons()
@@ -343,11 +432,13 @@ def run_demo(stale_after: float, sigma_rssi_db: float,
                           noise_db=2.0, seed=7)
     tracker = LiveTracker(PositioningEngine(beacons),
                           stale_after=stale_after,
+                          dark_after=dark_after,
                           sigma_rssi_db=sigma_rssi_db)
     for i, step in enumerate(steps):
         t = float(i)
         position = tracker.feed(step["rssi"], t)
-        print(json.dumps(format_output(t, position, tracker.heard)),
+        print(json.dumps(format_output(t, position, tracker.heard,
+                                      tracker.excluded)),
               file=output_stream)
     return 0
 
@@ -370,6 +461,11 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                         default=DEFAULT_STALE_AFTER_S,
                         help="seconds before a reading ages out "
                         f"(default: {DEFAULT_STALE_AFTER_S})")
+    parser.add_argument("--dark-after", type=float,
+                        default=DEFAULT_DARK_AFTER_S,
+                        help="seconds unheard before a beacon counts "
+                        "as dark and is recorded as excluded "
+                        f"(default: {DEFAULT_DARK_AFTER_S})")
     parser.add_argument("--sigma-rssi", type=float,
                         default=DEFAULT_SIGMA_RSSI_DB,
                         help="assumed RSSI noise in dB for the confidence "
@@ -377,15 +473,20 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
     args = parser.parse_args(argv)
     if args.stale_after <= 0:
         parser.error("--stale-after must be positive")
+    if args.dark_after <= 0:
+        parser.error("--dark-after must be positive")
+    if args.dark_after < args.stale_after:
+        parser.error("--dark-after must be at least --stale-after")
     if args.sigma_rssi <= 0:
         parser.error("--sigma-rssi must be positive")
 
     if args.demo:
-        return run_demo(args.stale_after, args.sigma_rssi,
-                        output_stream or sys.stdout)
+        return run_demo(args.stale_after, args.dark_after,
+                        args.sigma_rssi, output_stream or sys.stdout)
 
     tracker = LiveTracker(PositioningEngine(default_beacons()),
                           stale_after=args.stale_after,
+                          dark_after=args.dark_after,
                           sigma_rssi_db=args.sigma_rssi)
     source = input_stream if input_stream is not None else sys.stdin
     sink = output_stream if output_stream is not None else sys.stdout
@@ -394,7 +495,8 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
             continue
         t, rssi = parse_line(line)
         position = tracker.feed(rssi, t)
-        print(json.dumps(format_output(t, position, tracker.heard)),
+        print(json.dumps(format_output(t, position, tracker.heard,
+                                       tracker.excluded)),
               file=sink)
     return 0
 

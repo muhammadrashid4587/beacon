@@ -17,6 +17,7 @@ from beacon import (
     LayoutScore,
     LivePosition,
     LiveTracker,
+    ExcludedBeacon,
     MovingAverageFilter,
     MultiFloorFingerprintMap,
     PlacementAdvice,
@@ -1830,6 +1831,140 @@ class TestLiveTracking(unittest.TestCase):
         records = [json.loads(line) for line in out.getvalue().splitlines()]
         self.assertEqual(len(records), 40)
         self.assertTrue(all(r["position"] is not None for r in records))
+
+
+class TestBeaconFailureFallback(unittest.TestCase):
+    def _walk(self, steps_per_side=10, seed=7):
+        return simulate_walk(rectangular_walk(20.0, 12.0, steps_per_side),
+                             BEACONS, noise_db=2.0, seed=seed)
+
+    def _track_with_dead_beacon(self, die_at=20):
+        """Feed a walk in which beacon D dies at step ``die_at``;
+        returns (tracker, positions, steps)."""
+        tracker = LiveTracker(PositioningEngine(BEACONS))
+        steps = self._walk()
+        positions = []
+        for i, step in enumerate(steps):
+            rssi = dict(step["rssi"])
+            if i >= die_at:
+                del rssi["D"]
+            positions.append(tracker.feed(rssi, float(i)))
+        return tracker, positions, steps
+
+    def test_dark_beacon_is_excluded_and_recorded(self):
+        tracker, positions, _ = self._track_with_dead_beacon()
+        # D is last heard at t=19, so it is not dark yet at t=25
+        # (6 s unheard, inside the 10 s dark window) — the track
+        # is still on three beacons, but nothing is called dark.
+        self.assertEqual(positions[25].excluded, ())
+        self.assertEqual(positions[25].heard, ("A", "B", "C"))
+        # At t=30 D has been unheard for 11 s: it is excluded, with
+        # the reason saying how long it has been quiet.
+        live = positions[30]
+        self.assertEqual([b.id for b in live.excluded], ["D"])
+        self.assertIn("no reading for 11.0s", live.excluded[0].reason)
+        self.assertEqual(live.heard, ("A", "B", "C"))
+        # The exclusion is on the position itself and in its JSON
+        # form, so a dashboard sees it without a second call.
+        self.assertEqual(
+            live.to_dict()["excluded"],
+            [{"id": "D",
+              "reason": "no reading for 11.0s (dark after 10.0s)"}])
+        self.assertEqual([b.id for b in tracker.excluded], ["D"])
+
+    def test_accuracy_degrades_gracefully_not_fails(self):
+        _, positions, steps = self._track_with_dead_beacon()
+        # Every step still locates, on three beacons once D is
+        # dark — the dropout costs accuracy, it does not end the
+        # track.
+        self.assertTrue(all(p is not None for p in positions))
+        report = evaluate_live_track(
+            positions, [step["true"] for step in steps])
+        self.assertEqual(report.coverage, 1.0)
+        self.assertLess(report.mean_error_m, 4.0)
+        # And the late steps — the ones running without D — are
+        # still located, just less precisely than the early ones.
+        late = [math.hypot(p.x - s["true"][0], p.y - s["true"][1])
+                for p, s in zip(positions[30:], steps[30:])]
+        self.assertLess(statistics.mean(late), 6.0)
+
+    def test_never_heard_beacon_is_not_excluded(self):
+        tracker = LiveTracker(PositioningEngine(BEACONS))
+        steps = self._walk()
+        # Only A, B, C are ever heard: D was never part of the
+        # track, so there is no fallback to record for it.
+        live = tracker.feed({k: v for k, v in steps[0]["rssi"].items()
+                             if k != "D"}, 0.0)
+        self.assertIsNotNone(live)
+        self.assertEqual(live.excluded, ())
+        self.assertEqual(tracker.excluded, ())
+
+    def test_excluded_beacon_recovers_when_heard_again(self):
+        tracker = LiveTracker(PositioningEngine(BEACONS))
+        steps = self._walk()
+        for i, step in enumerate(steps):
+            rssi = dict(step["rssi"])
+            if 20 <= i < 35:
+                del rssi["D"]  # D dies, then comes back
+            live = tracker.feed(rssi, float(i))
+        self.assertEqual([b.id for b in live.excluded], [])
+        self.assertEqual(live.heard, ("A", "B", "C", "D"))
+        # It was dark in between: at t=30 D had been quiet 11 s.
+        tracker2 = LiveTracker(PositioningEngine(BEACONS))
+        for i, step in enumerate(steps[:31]):
+            rssi = dict(step["rssi"])
+            if i >= 20:
+                del rssi["D"]
+            live2 = tracker2.feed(rssi, float(i))
+        self.assertEqual([b.id for b in live2.excluded], ["D"])
+
+    def test_dark_after_must_not_be_shorter_than_stale_after(self):
+        with self.assertRaises(ValueError):
+            LiveTracker(PositioningEngine(BEACONS),
+                        stale_after=5.0, dark_after=4.0)
+        with self.assertRaises(ValueError):
+            LiveTracker(PositioningEngine(BEACONS), dark_after=0.0)
+        # Equal windows are allowed: a beacon ages out and counts
+        # as dark on the same reading.
+        tracker = LiveTracker(PositioningEngine(BEACONS),
+                              stale_after=5.0, dark_after=5.0)
+        step = self._walk()[0]["rssi"]
+        tracker.feed(step, 0.0)
+        live = tracker.feed({k: v for k, v in step.items() if k != "A"},
+                            6.0)
+        self.assertEqual([b.id for b in live.excluded], ["A"])
+
+    def test_excluded_appears_in_stream_output(self):
+        import io
+
+        from beacon.tracking import main
+
+        steps = self._walk()
+        lines = "".join(
+            json.dumps({"t": float(i), "rssi": (
+                dict(step["rssi"]) if i < 20
+                else {k: v for k, v in step["rssi"].items()
+                      if k != "D"})}) + "\n"
+            for i, step in enumerate(steps[:32]))
+        out = io.StringIO()
+        self.assertEqual(main(argv=[], input_stream=io.StringIO(lines),
+                              output_stream=out), 0)
+        records = [json.loads(line) for line in out.getvalue().splitlines()]
+        self.assertEqual(len(records), 32)
+        # Before the dark window, no exclusion is recorded…
+        self.assertEqual(records[25]["position"]["excluded"], [])
+        # …after it, the stream line names the dark beacon.
+        self.assertEqual(records[31]["position"]["excluded"],
+                         [{"id": "D",
+                           "reason": "no reading for 12.0s "
+                           "(dark after 10.0s)"}])
+
+    def test_reset_forgets_excluded_beacons(self):
+        tracker, _, _ = self._track_with_dead_beacon()
+        self.assertEqual([b.id for b in tracker.excluded], ["D"])
+        tracker.reset()
+        self.assertEqual(tracker.excluded, ())
+        self.assertIsNone(tracker.last_position)
 
 
 class TestLiveTrackReport(unittest.TestCase):
