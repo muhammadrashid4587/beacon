@@ -102,6 +102,10 @@ library, no dependencies, no BLE hardware needed.
   step appears with the dot, and a timestamp label steps through
   the track's own times — SMIL animation, no JavaScript, looping
   by default, so a dashboard can watch a shift play back.
+- Multi-device tracking: one tracker for the whole ward, with a
+  separate live track per device id — a patient tag, a nurse's
+  badge, a pump on a trolley — each with its own filter and floor
+  state, so the tracks never smear into each other.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -903,6 +907,73 @@ export — JSON and CSV are the same track.
 `examples/live-track-replay.svg` is that replay, ready to open
 in a browser.
 
+## Multi-device tracking
+
+A ward has more than one tracked device — a patient tag, a
+nurse's badge, a pump on a trolley — and one `LiveTracker`
+tracks one device: its Kalman filter state, its floor vote,
+and its dark-beacon bookkeeping all belong to that device's
+track. Feeding two devices through one tracker would smear
+them into a single position somewhere between them.
+`MultiDeviceTracker` keeps one `LiveTracker` per device id,
+each with its own `PositioningEngine`, over the same shared
+beacon layout, and routes each reading to the right track:
+
+```python
+from beacon import Beacon, MultiDeviceTracker
+
+beacons = [Beacon("A", 0, 0), Beacon("B", 20, 0),
+           Beacon("C", 20, 12), Beacon("D", 0, 12)]
+tracker = MultiDeviceTracker(beacons)
+tag1 = tracker.feed("tag-1", {"A": -62.1, "B": -71.4,
+                              "C": -68.0, "D": -59.8}, t=0.0)
+tag2 = tracker.feed("tag-2", {"A": -70.0, "B": -65.0,
+                              "C": -60.0, "D": -72.0}, t=0.0)
+# tag1.x, tag1.y — tag-1's position; tag2.x, tag2.y — tag-2's
+tracker.positions()   # {"tag-1": ..., "tag-2": ...} — the
+                      # dashboard snapshot of every device
+```
+
+Devices are created lazily, on their first reading, so a
+deployment never has to declare its tags up front — a new tag
+showing up mid-shift just starts tracking. Each device's clock
+is its own: timestamps only have to be non-decreasing *per
+device*, so readings from different devices can interleave in
+any order, and one device going quiet never stalls another's
+track — the quiet device's last position just stays where it
+was. A device that hears too few beacons returns `None` for
+that reading while the other devices keep locating, and it is
+left out of `positions()` rather than reported with a made-up
+position. `reset(device_id)` forgets one device's track (a tag
+handed to a new patient starts fresh) and `remove(device_id)`
+drops the device entirely. The stream format is the same JSON
+lines as single-device tracking, with the device attached:
+
+```sh
+python3 -m beacon.multi_device < readings.jsonl
+python3 -m beacon.multi_device --demo   # two simulated walks,
+                                        # one forward, one in reverse
+```
+
+Each input line produces one output line with the device and
+its live position attached (`"position": null` on a reading
+too thin to locate). The tracker windows (`--stale-after`,
+`--dark-after`, `--readmit-after`, `--sigma-rssi`) are shared
+by every device's tracker. One honest limitation: every
+device shares one beacon layout, so a tag that walks into a
+part of the building the layout does not cover is located
+badly, not handed off to a different layout — and estimates
+are not clamped to the room, so a filtered position can sit
+just outside the ward's walls.
+
+Measured behaviour (simulator, 2 dB RSSI noise, default ward
+walk, one device forward and one in reverse): the forward
+device's mean error is 2.16 m (the same as the single-device
+track on that walk — sharing the tracker adds no error of its
+own), the reverse device's is 1.72 m, and the two tracks stay
+9.43 m apart on average, so they are genuinely two tracks
+rather than one smeared position.
+
 ## Measured accuracy (simulator, not the real world)
 
 Default ward walk, 2 dB RSSI noise: mean error about 2.2 m (1.8-2.6 m
@@ -1133,5 +1204,26 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   (v0.22.0); on the default demo export (40 rows, t = 0–39 s)
   the replay is 40 frames in 39 s with 40 ellipses and 40
   timestamp labels, and the JSON and CSV exports replay the
-  identical SVG. The roadmap grows as new needs surface — the
-  live-track replay is the latest addition.
+  identical SVG.
+- Multi-device tracking (track several devices at once on one
+  beacon layout) — done: `MultiDeviceTracker` keeps one
+  `LiveTracker` (and its own `PositioningEngine`) per device
+  id, created lazily on the device's first reading, and routes
+  each reading to the right track — `feed(device_id, rssi, t)`,
+  `last_position(device_id)`, `positions()` for the dashboard
+  snapshot of every device, `reset(device_id)` to forget one
+  track, `remove(device_id)` to drop a device; each device's
+  clock is its own, so interleaved readings never share a
+  clock and a quiet device never stalls another's track, and a
+  device too thin to locate returns `None` while the others
+  keep locating; `python -m beacon.multi_device` reads JSON
+  lines with the device attached and prints one line per
+  reading with the device and its live position (`--demo` runs
+  two simulated walks, one forward and one in reverse)
+  (v0.23.0); on the default ward walk, seed 7 forward and seed
+  11 in reverse, the forward device's mean error is 2.16 m —
+  the same as the single-device track, so sharing the tracker
+  adds no error — the reverse device's is 1.72 m, and the two
+  tracks stay 9.43 m apart on average. The roadmap grows as
+  new needs surface — multi-device tracking is the latest
+  addition.

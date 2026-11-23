@@ -18,6 +18,7 @@ from beacon import (
     LivePosition,
     LiveTracker,
     ExcludedBeacon,
+    MultiDeviceTracker,
     MovingAverageFilter,
     MultiFloorFingerprintMap,
     PlacementAdvice,
@@ -2655,6 +2656,163 @@ class TestLiveTrackReplay(unittest.TestCase):
                                        "--replay-step-seconds", "0.5"]), 0)
             with open(out2, encoding="utf-8") as handle:
                 self.assertIn('dur="19.5s"', handle.read())
+
+
+class TestMultiDeviceTracking(unittest.TestCase):
+    def _walks(self):
+        forward = simulate_walk(rectangular_walk(20.0, 12.0, 10),
+                                BEACONS, noise_db=2.0, seed=7)
+        reverse = simulate_walk(
+            list(reversed(rectangular_walk(20.0, 12.0, 10))),
+            BEACONS, noise_db=2.0, seed=11)
+        return forward, reverse
+
+    def _feed_both(self, tracker, forward, reverse):
+        """Feed both walks interleaved, one reading per device per
+        step, and return each device's live positions."""
+        positions_a, positions_b = [], []
+        for i, (step_a, step_b) in enumerate(zip(forward, reverse)):
+            positions_a.append(tracker.feed("tag-1", step_a["rssi"],
+                                            float(i)))
+            positions_b.append(tracker.feed("tag-2", step_b["rssi"],
+                                            float(i)))
+        return positions_a, positions_b
+
+    @staticmethod
+    def _mean_error(positions, steps):
+        errors = [math.hypot(p.x - s["true"][0], p.y - s["true"][1])
+                  for p, s in zip(positions, steps) if p is not None]
+        return statistics.fmean(errors)
+
+    def test_two_devices_track_separately(self):
+        forward, reverse = self._walks()
+        tracker = MultiDeviceTracker(BEACONS)
+        positions_a, positions_b = self._feed_both(
+            tracker, forward, reverse)
+        self.assertEqual(tracker.devices, ("tag-1", "tag-2"))
+        # Both tracks stay within the usual accuracy guard.
+        self.assertLess(self._mean_error(positions_a, forward), 4.0)
+        self.assertLess(self._mean_error(positions_b, reverse), 4.0)
+        # And they are genuinely two tracks, not one smeared
+        # position: the devices walk opposite directions, so
+        # their positions stay metres apart.
+        gaps = [math.hypot(a.x - b.x, a.y - b.y)
+                for a, b in zip(positions_a, positions_b)
+                if a is not None and b is not None]
+        self.assertGreater(statistics.fmean(gaps), 5.0)
+
+    def test_one_device_does_not_move_the_other(self):
+        forward, reverse = self._walks()
+        tracker = MultiDeviceTracker(BEACONS)
+        for i, step in enumerate(forward[:10]):
+            tracker.feed("tag-1", step["rssi"], float(i))
+        before = tracker.last_position("tag-1")
+        for i, step in enumerate(reverse):
+            tracker.feed("tag-2", step["rssi"], float(i))
+        # Feeding tag-2 all forty steps left tag-1 exactly where
+        # it was.
+        self.assertEqual(tracker.last_position("tag-1"), before)
+        self.assertEqual(tracker.last_position("tag-2").floor, 0)
+
+    def test_thin_device_returns_none_while_other_locates(self):
+        tracker = MultiDeviceTracker(BEACONS)
+        thin = {"A": -62.1, "B": -71.4}
+        self.assertIsNone(tracker.feed("tag-1", thin, 0.0))
+        self.assertIsNone(tracker.last_position("tag-1"))
+        full = {"A": -62.1, "B": -71.4, "C": -68.0, "D": -59.8}
+        self.assertIsNotNone(tracker.feed("tag-2", full, 0.0))
+        # The dashboard snapshot only carries devices that
+        # actually located.
+        self.assertEqual(set(tracker.positions()), {"tag-2"})
+
+    def test_per_device_clocks_are_independent(self):
+        tracker = MultiDeviceTracker(BEACONS)
+        full = {"A": -62.1, "B": -71.4, "C": -68.0, "D": -59.8}
+        tracker.feed("tag-1", full, 10.0)
+        # tag-2's clock starts at 0 even though tag-1 is already
+        # at t=10 — interleaved streams do not share a clock.
+        self.assertIsNotNone(tracker.feed("tag-2", full, 0.0))
+        # But one device's own clock still may not go backwards.
+        with self.assertRaises(ValueError):
+            tracker.feed("tag-1", full, 9.0)
+
+    def test_bad_device_ids_raise(self):
+        tracker = MultiDeviceTracker(BEACONS)
+        full = {"A": -62.1, "B": -71.4, "C": -68.0, "D": -59.8}
+        with self.assertRaises(ValueError):
+            tracker.feed("", full, 0.0)
+        with self.assertRaises(ValueError):
+            tracker.feed(7, full, 0.0)
+        with self.assertRaises(ValueError):
+            MultiDeviceTracker(BEACONS[:2])
+
+    def test_reset_one_device_leaves_the_other(self):
+        forward, reverse = self._walks()
+        tracker = MultiDeviceTracker(BEACONS)
+        self._feed_both(tracker, forward, reverse)
+        tracker.reset("tag-1")
+        self.assertIsNone(tracker.last_position("tag-1"))
+        self.assertIsNotNone(tracker.last_position("tag-2"))
+        # Resetting again is harmless, and a reset device starts
+        # a fresh track on its next reading.
+        tracker.reset("tag-1")
+        live = tracker.feed("tag-1", forward[0]["rssi"], 0.0)
+        self.assertIsNotNone(live)
+        self.assertTrue(tracker.remove("tag-2"))
+        self.assertFalse(tracker.remove("tag-2"))
+        self.assertEqual(tracker.devices, ("tag-1",))
+        self.assertEqual(set(tracker.positions()), {"tag-1"})
+
+    def test_stream_round_trip(self):
+        import io
+
+        from beacon.multi_device import (main as multi_main,
+                                         parse_device_line)
+
+        lines = [
+            '{"device": "tag-1", "t": 0.0, "rssi": {"A": -62.1, '
+            '"B": -71.4, "C": -68.0, "D": -59.8}}',
+            '{"device": "tag-2", "t": 0.0, "rssi": {"A": -70.0, '
+            '"B": -65.0, "C": -60.0, "D": -72.0}}',
+            '{"device": "tag-1", "t": 1.0, "rssi": {"A": -63.0, '
+            '"B": -70.0, "C": -67.0, "D": -60.5}}',
+        ]
+        out = io.StringIO()
+        self.assertEqual(
+            multi_main(argv=[], input_stream=io.StringIO("\n".join(lines)),
+                       output_stream=out), 0)
+        records = [json.loads(line) for line in out.getvalue().splitlines()]
+        self.assertEqual(len(records), 3)
+        self.assertEqual([r["device"] for r in records],
+                         ["tag-1", "tag-2", "tag-1"])
+        self.assertTrue(all(r["position"] is not None for r in records))
+        # A line without a device is rejected, not silently
+        # tracked as nobody's.
+        with self.assertRaises(ValueError):
+            parse_device_line('{"t": 0.0, "rssi": {"A": -62.1}}')
+
+    def test_demo_tracks_two_devices(self):
+        import io
+
+        from beacon.multi_device import run_demo
+
+        out = io.StringIO()
+        tracker = run_demo(5.0, 10.0, 3, 2.0, out)
+        records = [json.loads(line) for line in out.getvalue().splitlines()]
+        self.assertEqual(len(records), 80)
+        self.assertEqual({r["device"] for r in records},
+                         {"tag-1", "tag-2"})
+        self.assertEqual(set(tracker.positions()), {"tag-1", "tag-2"})
+        # Both demo tracks end near the ward, on the ground floor
+        # (estimates are not clamped to the room, so a filtered
+        # position may sit just outside its walls).
+        for device_id in ("tag-1", "tag-2"):
+            last = tracker.last_position(device_id)
+            self.assertGreaterEqual(last.x, -5.0)
+            self.assertLessEqual(last.x, 25.0)
+            self.assertGreaterEqual(last.y, -5.0)
+            self.assertLessEqual(last.y, 17.0)
+            self.assertEqual(last.floor, 0)
 
 
 if __name__ == "__main__":

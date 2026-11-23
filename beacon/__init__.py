@@ -28,12 +28,13 @@ from .map_overlay import (CoverageCell, HeatmapSummary, confidence_colour,
                         coverage_heatmap, heatmap_summary,
                         load_track_for_overlay, render_map_overlay,
                         write_map_overlay)
+from .multi_device import MultiDeviceTracker
 from .tracking import (ExcludedBeacon, LivePosition, LiveTracker,
                        TrackReport, evaluate_live_track)
 from .trilateration import trilaterate
 from .uncertainty import PositionUncertainty, estimate_uncertainty
 
-__version__ = "0.22.0"
+__version__ = "0.23.0"
 
 __all__ = [
     "Beacon",
@@ -65,6 +66,7 @@ __all__ = [
     "ExcludedBeacon",
     "LivePosition",
     "LiveTracker",
+    "MultiDeviceTracker",
     "TrackReport",
     "evaluate_live_track",
     "export_track_csv",
