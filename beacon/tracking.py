@@ -26,7 +26,10 @@ observation stream into a live track:
   then, and the fallback is recorded on the position as an
   ``ExcludedBeacon`` — which beacon went quiet and why — so the
   track degrades gracefully and a dashboard can see it doing so.
-  A beacon heard again stops being excluded on its own.
+  A beacon heard again is not trusted back at once: it must be
+  heard on ``readmit_after`` consecutive readings (3 by default)
+  before it rejoins, so one stray scan cannot flap a dying
+  beacon back into the estimate.
 
 The stream format is JSON lines, one reading per line — the same
 shape a BLE scanner would emit, and easy to pipe from anything:
@@ -63,6 +66,13 @@ DEFAULT_STALE_AFTER_S = 5.0
 # dark — the two windows never disagree about whether a beacon is
 # in the estimate.
 DEFAULT_DARK_AFTER_S = 10.0
+
+# A dark beacon heard again must be heard on this many consecutive
+# readings before it rejoins the estimate. One stray scan — a
+# beacon flickering at the edge of range, or a single reflected
+# packet — must not flap a dying beacon back in and out of the
+# solve; three in a row says it is really back.
+DEFAULT_READMIT_AFTER = 3
 
 # Assumed RSSI noise for the confidence ellipse, matching the
 # simulator's default noise and the engine's default.
@@ -145,14 +155,18 @@ class LiveTracker:
     instead of breaking it — and a dashboard can see which beacon
     went quiet. ``dark_after`` must be at least ``stale_after``,
     since a beacon still fresh enough to localise from cannot be
-    called dark. ``sigma_rssi_db`` is the assumed RSSI noise for
-    the confidence ellipse (default 2.0 dB, matching the
-    simulator).
+    called dark. ``readmit_after`` is how many consecutive readings
+    must hear a dark beacon again before it rejoins the estimate:
+    a beacon that flickers back for one scan stays excluded, so a
+    dying beacon cannot flap in and out of the solve.
+    ``sigma_rssi_db`` is the assumed RSSI noise for the confidence
+    ellipse (default 2.0 dB, matching the simulator).
     """
 
     def __init__(self, engine: PositioningEngine,
                  stale_after: float = DEFAULT_STALE_AFTER_S,
                  dark_after: float = DEFAULT_DARK_AFTER_S,
+                 readmit_after: int = DEFAULT_READMIT_AFTER,
                  sigma_rssi_db: float = DEFAULT_SIGMA_RSSI_DB):
         if stale_after <= 0:
             raise ValueError("stale_after must be positive")
@@ -163,11 +177,14 @@ class LiveTracker:
                 f"dark_after ({dark_after}) must be at least "
                 f"stale_after ({stale_after}): a beacon still fresh "
                 "enough to localise from cannot count as dark")
+        if readmit_after < 1:
+            raise ValueError("readmit_after must be at least 1")
         if sigma_rssi_db <= 0:
             raise ValueError("sigma_rssi_db must be positive")
         self.engine = engine
         self._stale_after = stale_after
         self._dark_after = dark_after
+        self._readmit_after = readmit_after
         self._sigma_rssi_db = sigma_rssi_db
         # Beacon id -> (rssi, t) of its most recent reading.
         self._latest: dict[str, tuple[float, float]] = {}
@@ -175,6 +192,13 @@ class LiveTracker:
         # after the reading ages out, so a beacon that goes quiet
         # can be recognised as dark rather than never-heard.
         self._seen: dict[str, float] = {}
+        # Beacon id -> (consecutive readings that heard it since it
+        # went dark, whether it has been heard at all since going
+        # dark). A dark beacon leaves this dict — rejoins the
+        # estimate — only once the streak reaches ``readmit_after``;
+        # a missed reading resets the streak to 0 but keeps the
+        # beacon dark, so only consecutive hearings bring it back.
+        self._dark: dict[str, tuple[int, bool]] = {}
         self._last_t: float | None = None
         self._last: LivePosition | None = None
 
@@ -191,17 +215,61 @@ class LiveTracker:
         return tuple(sorted(self._latest))
 
     def _excluded_at(self, t: float) -> tuple[ExcludedBeacon, ...]:
-        """Beacons heard before but unheard for longer than
-        ``dark_after`` at time ``t``, in id order. A beacon never
+        """The beacons currently dark at time ``t``, in id order.
+
+        A beacon stays dark until it has been heard on
+        ``readmit_after`` consecutive readings: one heard again
+        but still short of that count is excluded with a reason
+        saying how many fresh readings it still needs, so a
+        dashboard can see it coming back rather than vanishing
+        from the list on a single stray scan. A beacon never
         heard is not excluded — there is nothing to fall back
         from, it simply was never part of the track."""
-        return tuple(
-            ExcludedBeacon(
-                id=beacon_id,
-                reason=(f"no reading for {t - last_seen:.1f}s "
-                        f"(dark after {self._dark_after:.1f}s)"))
-            for beacon_id, last_seen in sorted(self._seen.items())
-            if t - last_seen > self._dark_after)
+        excluded = []
+        for beacon_id, (heard_again, ever_heard) in sorted(
+                self._dark.items()):
+            if ever_heard:
+                excluded.append(ExcludedBeacon(
+                    id=beacon_id,
+                    reason=(f"heard again, {heard_again} of "
+                            f"{self._readmit_after} fresh readings "
+                            "to re-admit")))
+            else:
+                excluded.append(ExcludedBeacon(
+                    id=beacon_id,
+                    reason=(f"no reading for "
+                            f"{t - self._seen[beacon_id]:.1f}s "
+                            f"(dark after {self._dark_after:.1f}s)")))
+        return tuple(excluded)
+
+    def _update_dark(self, heard_now: set[str], t: float) -> None:
+        """Maintain the dark set after one reading at time ``t``.
+
+        ``heard_now`` is the beacons heard in this reading. A dark
+        beacon heard again counts one step towards re-admission; a
+        reading that misses it breaks the streak, so only
+        consecutive hearings bring it back. A beacon heard before
+        and now silent past ``dark_after`` goes dark. Runs before
+        the position is computed, so the exclusion on this step's
+        position already reflects the reading that produced it."""
+        for beacon_id in list(self._dark):
+            streak, _ = self._dark[beacon_id]
+            if beacon_id in heard_now:
+                streak += 1
+                if streak >= self._readmit_after:
+                    del self._dark[beacon_id]
+                else:
+                    self._dark[beacon_id] = (streak, True)
+            else:
+                # Missed again: the streak resets, but whether the
+                # beacon has been heard at all since going dark is
+                # unchanged — a beacon never heard back keeps the
+                # silence reason, not the re-admission one.
+                self._dark[beacon_id] = (0, self._dark[beacon_id][1])
+        for beacon_id, last_seen in self._seen.items():
+            if (beacon_id not in self._dark
+                    and t - last_seen > self._dark_after):
+                self._dark[beacon_id] = (0, False)
 
     @property
     def excluded(self) -> tuple[ExcludedBeacon, ...]:
@@ -230,11 +298,18 @@ class LiveTracker:
             raise ValueError(
                 f"timestamps must not go backwards: {t} after {self._last_t}")
         self._last_t = t
+        heard_now = set()
         for beacon_id, value in rssi.items():
             if beacon_id not in self.engine.beacons:
                 continue
+            heard_now.add(beacon_id)
             self._latest[beacon_id] = (value, t)
             self._seen[beacon_id] = t
+        # A dark beacon heard again counts towards re-admission,
+        # a beacon silent past the dark window goes dark — before
+        # the position is computed, so this step's exclusion list
+        # already reflects the reading that produced it.
+        self._update_dark(heard_now, t)
         # Age out readings that no longer describe where the device
         # is: a beacon heard a while ago must not anchor the track.
         self._latest = {
@@ -275,6 +350,7 @@ class LiveTracker:
         """Forget the track (e.g. when tracking a new device)."""
         self._latest.clear()
         self._seen.clear()
+        self._dark.clear()
         self._last_t = None
         self._last = None
         self.engine.reset()
@@ -424,6 +500,7 @@ def default_beacons() -> list[Beacon]:
 
 
 def run_demo(stale_after: float, dark_after: float,
+             readmit_after: int,
              sigma_rssi_db: float, output_stream) -> int:
     """Feed a simulated ward walk through the tracker at 1 Hz and
     print one JSON line per step — the mode with no scanner needed."""
@@ -433,6 +510,7 @@ def run_demo(stale_after: float, dark_after: float,
     tracker = LiveTracker(PositioningEngine(beacons),
                           stale_after=stale_after,
                           dark_after=dark_after,
+                          readmit_after=readmit_after,
                           sigma_rssi_db=sigma_rssi_db)
     for i, step in enumerate(steps):
         t = float(i)
@@ -448,8 +526,9 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
     one JSON line per reading with the live position attached.
 
     ``--demo`` runs a simulated walk instead of reading stdin.
-    ``--stale-after`` (seconds) and ``--sigma-rssi`` (dB) tune the
-    tracker. ``input_stream`` / ``output_stream`` exist so tests can
+    ``--stale-after`` (seconds), ``--dark-after`` (seconds),
+    ``--readmit-after`` (readings) and ``--sigma-rssi`` (dB) tune
+    the tracker. ``input_stream`` / ``output_stream`` exist so tests can
     drive the stream without touching sys.stdin / sys.stdout.
     """
     parser = argparse.ArgumentParser(
@@ -466,6 +545,11 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                         help="seconds unheard before a beacon counts "
                         "as dark and is recorded as excluded "
                         f"(default: {DEFAULT_DARK_AFTER_S})")
+    parser.add_argument("--readmit-after", type=int,
+                        default=DEFAULT_READMIT_AFTER,
+                        help="consecutive readings hearing a dark "
+                        "beacon again before it rejoins the estimate "
+                        f"(default: {DEFAULT_READMIT_AFTER})")
     parser.add_argument("--sigma-rssi", type=float,
                         default=DEFAULT_SIGMA_RSSI_DB,
                         help="assumed RSSI noise in dB for the confidence "
@@ -477,16 +561,20 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
         parser.error("--dark-after must be positive")
     if args.dark_after < args.stale_after:
         parser.error("--dark-after must be at least --stale-after")
+    if args.readmit_after < 1:
+        parser.error("--readmit-after must be at least 1")
     if args.sigma_rssi <= 0:
         parser.error("--sigma-rssi must be positive")
 
     if args.demo:
         return run_demo(args.stale_after, args.dark_after,
-                        args.sigma_rssi, output_stream or sys.stdout)
+                        args.readmit_after, args.sigma_rssi,
+                        output_stream or sys.stdout)
 
     tracker = LiveTracker(PositioningEngine(default_beacons()),
                           stale_after=args.stale_after,
                           dark_after=args.dark_after,
+                          readmit_after=args.readmit_after,
                           sigma_rssi_db=args.sigma_rssi)
     source = input_stream if input_stream is not None else sys.stdin
     sink = output_stream if output_stream is not None else sys.stdout

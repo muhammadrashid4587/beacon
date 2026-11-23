@@ -1902,21 +1902,82 @@ class TestBeaconFailureFallback(unittest.TestCase):
     def test_excluded_beacon_recovers_when_heard_again(self):
         tracker = LiveTracker(PositioningEngine(BEACONS))
         steps = self._walk()
+        positions = []
         for i, step in enumerate(steps):
             rssi = dict(step["rssi"])
             if 20 <= i < 35:
                 del rssi["D"]  # D dies, then comes back
-            live = tracker.feed(rssi, float(i))
-        self.assertEqual([b.id for b in live.excluded], [])
-        self.assertEqual(live.heard, ("A", "B", "C", "D"))
-        # It was dark in between: at t=30 D had been quiet 11 s.
-        tracker2 = LiveTracker(PositioningEngine(BEACONS))
-        for i, step in enumerate(steps[:31]):
+            positions.append(tracker.feed(rssi, float(i)))
+        # D is dark in between: at t=30 it had been quiet 11 s.
+        self.assertEqual([b.id for b in positions[30].excluded], ["D"])
+        # One hearing is not enough to trust it back: D stays
+        # excluded after its first reading back, with the reason
+        # counting the fresh readings still needed.
+        self.assertEqual([b.id for b in positions[35].excluded], ["D"])
+        self.assertEqual(positions[35].excluded[0].reason,
+                         "heard again, 1 of 3 fresh readings to re-admit")
+        self.assertEqual([b.id for b in positions[36].excluded], ["D"])
+        self.assertEqual(positions[36].excluded[0].reason,
+                         "heard again, 2 of 3 fresh readings to re-admit")
+        # The third consecutive hearing re-admits it.
+        self.assertEqual([b.id for b in positions[37].excluded], [])
+        self.assertEqual(positions[39].heard, ("A", "B", "C", "D"))
+        self.assertEqual([b.id for b in tracker.excluded], [])
+
+    def test_readmit_after_one_restores_single_reading_recovery(self):
+        tracker = LiveTracker(PositioningEngine(BEACONS),
+                              readmit_after=1)
+        steps = self._walk()
+        positions = []
+        for i, step in enumerate(steps):
             rssi = dict(step["rssi"])
-            if i >= 20:
+            if 20 <= i < 35:
                 del rssi["D"]
-            live2 = tracker2.feed(rssi, float(i))
-        self.assertEqual([b.id for b in live2.excluded], ["D"])
+            positions.append(tracker.feed(rssi, float(i)))
+        # With readmit_after=1 the first hearing back clears it.
+        self.assertEqual([b.id for b in positions[30].excluded], ["D"])
+        self.assertEqual([b.id for b in positions[35].excluded], [])
+
+    def test_missed_reading_resets_readmit_streak(self):
+        tracker = LiveTracker(PositioningEngine(BEACONS))
+        steps = self._walk()
+        positions = []
+        for i, step in enumerate(steps):
+            rssi = dict(step["rssi"])
+            if 20 <= i < 35 or i == 36:
+                del rssi["D"]  # dies, flickers once back, dies again
+            positions.append(tracker.feed(rssi, float(i)))
+        # One hearing at t=35 starts the streak, the miss at t=36
+        # breaks it, so D is still excluded after two more
+        # hearings — only three in a row bring it back.
+        self.assertEqual([b.id for b in positions[35].excluded], ["D"])
+        self.assertEqual(positions[35].excluded[0].reason,
+                         "heard again, 1 of 3 fresh readings to re-admit")
+        self.assertEqual(positions[36].excluded[0].reason,
+                         "heard again, 0 of 3 fresh readings to re-admit")
+        self.assertEqual([b.id for b in positions[38].excluded], ["D"])
+        self.assertEqual([b.id for b in positions[39].excluded], [])
+
+    def test_readmit_after_must_be_at_least_one(self):
+        with self.assertRaises(ValueError):
+            LiveTracker(PositioningEngine(BEACONS), readmit_after=0)
+
+    def test_dropout_and_recovery_still_tracks(self):
+        # D dies mid-walk and comes back: the track stays located
+        # throughout, and the dropout costs accuracy, not coverage.
+        tracker = LiveTracker(PositioningEngine(BEACONS))
+        steps = self._walk()
+        positions = []
+        for i, step in enumerate(steps):
+            rssi = dict(step["rssi"])
+            if 20 <= i < 35:
+                del rssi["D"]
+            positions.append(tracker.feed(rssi, float(i)))
+        self.assertTrue(all(p is not None for p in positions))
+        report = evaluate_live_track(
+            positions, [step["true"] for step in steps])
+        self.assertEqual(report.coverage, 1.0)
+        self.assertLess(report.mean_error_m, 4.0)
 
     def test_dark_after_must_not_be_shorter_than_stale_after(self):
         with self.assertRaises(ValueError):

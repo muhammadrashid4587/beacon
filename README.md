@@ -73,7 +73,9 @@ library, no dependencies, no BLE hardware needed.
   than the dark window, and the fallback is recorded on the live
   position — which beacon went dark and why — so a dashboard can
   see the track running on three beacons instead of four, and a
-  beacon heard again rejoins on its own.
+  beacon heard again rejoins after three consecutive readings,
+  so one stray scan cannot flap a dying beacon back into the
+  estimate.
 - A live track accuracy report: score a recorded walk against
   ground truth — mean, median, 90th percentile and worst error,
   plus coverage (how much of the walk was actually located) and
@@ -638,14 +640,20 @@ only called dark once it has already aged out of the estimate —
 the two windows never disagree about whether a beacon is in the
 position. A beacon never heard is not excluded: there is no
 fallback to record for a beacon that was never part of the track.
-A beacon heard again stops being excluded on its own, so a
-beacon that recovers (the trolley moved away, the battery was
-swapped) rejoins the track without anyone resetting the tracker.
-The exclusion travels with the position into its JSON form and
-into the stream output (`python -m beacon.tracking`), including
-on a line whose position is null, so a dashboard sees why a
-track is running thin. `--dark-after` tunes the window from the
-command line.
+A beacon heard again is not trusted back at once: it must be
+heard on `readmit_after` consecutive readings (3 by default)
+before it rejoins the estimate, so a beacon flickering at the
+edge of range — heard once, missed, heard again — cannot flap
+in and out of the solve. While it is coming back the exclusion
+stays on the position with the reason counting its progress
+(`"heard again, 1 of 3 fresh readings to re-admit"`), and a
+missed reading resets the count to zero; `readmit_after=1`
+restores the old single-reading re-admission. The exclusion
+travels with the position into its JSON form and into the stream
+output (`python -m beacon.tracking`), including on a line whose
+position is null, so a dashboard sees why a track is running
+thin. `--dark-after` and `--readmit-after` tune the windows from
+the command line.
 
 Measured behaviour (simulator, 2 dB RSSI noise, default ward
 walk, seed 7, beacon D dying at step 20): D is first recorded
@@ -863,5 +871,18 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   beacon D dying at step 20, D is first recorded excluded at
   step 30, the track keeps coverage 1.0 at 2.43 m mean error, and
   the ellipse's semi-major axis widens from 7.65 m to 8.68 m.
-  The roadmap grows as new needs surface — the fallback is the
+- Beacon-failure re-admission (a dark beacon must prove it is
+  back) — done: a dark beacon heard again stays excluded until
+  it has been heard on `readmit_after` consecutive readings (3
+  by default, `readmit_after=1` restores single-reading
+  re-admission), with the exclusion reason counting its progress
+  and a missed reading resetting the count, so a flickering
+  beacon cannot flap in and out of the estimate (v0.18.0); on
+  the default ward walk, seed 7, with beacon D dying at step 20
+  and returning at step 35, D is first recorded excluded at step
+  30, stays excluded through its first two readings back, and
+  re-admits at step 37 — the track keeps coverage 1.0 at 2.31 m
+  mean error (median 2.13 m, 90th percentile 4.14 m, worst step
+  6.70 m).
+  The roadmap grows as new needs surface — re-admission is the
   latest addition.

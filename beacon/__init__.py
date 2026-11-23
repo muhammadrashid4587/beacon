@@ -25,7 +25,7 @@ from .tracking import (ExcludedBeacon, LivePosition, LiveTracker,
 from .trilateration import trilaterate
 from .uncertainty import PositionUncertainty, estimate_uncertainty
 
-__version__ = "0.17.0"
+__version__ = "0.18.0"
 
 __all__ = [
     "Beacon",
