@@ -45,6 +45,7 @@ from beacon import (
     placement_uncertainty,
     PositionUncertainty,
     render_map_overlay,
+    render_track_replay,
     rssi_to_distance,
     score_layout,
     simulate_multifloor_walk,
@@ -55,6 +56,7 @@ from beacon import (
     trilaterate,
     two_floor_walk,
     write_map_overlay,
+    write_track_replay,
 )
 from beacon.simulate import rectangular_walk
 
@@ -2484,6 +2486,175 @@ class TestWardMapOverlay(unittest.TestCase):
                 svg = handle.read()
             self.assertIn("<svg", svg)
             self.assertEqual(svg.count('data-index="'), 40)
+
+
+class TestLiveTrackReplay(unittest.TestCase):
+    def _example_rows(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        return load_track_json(
+            os.path.join(here, "..", "examples", "live-track-export.json"))
+
+    def _row(self, x, y, semi_major, floor=0, t=0.0):
+        return {
+            "t": t, "x": x, "y": y, "floor": floor,
+            "floor_confidence": 1.0,
+            "ellipse_semi_major_m": semi_major,
+            "ellipse_semi_minor_m": (semi_major or 1.0) / 2.0,
+            "ellipse_angle_deg": 30.0,
+            "beacons_used": ["A", "B", "C", "D"],
+            "beacons_excluded": [], "coverage": 1.0,
+        }
+
+    def test_example_export_replays_all_frames(self):
+        rows = self._example_rows()
+        svg = render_track_replay(rows, BEACONS)
+        self.assertIn("<svg", svg)
+        self.assertIn("</svg>", svg)
+        # One moving dot, one trail that draws itself, one
+        # ellipse and one timestamp label per frame.
+        self.assertEqual(svg.count('data-dot="true"'), 1)
+        self.assertEqual(svg.count('data-trail="true"'), 1)
+        self.assertEqual(svg.count("<ellipse"), len(rows))
+        self.assertEqual(svg.count("data-timestamp="), len(rows))
+        # The dot animates cx and cy through the frames, the
+        # trail animates its dash offset, and the replay loops.
+        self.assertIn('<animate attributeName="cx"', svg)
+        self.assertIn('<animate attributeName="cy"', svg)
+        self.assertIn('<animate attributeName="stroke-dashoffset"', svg)
+        self.assertIn('repeatCount="indefinite"', svg)
+        # 40 steps at 1 s per step: a 39 s replay.
+        self.assertIn('dur="39s"', svg)
+        self.assertIn("Replay: 39 s loop", svg)
+        self.assertIn("SMIL animation, no JavaScript", svg)
+        # Every beacon is labelled, start and end marked.
+        for beacon in BEACONS:
+            self.assertIn(f'data-beacon="{beacon.id}"', svg)
+        self.assertIn(">S</text>", svg)
+        self.assertIn(">E</text>", svg)
+        self.assertIn("floor 0", svg)
+        self.assertIn("40 points", svg)
+
+    def test_csv_export_replays_the_same_track(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        csv_rows = load_track_csv(
+            os.path.join(here, "..", "examples", "live-track-export.csv"))
+        json_svg = render_track_replay(self._example_rows(), BEACONS)
+        csv_svg = render_track_replay(csv_rows, BEACONS)
+        self.assertEqual(json_svg, csv_svg)
+
+    def test_frame_timing_follows_the_track_timestamps(self):
+        rows = [self._row(2.0, 2.0, 1.0, t=0.0),
+                self._row(5.0, 5.0, 1.0, t=10.0),
+                self._row(8.0, 8.0, 1.0, t=11.0)]
+        svg = render_track_replay(rows, BEACONS)
+        # The dot's key times are the timestamps' share of the
+        # 11 s span, and the replay is 2 s long (2 steps at 1 s).
+        self.assertIn('keyTimes="0.0000;0.9091;1.0000"', svg)
+        self.assertIn('dur="2s"', svg)
+        self.assertIn("Replay: 2 s loop", svg)
+        # Each frame's ellipse is visible between the midpoints
+        # with its neighbours: frame 1 (t=10) from 0.4545 to
+        # 0.9545 of the replay.
+        self.assertIn('keyTimes="0;0.4545;0.9545"', svg)
+        # The timestamp labels carry the track's own times.
+        for t in ("t = 0 s", "t = 10 s", "t = 11 s"):
+            self.assertIn(f">{t}<", svg)
+
+    def test_seconds_per_step_and_loop_change_the_replay(self):
+        rows = self._example_rows()
+        svg = render_track_replay(rows, BEACONS,
+                                  seconds_per_step=0.5, loop=False)
+        self.assertIn('dur="19.5s"', svg)
+        self.assertIn('repeatCount="1"', svg)
+        self.assertNotIn('repeatCount="indefinite"', svg)
+        self.assertIn("Replay: 19.5 s once", svg)
+
+    def test_single_point_track_is_static(self):
+        svg = render_track_replay([self._row(2.0, 2.0, 1.0)], BEACONS)
+        self.assertEqual(svg.count('data-dot="true"'), 1)
+        self.assertEqual(svg.count("<ellipse"), 1)
+        self.assertEqual(svg.count("data-timestamp="), 1)
+        # No animation at all: nothing to move between.
+        self.assertNotIn("<animate", svg)
+        self.assertNotIn('data-trail="true"', svg)
+        self.assertIn("t = 0 s", svg)
+
+    def test_frame_without_ellipse_has_no_ellipse(self):
+        rows = [self._row(2.0, 2.0, 1.0, t=0.0),
+                self._row(5.0, 5.0, None, t=1.0)]
+        svg = render_track_replay(rows, BEACONS)
+        self.assertEqual(svg.count("<ellipse"), 1)
+        self.assertEqual(svg.count("data-timestamp="), 2)
+        self.assertEqual(svg.count('data-dot="true"'), 1)
+
+    def test_multi_floor_track_replays_one_floor_only(self):
+        rows = [self._row(2.0, 2.0, 1.0, floor=0, t=0.0),
+                self._row(3.0, 3.0, 1.0, floor=0, t=1.0),
+                self._row(15.0, 9.0, 1.0, floor=1, t=2.0)]
+        # Default floor is the most common one (floor 0).
+        svg = render_track_replay(rows, BEACONS)
+        self.assertEqual(svg.count("data-timestamp="), 2)
+        self.assertIn("floor 0", svg)
+        svg = render_track_replay(rows, BEACONS, floor=1)
+        self.assertEqual(svg.count("data-timestamp="), 1)
+        self.assertIn("floor 1", svg)
+
+    def test_bad_inputs_raise(self):
+        with self.assertRaises(ValueError):
+            render_track_replay([], BEACONS)
+        with self.assertRaises(ValueError):
+            render_track_replay([self._row(2.0, 2.0, 1.0)], [])
+        with self.assertRaises(ValueError):
+            render_track_replay([self._row(2.0, 2.0, 1.0, floor=0)],
+                                BEACONS, floor=1)
+        with self.assertRaises(ValueError):
+            render_track_replay([self._row(2.0, 2.0, 1.0)],
+                                BEACONS, seconds_per_step=0)
+
+    def test_heatmap_layer_renders_on_the_replay(self):
+        rows = self._example_rows()
+        svg = render_track_replay(rows, BEACONS, heatmap=True)
+        self.assertEqual(svg.count("data-heatmap-cell="), 60)
+        self.assertIn("Coverage heatmap:", svg)
+        self.assertEqual(svg.count("data-timestamp="), len(rows))
+        plain = render_track_replay(rows, BEACONS)
+        self.assertNotIn("data-heatmap-cell=", plain)
+
+    def test_write_track_replay_round_trips_through_the_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "replay.svg")
+            svg = write_track_replay(
+                os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "..", "examples", "live-track-export.json"),
+                BEACONS, out)
+            with open(out, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), svg)
+            self.assertEqual(svg.count("data-timestamp="), 40)
+
+    def test_cli_map_replay_flag_writes_svg(self):
+        from beacon.cli import main
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        track = os.path.join(here, "..", "examples",
+                             "live-track-export.json")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "replay.svg")
+            self.assertEqual(main(argv=["--map-overlay", track,
+                                       "--map-output", out,
+                                       "--map-replay"]), 0)
+            with open(out, encoding="utf-8") as handle:
+                svg = handle.read()
+            self.assertIn("<svg", svg)
+            self.assertEqual(svg.count("data-timestamp="), 40)
+            self.assertIn('data-dot="true"', svg)
+            # Half-second steps halve the replay length.
+            out2 = os.path.join(tmp, "replay-fast.svg")
+            self.assertEqual(main(argv=["--map-overlay", track,
+                                       "--map-output", out2,
+                                       "--map-replay",
+                                       "--replay-step-seconds", "0.5"]), 0)
+            with open(out2, encoding="utf-8") as handle:
+                self.assertIn('dur="19.5s"', handle.read())
 
 
 if __name__ == "__main__":

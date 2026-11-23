@@ -17,6 +17,7 @@ from .fingerprint import (FingerprintMap, MultiFloorFingerprintMap,
 from .floors import FloorEstimate, Position, estimate_floor
 from .placement import (LayoutScore, PlacementAdvice, advise_placement,
                         placement_uncertainty, score_layout)
+from .replay import render_track_replay, write_track_replay
 from .rssi import distance_to_rssi, rssi_to_distance
 from .simulate import simulate_multifloor_walk, simulate_walk, two_floor_walk
 from .survey import Survey
@@ -32,7 +33,7 @@ from .tracking import (ExcludedBeacon, LivePosition, LiveTracker,
 from .trilateration import trilaterate
 from .uncertainty import PositionUncertainty, estimate_uncertainty
 
-__version__ = "0.21.0"
+__version__ = "0.22.0"
 
 __all__ = [
     "Beacon",
@@ -81,7 +82,9 @@ __all__ = [
     "HeatmapSummary",
     "load_track_for_overlay",
     "render_map_overlay",
+    "render_track_replay",
     "write_map_overlay",
+    "write_track_replay",
     "PositionUncertainty",
     "estimate_uncertainty",
     "LayoutScore",

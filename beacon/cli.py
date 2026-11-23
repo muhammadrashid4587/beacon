@@ -6,6 +6,8 @@ each corner, and a device walking a rectangular loop inside it.
 Usage:
     python -m beacon.cli [--steps 40] [--noise 2.0] [--seed 7]
     python -m beacon.cli --map-overlay track.json [--map-output map.svg]
+    python -m beacon.cli --map-overlay track.json --map-replay
+        [--map-output replay.svg] [--replay-step-seconds 0.5]
 """
 
 import argparse
@@ -16,6 +18,7 @@ import sys
 from .beacon import Beacon
 from .engine import PositioningEngine
 from .map_overlay import load_track_for_overlay, render_map_overlay
+from .replay import render_track_replay
 from .simulate import rectangular_walk, simulate_walk
 
 WARD_WIDTH_M = 20.0
@@ -59,15 +62,29 @@ def main(argv=None) -> int:
                         help="shade the overlay with a per-cell "
                         "coverage heatmap (positioning quality from "
                         "the beacon layout)")
+    parser.add_argument("--map-replay", action="store_true",
+                        help="render the track as an animated replay "
+                        "SVG (SMIL, no JavaScript) instead of the "
+                        "static overlay")
+    parser.add_argument("--replay-step-seconds", type=float, default=1.0,
+                        help="replay time per step in seconds "
+                        "(default: 1.0)")
     args = parser.parse_args(argv)
 
     if args.map_overlay is not None:
         rows = load_track_for_overlay(args.map_overlay)
-        svg = render_map_overlay(rows, default_beacons(),
-                                 width_m=WARD_WIDTH_M,
-                                 height_m=WARD_HEIGHT_M,
-                                 floor=args.map_floor,
-                                 heatmap=args.map_heatmap)
+        if args.map_replay:
+            svg = render_track_replay(
+                rows, default_beacons(),
+                width_m=WARD_WIDTH_M, height_m=WARD_HEIGHT_M,
+                floor=args.map_floor, heatmap=args.map_heatmap,
+                seconds_per_step=args.replay_step_seconds)
+        else:
+            svg = render_map_overlay(rows, default_beacons(),
+                                     width_m=WARD_WIDTH_M,
+                                     height_m=WARD_HEIGHT_M,
+                                     floor=args.map_floor,
+                                     heatmap=args.map_heatmap)
         if args.map_output is not None:
             with open(args.map_output, "w", encoding="utf-8") as handle:
                 handle.write(svg)

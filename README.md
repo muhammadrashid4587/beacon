@@ -96,6 +96,12 @@ library, no dependencies, no BLE hardware needed.
   gives at each cell, so a dashboard can see where the ward is
   well covered and where a device would be guessing — before
   any device walks there.
+- A live-track replay: play an exported track back as an
+  animated SVG — a dot glides along the path, the trail draws
+  itself behind it, the 95% confidence ellipse for the current
+  step appears with the dot, and a timestamp label steps through
+  the track's own times — SMIL animation, no JavaScript, looping
+  by default, so a dashboard can watch a shift play back.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -850,6 +856,53 @@ advisor's advised layout (mean 4.30 m) improves on. The heatmap
 is a layout verdict, not a track verdict: it depends only on
 the beacons, so it is the same for every track on that ward.
 
+## Live track replay
+
+The static overlay shows where a device went; a replay shows
+when it was where. `render_track_replay` turns an exported
+live track into a self-contained animated SVG — no JavaScript,
+just SMIL, so it plays in a browser or a dashboard embed as-is:
+
+```python
+from beacon import load_track_json, render_track_replay
+from beacon.cli import default_beacons
+
+rows = load_track_json("ward-a-track.json")
+svg = render_track_replay(rows, default_beacons())
+open("ward-a-track-replay.svg", "w").write(svg)
+```
+
+A dot glides along the track on the track's own key times (the
+dot's `cx` / `cy` animate through the projected positions), the
+trail draws itself behind it (a polyline whose
+`stroke-dashoffset` animates from its full length to zero), the
+95% confidence ellipse for the current step appears with the
+dot — coloured by the same confidence bands as the static
+overlay, and absent where the step's geometry was degenerate —
+and a timestamp label steps through the track's own timestamps,
+so a pause between readings shows up as a pause in the replay.
+Each frame is on screen from the midpoint with the previous
+frame to the midpoint with the next, so the ellipse and the
+label switch while the dot is gliding between positions. The
+replay loops by default (`loop=False` plays it once), at
+`seconds_per_step` per step (1 s by default), and it plots one
+floor only — the most common floor by default, or the floor
+named with `floor=` — with the same optional coverage heatmap
+as the static overlay. The CLI renders it directly:
+
+```sh
+python3 -m beacon.cli --map-overlay ward-a-track.json --map-output ward-a-track-replay.svg --map-replay
+python3 -m beacon.cli --map-overlay ward-a-track.json --map-replay --replay-step-seconds 0.5
+```
+
+Measured behaviour: the default demo export
+(`examples/live-track-export.json`, 40 rows, t = 0–39 s) replays
+as 40 frames in 39 s at the default 1 s per step, with 40
+ellipses and 40 timestamp labels, and the same SVG from the CSV
+export — JSON and CSV are the same track.
+`examples/live-track-replay.svg` is that replay, ready to open
+in a browser.
+
 ## Measured accuracy (simulator, not the real world)
 
 Default ward walk, 2 dB RSSI noise: mean error about 2.2 m (1.8-2.6 m
@@ -1063,6 +1116,22 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   the default four-corner layout the heatmap is 60 cells with a
   mean semi-major axis of 6.26 m and a worst cell of 7.78 m at
   (9, 1) m — the corners cover the ward thinly everywhere, which
-  the advised layout (mean 4.30 m) improves on. The roadmap
-  grows as new needs surface — the coverage heatmap is the
-  latest addition.
+  the advised layout (mean 4.30 m) improves on.
+- Live-track replay animation (replay an exported live track
+  as an animated sequence) — done: `render_track_replay`
+  renders an exported track as a self-contained animated SVG —
+  a dot gliding along the path on the track's key times, the
+  trail drawing itself behind it, the 95% confidence ellipse
+  for the current step appearing with the dot, and a timestamp
+  label stepping through the track's own times — SMIL animation,
+  no JavaScript, looping by default at 1 s per step
+  (`--replay-step-seconds` to change it, `loop=False` to play
+  it once), one floor only, with the same optional coverage
+  heatmap as the static overlay; `write_track_replay` writes
+  the SVG to a file, and `python -m beacon.cli --map-overlay
+  track.json --map-replay` renders it from the command line
+  (v0.22.0); on the default demo export (40 rows, t = 0–39 s)
+  the replay is 40 frames in 39 s with 40 ellipses and 40
+  timestamp labels, and the JSON and CSV exports replay the
+  identical SVG. The roadmap grows as new needs surface — the
+  live-track replay is the latest addition.
