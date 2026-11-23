@@ -7,6 +7,7 @@ import unittest
 
 from beacon import (
     Beacon,
+    BeaconHealth,
     FingerprintMap,
     FloorEstimate,
     KalmanFilter,
@@ -14,6 +15,7 @@ from beacon import (
     MultiFloorFingerprintMap,
     Position,
     PositioningEngine,
+    assess_beacon_health,
     build_fingerprint_map,
     build_multifloor_fingerprint_map,
     calibrate_beacon,
@@ -22,6 +24,7 @@ from beacon import (
     estimate_floor,
     fit_path_loss,
     grid_points,
+    healthy_beacons,
     rssi_to_distance,
     simulate_multifloor_walk,
     simulate_walk,
@@ -1004,6 +1007,92 @@ class TestMultiFloorFingerprinting(unittest.TestCase):
         radio_map = self._two_floor_map()
         with self.assertRaises(ValueError):
             radio_map.locate_with_floor({})
+
+
+class TestBeaconHealth(unittest.TestCase):
+    def _survey(self, beacons, noise_db=2.0, seed=7):
+        return simulate_walk(rectangular_walk(20, 12, 10), beacons,
+                             noise_db=noise_db, seed=seed)
+
+    def test_healthy_survey_reports_all_ok(self):
+        report = assess_beacon_health(BEACONS, self._survey(BEACONS))
+        self.assertEqual([r.status for r in report], ["ok"] * 4)
+        for entry in report:
+            self.assertLess(abs(entry.mean_residual_db), 2.0)
+            self.assertEqual(entry.samples, entry.expected_samples)
+
+    def test_drifted_beacon_flagged_with_residual(self):
+        # Beacon A transmits 10 dB hotter than its calibrated
+        # constant says; the survey is generated with the drifted
+        # beacon, the assessment uses the calibrated one.
+        drifted = [Beacon("A", 0.0, 0.0, rssi_at_1m=-49.0)] + BEACONS[1:]
+        report = assess_beacon_health(BEACONS, self._survey(drifted))
+        by_id = {r.id: r for r in report}
+        self.assertEqual(by_id["A"].status, "drifting")
+        self.assertAlmostEqual(by_id["A"].mean_residual_db, 10.0, delta=1.0)
+        for other in ("B", "C", "D"):
+            self.assertEqual(by_id[other].status, "ok")
+
+    def test_dead_beacon_flagged(self):
+        # Beacon A is absent from the survey entirely: never heard.
+        report = assess_beacon_health(
+            BEACONS, self._survey(BEACONS[1:]))
+        by_id = {r.id: r for r in report}
+        self.assertEqual(by_id["A"].status, "dead")
+        self.assertIsNone(by_id["A"].mean_residual_db)
+        self.assertEqual(by_id["A"].samples, 0)
+        for other in ("B", "C", "D"):
+            self.assertEqual(by_id[other].status, "ok")
+
+    def test_healthy_beacons_excludes_unhealthy(self):
+        drifted = [Beacon("A", 0.0, 0.0, rssi_at_1m=-49.0)] + BEACONS[1:]
+        report = assess_beacon_health(BEACONS, self._survey(drifted))
+        healthy = healthy_beacons(BEACONS, report)
+        self.assertEqual([b.id for b in healthy], ["B", "C", "D"])
+        # The filtered engine still localises from the healthy set.
+        engine = PositioningEngine(healthy)
+        x, y = engine.estimate_raw({"B": -71.4, "C": -68.0, "D": -59.8})
+        self.assertTrue(math.isfinite(x) and math.isfinite(y))
+
+    def test_excluding_drifted_beacon_improves_accuracy(self):
+        # With the drifting beacon in the engine, the estimate is
+        # pulled far off; without it, it lands near the true point.
+        # A 15 dB drift (transmit power up) underestimates A's
+        # distance ~5.6x, so the bad estimate is metres off.
+        drifted = [Beacon("A", 0.0, 0.0, rssi_at_1m=-44.0)] + BEACONS[1:]
+        survey = self._survey(drifted, noise_db=0.0)
+        report = assess_beacon_health(BEACONS, survey)
+        healthy = healthy_beacons(BEACONS, report)
+        # survey[10] is a known point on the walk; use its true pos.
+        true = survey[10]["true"]
+        obs = dict(survey[10]["rssi"])
+        bad = PositioningEngine(BEACONS).estimate_raw(obs)
+        good = PositioningEngine(healthy).estimate_raw(
+            {k: v for k, v in obs.items() if k != "A"})
+        bad_err = math.hypot(bad[0] - true[0], bad[1] - true[1])
+        good_err = math.hypot(good[0] - true[0], good[1] - true[1])
+        self.assertGreater(bad_err, 5.0)
+        self.assertLess(good_err, 1.0)
+
+    def test_empty_survey_raises(self):
+        with self.assertRaises(ValueError):
+            assess_beacon_health(BEACONS, [])
+
+    def test_bad_threshold_raises(self):
+        with self.assertRaises(ValueError):
+            assess_beacon_health(BEACONS, self._survey(BEACONS),
+                                 drift_threshold_db=0.0)
+
+    def test_multifloor_survey_raises(self):
+        survey = simulate_multifloor_walk(two_floor_walk(20, 12, 10),
+                                          BEACONS, noise_db=0.0, seed=7)
+        with self.assertRaises(ValueError):
+            assess_beacon_health(BEACONS, survey)
+
+    def test_mismatched_report_raises(self):
+        report = assess_beacon_health(BEACONS, self._survey(BEACONS))
+        with self.assertRaises(ValueError):
+            healthy_beacons(BEACONS[:3], report)
 
 
 if __name__ == "__main__":

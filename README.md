@@ -35,6 +35,10 @@ library, no dependencies, no BLE hardware needed.
   classified by which floor's map holds the nearest fingerprint in
   RSSI space, then the k-NN lookup runs within that floor's map
   only — no path-loss model involved at any step.
+- Beacon health: a walked survey flags each beacon as ok, drifting
+  (its RSSI no longer matches its calibrated constants), or dead
+  (never heard), so a broken beacon can be recalibrated or excluded
+  from the engine instead of poisoning every estimate.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -266,6 +270,35 @@ correct on seeds 1, 2, 3, 7, 11, and within-floor mean error is
 1.83–2.30 m on the same walks. A noiseless classification from
 mid-ward reports the correct floor at 0.94–0.95 confidence.
 
+## Beacon health
+
+A beacon that has died, been moved, or had its transmit power
+changed poisons every estimate it feeds, because its RSSI no longer
+matches the path-loss model. Survey the ward once (a walked survey
+with known positions, the same shape `simulate_walk` returns) and
+check each beacon against the model:
+
+```python
+from beacon import assess_beacon_health, healthy_beacons
+from beacon.simulate import rectangular_walk, simulate_walk
+
+survey = simulate_walk(rectangular_walk(20, 12, 10), beacons,
+                       noise_db=2.0, seed=7)
+report = assess_beacon_health(beacons, survey)
+# [BeaconHealth(id='A', status='ok', mean_residual_db=0.4, ...), ...]
+engine = PositioningEngine(healthy_beacons(beacons, report))
+```
+
+Each entry reports a status — `ok`, `drifting` (mean RSSI residual
+beyond the 5 dB threshold, so the beacon moved, its power changed,
+or something is shielding it), or `dead` (never heard during the
+survey) — plus the mean residual in dB and how many steps heard it.
+`healthy_beacons` keeps only the `ok` beacons, so the engine is
+built from beacons that can be trusted. A beacon whose transmit
+power rose 15 dB pulls a noiseless estimate 5.6 m off; dropping
+it brings the error back to 0 m. Multi-floor surveys are
+rejected: the slab attenuation would look like drift.
+
 ## Measured accuracy (simulator, not the real world)
 
 Default ward walk, 2 dB RSSI noise: mean error about 2.2 m (1.8-2.6 m
@@ -323,4 +356,11 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   floor classification 100% on seeds 1, 2, 3, 7, 11, within-floor
   mean error 1.95–2.38 m, comparable to single-floor
   fingerprinting's 1.83–2.30 m, with no path-loss model involved.
+- Beacon health / outlier detection (dead or drifting beacons) —
+  done: `assess_beacon_health` checks each beacon against a walked
+  survey and reports `ok`, `drifting` (mean RSSI residual beyond
+  the 5 dB threshold), or `dead` (never heard), and
+  `healthy_beacons` builds the engine from the `ok` beacons only
+  (v0.9.0); excluding a beacon whose transmit power rose 15 dB
+  brings a noiseless estimate from 5.6 m off back to 0 m.
   The roadmap is now complete.
