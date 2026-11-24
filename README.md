@@ -84,7 +84,9 @@ library, no dependencies, no BLE hardware needed.
   ward dashboard — one row per located position with the
   timestamp, the position, the floor, the 95% confidence ellipse,
   the beacons used, the beacons excluded, and the track's
-  coverage — so the track survives the run that produced it.
+  coverage — and the planner's forecast flags and alerts per row
+  when the track was recorded with a plan, so an exported track
+  is self-describing about upcoming battery milestones.
 - A ward-map overlay: plot an exported live track on the ward
   plan as a self-contained SVG — ward outline, beacons at their
   known positions, the track path with start and end markers,
@@ -1174,9 +1176,17 @@ Each row carries the timestamp, the (x, y) in metres, the floor
 and its confidence, the 95% confidence ellipse (semi-major,
 semi-minor, angle — empty when the step's geometry was
 degenerate), the beacons the estimate was built from, the
-beacons excluded as dark with their reasons, and the track's
+beacons excluded as dark with their reasons, the battery level
+reported for each beacon at that step, and the track's
 overall coverage — the located share of the walk, the same on
-every row. Steps that produced no position are not rows, since
+every row. When the track was recorded with a deployment plan
+(`--forecast` on the CLI), each row also carries the planner's
+forecast flags — one per beacon, the soonest milestone with its
+hours remaining — and the plain-language alerts for the beacons
+due inside the forecast window, so the exported track warns
+about a beacon about to start lying without the plan alongside
+it; a track recorded without a plan exports empty flags and
+alerts. Steps that produced no position are not rows, since
 there is no position to write, but they are counted in the
 coverage, so a starved track never pretends it was complete;
 the JSON file's header carries the step counts and the coverage
@@ -1903,6 +1913,18 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   fresh beacons flag `2 dB noise in 13.3h (ok)` on both demo
   devices, and measured levels 0.9, 0.6, 0.4, 0.2 flag D `3 dB
   loss now`, C in 1.3 h, B in 5.3 h, A in 11.3 h — the same
-  flags as the single-device track, on every device. The roadmap
-  grows as new needs surface — the multi-device forecast flags
-  are the latest addition.
+  flags as the single-device track, on every device.
+- Forecast flags in exported track rows — done: `track_rows`
+  carries the same per-beacon forecast flags and alerts the live
+  track already exposes — the soonest milestone with its hours
+  remaining, all three horizons riding along — on every exported
+  row, in both JSON and CSV, so an exported track is
+  self-describing about upcoming battery milestones without the
+  plan alongside it; a track recorded without a plan exports
+  empty flags and alerts, and exports written before this change
+  still load, with the forecasts defaulting to empty (v0.32.0);
+  measured levels 0.9, 0.6, 0.4, 0.2 flag D `3 dB loss now`, C
+  in 1.3 h, B in 5.3 h, A in 11.3 h on every row, and the JSON
+  and CSV exports load back to identical rows. The roadmap
+  grows as new needs surface — the exported forecast flags are
+  the latest addition.

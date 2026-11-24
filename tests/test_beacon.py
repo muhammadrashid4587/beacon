@@ -2481,7 +2481,148 @@ class TestLiveTrackExport(unittest.TestCase):
                                  "ellipse_semi_major_m,"
                                  "ellipse_semi_minor_m,"
                                  "ellipse_angle_deg,beacons_used,"
-                                 "beacons_excluded,coverage,battery")
+                                 "beacons_excluded,coverage,battery,"
+                                 "forecasts,forecast_alerts")
+
+    def _planned_track(self):
+        """Feed the default walk through a tracker with a
+        deployment plan: measured levels 0.9, 0.6, 0.4, 0.2, all
+        draining at 0.05/hr, so D is already past its 3 dB loss
+        milestone and every beacon alerts inside 24 hours."""
+        from beacon import plan_deployment
+
+        plan = plan_deployment(
+            {b.id: BatteryModel(drain_rate_per_hour=0.05)
+             for b in BEACONS},
+            levels={"A": 0.9, "B": 0.6, "C": 0.4, "D": 0.2})
+        steps = simulate_walk(rectangular_walk(20.0, 12.0, 10),
+                              BEACONS, noise_db=2.0, seed=7)
+        tracker = LiveTracker(PositioningEngine(BEACONS), plan=plan)
+        return [tracker.feed(step["rssi"], float(i))
+                for i, step in enumerate(steps)]
+
+    def test_forecast_flags_ride_on_export_rows_and_round_trip(self):
+        positions = self._planned_track()
+        rows = track_rows(positions)
+        self.assertEqual(len(rows), 40)
+        by_id = {flag["beacon"]: flag
+                 for flag in rows[0]["forecasts"]}
+        self.assertEqual(set(by_id), {"A", "B", "C", "D"})
+        self.assertEqual(by_id["D"]["milestone"], "3 dB loss")
+        self.assertEqual(by_id["D"]["hours"], 0.0)
+        self.assertEqual(by_id["D"]["status"], "degrading")
+        self.assertAlmostEqual(by_id["C"]["hours"], 1.3, places=1)
+        self.assertAlmostEqual(by_id["B"]["hours"], 5.3, places=1)
+        self.assertAlmostEqual(by_id["A"]["hours"], 11.3, places=1)
+        # Every beacon is due inside the 24-hour window.
+        self.assertEqual(len(rows[0]["forecast_alerts"]), 4)
+        self.assertIn("D: 3 dB loss now (degrading)",
+                      rows[0]["forecast_alerts"])
+        # The flags count down with the track, not frozen at the
+        # plan: the last row still carries all four, D still due.
+        last = {flag["beacon"]: flag
+                for flag in rows[-1]["forecasts"]}
+        self.assertEqual(last["D"]["milestone"], "3 dB loss")
+        self.assertEqual(last["D"]["hours"], 0.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "track.json")
+            csv_path = os.path.join(tmp, "track.csv")
+            export_track_json(positions, json_path)
+            export_track_csv(positions, csv_path)
+            self.assertEqual(load_track_json(json_path), rows)
+            self.assertEqual(load_track_csv(csv_path), rows)
+
+    def test_track_without_plan_exports_empty_forecasts(self):
+        rows = track_rows(self._track())
+        self.assertEqual(rows[0]["forecasts"], [])
+        self.assertEqual(rows[0]["forecast_alerts"], [])
+
+    def test_never_draining_forecast_round_trips_through_inf(self):
+        # A beacon that never drains writes null horizons and
+        # reads them back as infinity, in both formats.
+        from beacon import ForecastFlag
+
+        position = LivePosition(
+            t=0.0, x=10.0, y=6.0, floor=0, floor_confidence=1.0,
+            uncertainty=None, heard=("A", "B", "C"), excluded=(),
+            forecasts=(ForecastFlag(
+                beacon_id="A", milestone="never", hours=math.inf,
+                status="ok", hours_to_dark=math.inf,
+                hours_to_rssi_loss_db=math.inf,
+                hours_to_extra_noise_db=math.inf),),
+            forecast_alerts=())
+        rows = track_rows([position])
+        self.assertIsNone(rows[0]["forecasts"][0]["hours"])
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "track.json")
+            csv_path = os.path.join(tmp, "track.csv")
+            export_track_json([position], json_path)
+            export_track_csv([position], csv_path)
+            loaded = load_track_json(json_path)
+            self.assertEqual(load_track_csv(csv_path), loaded)
+        flag = loaded[0]["forecasts"][0]
+        self.assertEqual(flag["milestone"], "never")
+        self.assertTrue(math.isinf(flag["hours"]))
+        self.assertTrue(math.isinf(flag["hours_to_dark"]))
+
+    def test_old_csv_without_forecast_columns_still_loads(self):
+        # A twelve-column export (battery, no forecasts) loads
+        # with empty forecasts and alerts, like the pre-battery
+        # example file loads with an empty battery.
+        import csv
+
+        rows = track_rows(self._planned_track())
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = os.path.join(tmp, "old.csv")
+            with open(csv_path, "w", encoding="utf-8",
+                      newline="") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=["t", "x", "y", "floor",
+                                "floor_confidence",
+                                "ellipse_semi_major_m",
+                                "ellipse_semi_minor_m",
+                                "ellipse_angle_deg", "beacons_used",
+                                "beacons_excluded", "coverage",
+                                "battery"])
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow({
+                        "t": repr(row["t"]), "x": repr(row["x"]),
+                        "y": repr(row["y"]),
+                        "floor": str(row["floor"]),
+                        "floor_confidence":
+                            repr(row["floor_confidence"]),
+                        "ellipse_semi_major_m":
+                            repr(row["ellipse_semi_major_m"]),
+                        "ellipse_semi_minor_m":
+                            repr(row["ellipse_semi_minor_m"]),
+                        "ellipse_angle_deg":
+                            repr(row["ellipse_angle_deg"]),
+                        "beacons_used": ";".join(row["beacons_used"]),
+                        "beacons_excluded":
+                            json.dumps(row["beacons_excluded"]),
+                        "coverage": repr(row["coverage"]),
+                        "battery": ";".join(
+                            f"{k}={v!r}" for k, v in
+                            sorted(row["battery"].items())),
+                    })
+            loaded = load_track_csv(csv_path)
+        self.assertEqual(len(loaded), 40)
+        self.assertEqual(loaded[0]["forecasts"], [])
+        self.assertEqual(loaded[0]["forecast_alerts"], [])
+
+    def test_old_json_without_forecast_keys_still_loads(self):
+        from beacon.export import track_from_dict, track_to_dict
+
+        data = track_to_dict(self._planned_track())
+        for row in data["rows"]:
+            del row["forecasts"]
+            del row["forecast_alerts"]
+        rows = track_from_dict(data)
+        self.assertEqual(len(rows), 40)
+        self.assertEqual(rows[0]["forecasts"], [])
+        self.assertEqual(rows[0]["forecast_alerts"], [])
 
     def test_dropout_shows_in_beacons_used_and_excluded(self):
         rows = track_rows(self._track(die_at=20))
