@@ -192,6 +192,12 @@ library, no dependencies, no BLE hardware needed.
   disagree with them about which rows belong to which device,
   and a single device exports exactly the single-device file
   for its track.
+- A multi-device track accuracy report: score every device's
+  recorded track against its own ground truth — one
+  `TrackReport` per device plus an overall report over every
+  device's located steps pooled together — so a ward can see
+  which tag's walk went wrong instead of one blended number
+  hiding it.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -2670,3 +2676,78 @@ steps, header coverage 80/81, with that tag's rows carrying
 its own 40/41 coverage while the other tag's stay at 1.0.
 The roadmap grows as new needs surface — the combined
 multi-device export is the latest addition.
+
+## Multi-device track accuracy report
+
+The single-device accuracy report scores one walk; a ward
+runs several tags at once, and one blended number hides which
+tag's walk went wrong — a pump that spent the shift behind a
+metal bed and a nurse's badge that tracked cleanly do not
+deserve the same verdict. `evaluate_multi_device_track`
+scores every device's recorded track against its own ground
+truth and returns a `MultiDeviceTrackReport` — one
+`TrackReport` per device, each with the same mean, median,
+90th percentile, worst error, coverage and floor accuracy as
+the single-device report, plus an `overall` report over every
+device's located steps pooled together:
+
+```python
+from beacon import MultiDeviceTracker, evaluate_multi_device_track
+from beacon.simulate import rectangular_walk, simulate_walk
+
+beacons = [Beacon("A", 0, 0), Beacon("B", 20, 0),
+           Beacon("C", 20, 12), Beacon("D", 0, 12)]
+forward = simulate_walk(rectangular_walk(20.0, 12.0, 10), beacons,
+                        noise_db=2.0, seed=7)
+reverse = simulate_walk(
+    list(reversed(rectangular_walk(20.0, 12.0, 10))), beacons,
+    noise_db=2.0, seed=11)
+tracker = MultiDeviceTracker(beacons)
+for i, step in enumerate(forward):
+    tracker.feed("tag-1", step["rssi"], float(i))
+for i, step in enumerate(reverse):
+    tracker.feed("tag-2", step["rssi"], float(i))
+report = evaluate_multi_device_track(tracker.tracks(), {
+    "tag-1": [step["true"] for step in forward],
+    "tag-2": [step["true"] for step in reverse],
+})
+# report.by_device["tag-1"].mean_error_m — 2.16 m
+# report.by_device["tag-2"].mean_error_m — 1.72 m
+# report.overall.mean_error_m — 1.94 m over 80 steps
+report.to_dict()   # JSON-friendly, for dashboards and regression logs
+```
+
+The tracks are the lists `MultiDeviceTracker.tracks()` returns
+— one `LivePosition` (or None, for a reading too thin to
+locate) per reading, in feed order — so the report scores the
+track the tracker actually recorded, including its thin steps:
+a device's coverage is its own located share, and the overall
+coverage counts every device's thin steps. Each device is
+scored with the same rules as `evaluate_live_track` — the two
+lists for a device must be the same length, a device's truth
+must not mix two- and three-tuples, and a device with nothing
+located raises instead of reporting zeroes — and the tracks
+and the truths must name the same devices, so a missing tag's
+truth is a mistake, not a silent omission. The overall report
+pools the errors, so its 90th percentile and worst step are
+computed over the pooled error list, not averaged from the
+per-device figures — the overall worst step is the worst
+device's worst step — and its mean is the located-weighted mean
+of the per-device means. The overall floor accuracy is only set
+when every device's truth carries floors; a device whose truth
+has no floors still gets its own report, with its floor
+accuracy None. A single device through the multi-device scorer
+is the same report the single-device scorer gives, overall
+included.
+
+Measured behaviour (v0.46.0): two simulated walks through one
+`MultiDeviceTracker` — tag-1 forward, seed 7, tag-2 the reverse
+walk, seed 11 — score tag-1 at mean 2.16 m, median 2.08 m, 90th
+percentile 4.14 m, worst step 6.70 m, and tag-2 at mean 1.72 m,
+median 1.69 m, 90th percentile 2.94 m, worst step 3.25 m, both
+at coverage 1.0; the overall report is 80 steps, 80 located,
+mean 1.94 m, median 1.91 m, 90th percentile 3.10 m, worst step
+6.70 m, coverage 1.0 — the same per-device means the
+multi-device tracking section measured by hand, now in code.
+The roadmap grows as new needs surface — the multi-device
+accuracy report is the latest addition.

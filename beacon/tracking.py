@@ -762,6 +762,136 @@ class TrackReport:
         }
 
 
+def _score_positions(
+        positions: list[LivePosition | None],
+        truth: list[tuple[float, float] | tuple[float, float, int]]
+        ) -> tuple[list[float], int, int]:
+    """The per-step errors behind a track report.
+
+    Returns the Euclidean error of every located step (in order),
+    how many steps were located, and how many of those got the
+    floor right. ``None`` positions are skipped, not scored — a
+    step too thin to locate has no error to summarise.
+    """
+    errors: list[float] = []
+    floors_right = 0
+    located = 0
+    for position, point in zip(positions, truth):
+        if position is None:
+            continue
+        located += 1
+        errors.append(math.hypot(position.x - point[0],
+                                 position.y - point[1]))
+        if len(point) == 3 and position.floor == point[2]:
+            floors_right += 1
+    return errors, located, floors_right
+
+
+def _report_from_errors(errors: list[float], steps: int, located: int,
+                        floors_right: int, has_floor: bool) -> TrackReport:
+    """Build a ``TrackReport`` from a scored error list.
+
+    Raises ValueError when no step was located — with nothing
+    located there is no error to summarise, and a report of
+    zeroes would hide the failure.
+    """
+    if not errors:
+        raise ValueError("no step was located, nothing to score")
+    errors = sorted(errors)
+    p90_index = max(0, math.ceil(0.9 * len(errors)) - 1)
+    return TrackReport(
+        steps=steps,
+        located=located,
+        coverage=located / steps,
+        mean_error_m=statistics.fmean(errors),
+        median_error_m=statistics.median(errors),
+        p90_error_m=errors[p90_index],
+        max_error_m=errors[-1],
+        floor_accuracy=(floors_right / located
+                        if has_floor else None),
+    )
+
+
+@dataclass(frozen=True)
+class MultiDeviceTrackReport:
+    """How every device's recorded track scored against truth.
+
+    ``by_device`` is one :class:`TrackReport` per device id, each
+    scored against that device's own ground truth, and ``overall``
+    is the same report over every device's located steps pooled
+    together — so one tag's bad walk cannot hide inside another
+    tag's good one, and the ward still gets a single number.
+    ``overall.floor_accuracy`` is only set when every device's
+    truth carries floors; a device whose truth has no floors
+    still gets its own report, with ``floor_accuracy`` None.
+    """
+
+    by_device: dict[str, TrackReport]
+    overall: TrackReport
+
+    def to_dict(self) -> dict:
+        """JSON-friendly form, for dashboards and regression logs."""
+        return {
+            "by_device": {device_id: report.to_dict()
+                          for device_id, report in self.by_device.items()},
+            "overall": self.overall.to_dict(),
+        }
+
+
+def evaluate_multi_device_track(
+        tracks: dict[str, list[LivePosition | None]],
+        truths: dict[str, list[tuple[float, float]
+                            | tuple[float, float, int]]]
+        ) -> MultiDeviceTrackReport:
+    """Score every device's recorded track against its own truth.
+
+    ``tracks`` is one recorded track per device id — the lists
+    :meth:`beacon.multi_device.MultiDeviceTracker.tracks` returns,
+    one ``LivePosition`` (or None, for a reading too thin to
+    locate) per reading, in feed order — and ``truths`` is the
+    matching ground truth per device, one ``(x, y)`` per step, or
+    ``(x, y, floor)`` when the walk changes floor. Each device is
+    scored with :func:`evaluate_live_track`, so the same rules
+    apply per device: the two lists for a device must be the same
+    length, a device's truth must not mix two- and three-tuples,
+    and a device with nothing located raises instead of reporting
+    zeroes. The overall report pools every device's located
+    errors, so its 90th percentile and worst step are computed
+    over the pooled errors, not averaged from the per-device
+    figures.
+
+    Raises ValueError on an empty set of tracks, or when the
+    tracks and the truths name different devices.
+    """
+    if not tracks:
+        raise ValueError("cannot score an empty set of tracks")
+    if set(tracks) != set(truths):
+        raise ValueError(
+            f"tracks name {sorted(tracks)} but truths name "
+            f"{sorted(truths)}")
+    by_device: dict[str, TrackReport] = {}
+    all_errors: list[float] = []
+    total_steps = 0
+    total_located = 0
+    total_floors_right = 0
+    all_have_floor = True
+    for device_id, positions in tracks.items():
+        truth = truths[device_id]
+        report = evaluate_live_track(positions, truth)
+        by_device[device_id] = report
+        errors, located, floors_right = _score_positions(positions,
+                                                         truth)
+        all_errors.extend(errors)
+        total_steps += len(truth)
+        total_located += located
+        total_floors_right += floors_right
+        all_have_floor = all_have_floor and len(truth[0]) == 3
+    overall = _report_from_errors(all_errors, total_steps,
+                                  total_located, total_floors_right,
+                                  all_have_floor)
+    return MultiDeviceTrackReport(by_device=by_device, overall=overall)
+
+
 def evaluate_live_track(
         positions: list[LivePosition | None],
         truth: list[tuple[float, float] | tuple[float, float, int]]
@@ -791,32 +921,9 @@ def evaluate_live_track(
     if any(has_floor) and not all(has_floor):
         raise ValueError(
             "truth must be all (x, y) or all (x, y, floor), not mixed")
-    errors: list[float] = []
-    floors_right = 0
-    located = 0
-    for position, point in zip(positions, truth):
-        if position is None:
-            continue
-        located += 1
-        errors.append(math.hypot(position.x - point[0],
-                                 position.y - point[1]))
-        if len(point) == 3 and position.floor == point[2]:
-            floors_right += 1
-    if not errors:
-        raise ValueError("no step was located, nothing to score")
-    errors.sort()
-    p90_index = max(0, math.ceil(0.9 * len(errors)) - 1)
-    return TrackReport(
-        steps=len(truth),
-        located=located,
-        coverage=located / len(truth),
-        mean_error_m=statistics.fmean(errors),
-        median_error_m=statistics.median(errors),
-        p90_error_m=errors[p90_index],
-        max_error_m=errors[-1],
-        floor_accuracy=(floors_right / located
-                        if all(has_floor) else None),
-    )
+    errors, located, floors_right = _score_positions(positions, truth)
+    return _report_from_errors(errors, len(truth), located,
+                               floors_right, all(has_floor))
 
 
 def parse_line(line: str) -> tuple[float, dict[str, float]]:
