@@ -172,6 +172,14 @@ library, no dependencies, no BLE hardware needed.
   tag alarming on a beacon going bad never dilutes or clears
   another tag's alarm, and resetting one device clears only
   its monitor.
+- Per-device series on the ward-map overlay: a multi-device
+  track renders one series per device on the static overlay —
+  each device's own dots, trail and ellipses in its own colour,
+  its own start and end markers, and its drift alarms read off
+  that device's own rows — grouped and coloured the same way
+  as the replay, so the overlay and the replay cannot disagree
+  about which rows belong to which device, and a single-device
+  track renders exactly as before.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -966,9 +974,10 @@ never alarms can only ever say "not observed", even when
 another tag on the same beacons confirms the same forecast.
 Two devices alarming on the same beacon at the same time
 share that beacon's badge spot, and the strip and legend tell
-them apart. The static overlay still renders one track: replay
-a multi-device file with `--map-replay`, not as a plain
-overlay, or the rows plot as one zigzag path between devices.
+them apart. The static overlay renders the same per-device
+series, so a multi-device file reads the same on the map and
+in the replay — the replay adds the motion, the overlay the
+still picture.
 
 Measured behaviour (v0.43.0): two simulated walks through one
 `MultiDeviceTracker` — tag-1 forward, seed 7, with beacon A
@@ -2596,5 +2605,11 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   frames 4–39 and C frames 25–33, tag-2 on nothing; tag-1's
   forecast checks read A confirmed from frame 4 and C
   contradicted from frame 25, while tag-2 reads all four not
-  observed. The roadmap grows as new needs surface — the
-  multi-device replay is the latest addition.
+  observed. The static overlay renders the same two walks as
+  two series (v0.44.0): two trails, 80 ellipses and 80 dots,
+  two start and two end markers, tag-1 pink and tag-2 blue —
+  the same colours as the replay's dots — and the drift badge
+  on A names tag-1 only, `tag-1: A +8.5 dB (uncertain);
+  tag-2: none`, with a single-device overlay byte-identical
+  to v0.43.0. The roadmap grows as new needs surface — the
+  per-device overlay series is the latest addition.

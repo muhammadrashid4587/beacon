@@ -68,6 +68,7 @@ from .beacon import Beacon
 from .map_overlay import (
     BEACON_COLOUR,
     CONFIDENCE_BANDS,
+    DEVICE_COLOURS,
     DRIFT_ALARM_COLOUR,
     HEATMAP_FILL_OPACITY,
     MARGIN,
@@ -78,6 +79,7 @@ from .map_overlay import (
     TRACK_COLOUR,
     _drift_label,
     _drift_state_at_row,
+    _group_rows_by_device,
     _most_common_floor,
     _project,
     confidence_colour,
@@ -87,13 +89,6 @@ from .map_overlay import (
 )
 
 DOT_COLOUR = "#d81b60"
-
-# One colour per device in a multi-device replay, in first-seen
-# order — the first is the single-device dot colour, so a
-# one-device track renders exactly as before. The rest are
-# distinct hues that read apart on the ward plan at a glance.
-DEVICE_COLOURS = ("#d81b60", "#1565c0", "#2e7d32",
-                  "#ef6c00", "#6a1b9a", "#00897b")
 
 # The forecast marker's amber is the planner's degrading amber: a
 # forecast active on a frame means that beacon's milestone is due
@@ -288,18 +283,14 @@ def _device_series(rows: list[dict], scale: float, width_m: float,
     is the single unnamed device — and each group gets its own
     projected points, replay timing, per-frame drift and forecast
     state, and forecast checks, all read off that device's own
-    rows. Each device takes the next colour in
-    ``DEVICE_COLOURS``; the first is the single-device dot
-    colour, so a one-device track is unaffected.
+    rows. The grouping is the overlay's
+    :func:`beacon.map_overlay._group_rows_by_device`, so the
+    replay and the overlay group the same rows the same way.
+    Each device takes the next colour in ``DEVICE_COLOURS``;
+    the first is the single-device dot colour, so a one-device
+    track is unaffected.
     """
-    grouped: list[tuple[str | None, list[dict]]] = []
-    by_device: dict[str | None, list[dict]] = {}
-    for row in rows:
-        device = row.get("device")
-        if device not in by_device:
-            by_device[device] = []
-            grouped.append((device, by_device[device]))
-        by_device[device].append(row)
+    grouped = _group_rows_by_device(rows)
     series = []
     for index, (device, device_rows) in enumerate(grouped):
         frame_drift = ([_drift_state_at_row(row) for row in device_rows]
@@ -558,9 +549,10 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
     share that beacon's badge spot, and the strip and legend
     tell them apart. Rows with no device are one unnamed device,
     so a single-device track renders exactly as before. The
-    static overlay still renders one track: replay a
-    multi-device file with ``--map-replay``, not as a plain
-    overlay.
+    static overlay renders the same per-device series (see
+    :func:`beacon.map_overlay.render_map_overlay`), so a
+    multi-device file reads the same either way — the replay
+    adds the motion, the overlay the still picture.
 
     Raises ValueError on an empty track, with no beacons, a
     non-positive ``seconds_per_step``, or when the chosen floor

@@ -11,6 +11,18 @@ explains the colours, and the header carries the floor, the step
 counts and the coverage, so a track starved by dead beacons shows
 up as thin rather than silently short.
 
+With rows from more than one device — one device id per row, as
+``beacon.export.track_rows(..., device=...)`` writes — the overlay
+renders one series per device: each device gets its own dots,
+trail and ellipses in its own colour, its own start and end
+markers, and its drift alarms are read off that device's own
+rows, so one tag's alarm never colours another tag's track. The
+series are grouped the same way the replay groups them (see
+:func:`_group_rows_by_device`), so the overlay and the replay
+cannot disagree about which rows belong to which device. A row
+with no device is one unnamed device, so a single-device track
+renders exactly as before.
+
 The SVG is plain text with no dependencies, so a dashboard can
 embed it, save it, or open it in a browser as-is. Rows on other
 floors are not plotted on top of each other: the overlay renders
@@ -50,6 +62,15 @@ NO_ELLIPSE_LABEL = "no ellipse (degenerate geometry)"
 
 BEACON_COLOUR = "#1565c0"
 TRACK_COLOUR = "#212121"
+
+# One colour per device in a multi-device track, in first-seen
+# order — the same colours the replay uses for the same devices,
+# so a tag is the same colour on the overlay and in the replay.
+# The first is the replay's single-device dot colour; the overlay
+# itself keeps TRACK_COLOUR for one unnamed device, so a
+# single-device track renders exactly as before.
+DEVICE_COLOURS = ("#d81b60", "#1565c0", "#2e7d32",
+                  "#ef6c00", "#6a1b9a", "#00897b")
 
 # A beacon's forecast status colours its diamond on a planner-aware
 # overlay, so a dying beacon reads as dying at a glance: ok stays
@@ -414,6 +435,29 @@ def _most_common_floor(rows: list[dict]) -> int:
     return max(counts, key=lambda floor: counts[floor])
 
 
+def _group_rows_by_device(rows: list[dict]
+                          ) -> list[tuple[str | None, list[dict]]]:
+    """Rows grouped by device, in first-seen device order.
+
+    A row with no ``device`` is the single unnamed device, so a
+    one-device track groups as one series. Shared with the replay
+    (see :func:`beacon.replay.render_track_replay`), so the
+    overlay and the replay group the same rows the same way and
+    can never disagree about which rows belong to which device.
+    Interleaved rows group the same way as grouped rows — the
+    grouping reads the device tag, not the file order.
+    """
+    grouped: list[tuple[str | None, list[dict]]] = []
+    by_device: dict[str | None, list[dict]] = {}
+    for row in rows:
+        device = row.get("device")
+        if device not in by_device:
+            by_device[device] = []
+            grouped.append((device, by_device[device]))
+        by_device[device].append(row)
+    return grouped
+
+
 def _project(x: float, y: float, scale: float,
              width_m: float, height_m: float) -> tuple[float, float]:
     """Ward metres to SVG pixels; y is flipped, so up stays up."""
@@ -467,6 +511,18 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
     the monitor recorded, not a ground-truth diagnosis, and a
     track recorded without a monitor marks nothing.
 
+    With rows from more than one device — each row carrying its
+    ``device`` (see :func:`beacon.export.track_rows`) — the
+    overlay renders one series per device: each device gets its
+    own dots, trail and ellipses in its own colour, its own
+    start and end markers, and the drift alarms are read off
+    each device's own last row, so one tag's alarm never colours
+    another tag's track; two devices alarming on the same beacon
+    share that beacon's badge spot, and the label and the legend
+    name each device's alarm separately. A row with no device
+    is one unnamed device, so a single-device track renders
+    exactly as before.
+
     Raises ValueError on an empty track, with no beacons, when
     the chosen floor has no located points, when ``planner`` is
     asked for without a plan, when both heatmaps are asked for,
@@ -496,16 +552,40 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
     floor_rows = [row for row in rows if row["floor"] == floor]
     if not floor_rows:
         raise ValueError(f"no located points on floor {floor}")
-    drift_state = _drift_state(floor_rows) if drift else {}
+    # One series per device, in first-seen order — the same
+    # grouping the replay uses, so the overlay and the replay
+    # can never disagree about which rows belong to which
+    # device. A single unnamed device is one series, so a
+    # one-device track renders exactly as before.
+    series = _group_rows_by_device(floor_rows)
+    multi_device = len(series) > 1
+    series_colours = [DEVICE_COLOURS[i % len(DEVICE_COLOURS)]
+                      for i in range(len(series))]
+    # The drift alarms at the end of each device's own track —
+    # beacon id -> [(device, mean residual, verdict)] in device
+    # order — so one tag's alarm never colours another tag's
+    # track. A track recorded without a monitor marks nothing.
+    drift_marks: dict[str, list[tuple[str | None, float, str | None]]] = {}
+    if drift:
+        for device, device_rows in series:
+            for beacon_id, (mean_db, verdict) in _drift_state(
+                    device_rows).items():
+                drift_marks.setdefault(beacon_id, []).append(
+                    (device, mean_db, verdict))
 
     scale = min((SVG_WIDTH - 2 * MARGIN) / width_m,
                 (SVG_HEIGHT - 2 * MARGIN) / height_m)
     ward_w = width_m * scale
     ward_h = height_m * scale
-    coverage = floor_rows[0]["coverage"]
-    heading = title or (f"Live track \u2014 floor {floor} "
-                        f"({len(floor_rows)} points, "
-                        f"coverage {coverage:.0%})")
+    if multi_device:
+        heading = title or (f"Live track \u2014 floor {floor} "
+                            f"({len(floor_rows)} points across "
+                            f"{len(series)} devices)")
+    else:
+        coverage = floor_rows[0]["coverage"]
+        heading = title or (f"Live track \u2014 floor {floor} "
+                            f"({len(floor_rows)} points, "
+                            f"coverage {coverage:.0%})")
 
     parts = [
         f"<title>{escape(heading)}</title>",
@@ -590,44 +670,73 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
 
     # Confidence ellipses, then the track path, then the points —
     # the path sits on top of the ellipses, the points on top of
-    # the path.
+    # the path. One series per device: each device's ellipses,
+    # trail and dots carry its id and its colour, so the series
+    # never merge into one zigzag path between devices. A single
+    # unnamed device renders exactly as before — one trail in the
+    # track colour, no device attributes anywhere.
     for row in floor_rows:
         if row["ellipse_semi_major_m"] is None:
             continue
         cx, cy = _project(row["x"], row["y"], scale, width_m, height_m)
         colour = confidence_colour(row["ellipse_semi_major_m"])
         angle = -(row["ellipse_angle_deg"] or 0.0)
+        device_attr = (
+            "" if not multi_device or row.get("device") is None
+            else f' data-device="{escape(str(row["device"]))}"')
         parts.append(
             f'<ellipse cx="{cx:.1f}" cy="{cy:.1f}" '
             f'rx="{row["ellipse_semi_major_m"] * scale:.1f}" '
             f'ry="{row["ellipse_semi_minor_m"] * scale:.1f}" '
             f'fill="{colour}" fill-opacity="0.18" '
             f'stroke="{colour}" stroke-width="1" '
-            f'transform="rotate({angle:.1f} {cx:.1f} {cy:.1f})"/>')
+            f'transform="rotate({angle:.1f} {cx:.1f} {cy:.1f})"'
+            f"{device_attr}/>")
 
-    points = " ".join(
-        f"{_project(row['x'], row['y'], scale, width_m, height_m)[0]:.1f},"
-        f"{_project(row['x'], row['y'], scale, width_m, height_m)[1]:.1f}"
-        for row in floor_rows)
-    parts.append(
-        f'<polyline points="{points}" fill="none" '
-        f'stroke="{TRACK_COLOUR}" stroke-width="2"/>')
+    for (device, device_rows), colour in zip(series, series_colours):
+        points = " ".join(
+            f"{_project(row['x'], row['y'], scale, width_m, height_m)[0]:.1f},"
+            f"{_project(row['x'], row['y'], scale, width_m, height_m)[1]:.1f}"
+            for row in device_rows)
+        stroke = colour if multi_device else TRACK_COLOUR
+        device_attr = (
+            "" if not multi_device or device is None
+            else f' data-device="{escape(str(device))}"')
+        trail_attr = ' data-trail="true"' if multi_device else ""
+        parts.append(
+            f'<polyline points="{points}" fill="none" '
+            f'stroke="{stroke}" stroke-width="2"'
+            f"{trail_attr}{device_attr}/>")
     for i, row in enumerate(floor_rows):
         cx, cy = _project(row["x"], row["y"], scale, width_m, height_m)
         colour = confidence_colour(row["ellipse_semi_major_m"])
+        device_attr = (
+            "" if not multi_device or row.get("device") is None
+            else f' data-device="{escape(str(row["device"]))}"')
         parts.append(
             f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="3" '
             f'fill="{colour}" data-t="{row["t"]}" '
-            f'data-index="{i}"/>')
-    # Start (S) and end (E) markers.
-    first = _project(floor_rows[0]["x"], floor_rows[0]["y"],
-                     scale, width_m, height_m)
-    last = _project(floor_rows[-1]["x"], floor_rows[-1]["y"],
-                    scale, width_m, height_m)
-    for (px, py), label in ((first, "S"), (last, "E")):
+            f'data-index="{i}"{device_attr}/>')
+    # Start (S) and end (E) markers, one pair per device — a
+    # device that starts late or walks fewer steps still gets
+    # its own markers, at its own first and last points.
+    markers = []
+    if multi_device:
+        for (device, device_rows), colour in zip(series, series_colours):
+            device_attr = (
+                "" if device is None
+                else f' data-device="{escape(str(device))}"')
+            markers.append((device_rows[0], "S", colour, device_attr))
+            markers.append((device_rows[-1], "E", colour, device_attr))
+    else:
+        markers = [(floor_rows[0], "S", TRACK_COLOUR, ""),
+                   (floor_rows[-1], "E", TRACK_COLOUR, "")]
+    for row, label, stroke, device_attr in markers:
+        px, py = _project(row["x"], row["y"],
+                          scale, width_m, height_m)
         parts.append(
             f'<circle cx="{px:.1f}" cy="{py:.1f}" r="8" fill="#ffffff" '
-            f'stroke="{TRACK_COLOUR}" stroke-width="2"/>')
+            f'stroke="{stroke}" stroke-width="2"{device_attr}/>')
         parts.append(
             f'<text x="{px:.1f}" y="{py + 4:.1f}" font-family="sans-serif" '
             f'font-size="11" font-weight="bold" text-anchor="middle">'
@@ -660,8 +769,8 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
         ring = ""
         badge = ""
         drift_annotation = ""
-        if beacon.id in drift_state:
-            mean_db, verdict = drift_state[beacon.id]
+        marks = drift_marks.get(beacon.id, [])
+        if marks:
             ring = (
                 f'<rect x="{bx - 9:.1f}" y="{by - 9:.1f}" width="18" '
                 f'height="18" fill="none" stroke="{DRIFT_ALARM_COLOUR}" '
@@ -675,18 +784,30 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
                 f'font-family="sans-serif" font-size="11" '
                 f'font-weight="bold" fill="#ffffff" '
                 f'text-anchor="middle">!</text>')
-            drift_y = by + 38 if forecasts is not None else by + 24
-            verdict_attr = (
-                f' data-drift-verdict="{escape(verdict)}"'
-                if verdict is not None else "")
-            drift_annotation = (
-                f'<text x="{bx:.1f}" y="{drift_y:.1f}" '
-                f'font-family="sans-serif" font-size="10" '
-                f'font-weight="bold" fill="{DRIFT_ALARM_COLOUR}" '
-                f'text-anchor="middle" '
-                f'data-drift-alarm-label="{escape(str(beacon.id))}"'
-                f"{verdict_attr}>"
-                f'{escape(_drift_label(mean_db, verdict))}</text>')
+            # One label line per alarming device, stacked below
+            # the forecast line when both are on — two devices
+            # alarming on the same beacon share the badge spot,
+            # and the lines name each device's alarm separately.
+            # A single unnamed device keeps the one line it
+            # always had, at the same height.
+            base_y = by + 38 if forecasts is not None else by + 24
+            lines = []
+            for k, (device, mean_db, verdict) in enumerate(marks):
+                verdict_attr = (
+                    f' data-drift-verdict="{escape(verdict)}"'
+                    if verdict is not None else "")
+                label = _drift_label(mean_db, verdict)
+                if multi_device and device is not None:
+                    label = f"{device} \u00b7 {label}"
+                lines.append(
+                    f'<text x="{bx:.1f}" y="{base_y + 14 * k:.1f}" '
+                    f'font-family="sans-serif" font-size="10" '
+                    f'font-weight="bold" fill="{DRIFT_ALARM_COLOUR}" '
+                    f'text-anchor="middle" '
+                    f'data-drift-alarm-label="{escape(str(beacon.id))}"'
+                    f"{verdict_attr}>"
+                    f'{escape(label)}</text>')
+            drift_annotation = "".join(lines)
         parts.append(
             f'<g data-beacon="{escape(str(beacon.id))}">'
             f'<rect x="{bx - 6:.1f}" y="{by - 6:.1f}" width="12" '
@@ -704,11 +825,14 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
 
     # Legend, bottom left under the ward.
     legend_y = MARGIN + ward_h + 34
-    if drift_state:
+    if drift_marks:
         # A drift label sits under a bottom-row beacon's diamond —
         # below the ward, where the legend starts — so the legend
-        # drops a line to clear it instead of printing over it.
-        legend_y += 14
+        # drops a line per label line to clear them instead of
+        # printing over them. One line per beacon in the single
+        # device case, as before.
+        legend_y += 14 * max(len(marks)
+                             for marks in drift_marks.values())
     parts.append(
         f'<text x="{MARGIN}" y="{legend_y}" font-family="sans-serif" '
         f'font-size="12" font-weight="bold">Legend</text>')
@@ -716,6 +840,14 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
         (BEACON_COLOUR, "beacon"),
         (TRACK_COLOUR, "track path (S start, E end)"),
     ]
+    if multi_device:
+        # One swatch per device, so the dots and trails can be
+        # told apart without reading the device attributes.
+        for (device, _device_rows), colour in zip(series,
+                                                  series_colours):
+            label = (f"{device} track" if device is not None
+                     else "unnamed device track")
+            legend_items.append((colour, label))
     if forecasts is not None:
         legend_items.append(
             (FORECAST_STATUS_COLOURS["degrading"], "beacon degrading"))
@@ -801,17 +933,41 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
         # The alarm state at the end of the track, in one line —
         # the same labels the badges carry, so the legend says
         # what the map marks even where the badges are small.
+        # With several devices the line names each device's
+        # alarms separately, so one tag's alarm never reads as
+        # another's.
         legend_y += 24
-        if drift_state:
-            alarm_text = ", ".join(
-                f"{beacon_id} {mean_db:+.1f} dB"
-                + (f" ({verdict})"
-                   if verdict is not None and verdict != "healthy"
-                   else "")
-                for beacon_id, (mean_db, verdict)
-                in drift_state.items())
+        if multi_device:
+            device_texts = []
+            for device, device_rows in series:
+                state = _drift_state(device_rows)
+                name = device if device is not None else "unnamed device"
+                if state:
+                    alarm_text = ", ".join(
+                        f"{beacon_id} {mean_db:+.1f} dB"
+                        + (f" ({verdict})"
+                           if verdict is not None
+                           and verdict != "healthy" else "")
+                        for beacon_id, (mean_db, verdict)
+                        in state.items())
+                    device_texts.append(f"{name}: {alarm_text}")
+                else:
+                    device_texts.append(f"{name}: none")
             drift_text = ("Drift alarms at end of track: "
-                          + alarm_text)
+                          + "; ".join(device_texts))
+        elif drift_marks:
+            # One mark per beacon in the single-device case — the
+            # same line the overlay always carried.
+            alarm_parts = []
+            for beacon_id, marks in drift_marks.items():
+                _device, mean_db, verdict = marks[0]
+                alarm_parts.append(
+                    f"{beacon_id} {mean_db:+.1f} dB"
+                    + (f" ({verdict})"
+                       if verdict is not None and verdict != "healthy"
+                       else ""))
+            drift_text = ("Drift alarms at end of track: "
+                          + ", ".join(alarm_parts))
         else:
             drift_text = "Drift alarms at end of track: none"
         parts.append(
