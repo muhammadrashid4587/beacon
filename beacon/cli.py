@@ -272,7 +272,8 @@ def main(argv=None) -> int:
                         "--battery-levels and --drain-rate")
     parser.add_argument("--map-drift", action="store_true",
                         help="mark the beacons alarming at the end of "
-                        "the track on the overlay or the replay: a "
+                        "the track on the overlay, or at each frame's "
+                        "row on the replay: a "
                         "red ! badge and the rolling mean residual "
                         "with the drift classification verdict — "
                         "needs --map-overlay")

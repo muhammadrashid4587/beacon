@@ -3557,7 +3557,7 @@ class TestDriftMapOverlay(unittest.TestCase):
                 replay = handle.read()
             self.assertIn('data-dot="true"', replay)
             self.assertNotIn("data-drift-alarm=", replay)
-            self.assertIn("Drift alarms at end of track: none", replay)
+            self.assertIn("Drift alarms during replay: none", replay)
 
 
 class TestLiveTrackReplay(unittest.TestCase):
@@ -3770,15 +3770,18 @@ class TestDriftTrackReplay(unittest.TestCase):
         svg = render_track_replay(self._alarming_rows(), BEACONS,
                                   drift=True)
         # Only A is badged; the other three beacons stay plain.
+        # A alarms on the last row only, so one frame carries it.
         self.assertEqual(svg.count('data-drift-alarm="'), 1)
         self.assertIn('data-drift-alarm="A"', svg)
+        self.assertIn('data-frame="1"', svg)
         self.assertIn(">!</text>", svg)
         self.assertIn('data-drift-verdict="uncertain"', svg)
         self.assertIn("ALARM +8.5 dB \u00b7 uncertain", svg)
-        # The summary line names the alarm state at the end.
-        self.assertIn("Drift alarms at end of track: "
-                      "A +8.5 dB (uncertain)", svg)
-        self.assertIn("drift alarm (red ! badge, end of track)", svg)
+        # The summary line names the alarm history: A alarmed on
+        # frame 1 only.
+        self.assertIn("Drift alarms during replay: "
+                      "A +8.5 dB (uncertain), frame 1", svg)
+        self.assertIn("drift alarm (red ! badge, per frame)", svg)
         # The replay still animates: the dot, the trail, both
         # frames' ellipses and timestamp labels.
         self.assertEqual(svg.count('data-dot="true"'), 1)
@@ -3786,9 +3789,10 @@ class TestDriftTrackReplay(unittest.TestCase):
         self.assertEqual(svg.count("<ellipse"), 2)
         self.assertEqual(svg.count("data-timestamp="), 2)
 
-    def test_only_the_last_rows_alarms_are_marked(self):
-        # A alarmed mid-track and cleared: the replay shows the
-        # end state, so nothing is marked.
+    def test_cleared_alarm_is_marked_on_its_frame_only(self):
+        # A alarmed mid-track and cleared: the replay badges it
+        # on the frame it was alarming and nowhere else — the
+        # end-of-track marking used to miss this alarm entirely.
         rows = [
             self._row(2.0, 2.0, 1.0, t=0.0,
                       alarms=[{"id": "A", "mean_residual_db": 8.5,
@@ -3798,16 +3802,76 @@ class TestDriftTrackReplay(unittest.TestCase):
             self._row(5.0, 5.0, 1.0, t=1.0),
         ]
         svg = render_track_replay(rows, BEACONS, drift=True)
-        self.assertNotIn("data-drift-alarm=", svg)
-        self.assertNotIn("ALARM", svg)
-        self.assertIn("Drift alarms at end of track: none", svg)
+        self.assertEqual(svg.count('data-drift-alarm="'), 1)
+        self.assertIn('data-drift-alarm="A"', svg)
+        self.assertIn('data-drift-alarm-frame="A"', svg)
+        self.assertIn("ALARM +8.5 dB \u00b7 uncertain", svg)
+        self.assertIn("Drift alarms during replay: "
+                      "A +8.5 dB (uncertain), frame 0", svg)
+        # The frame-0 marking is visible only while frame 0 is
+        # current: it carries a visibility animation, and the
+        # frame-1 ellipse carries one too, but no second alarm.
+        self.assertIn('data-frame="0"', svg)
+        self.assertNotIn('data-frame="1" data-drift-alarm-frame', svg)
+
+    def test_alarm_state_follows_each_frame(self):
+        # A alarms on frames 0 and 1, B only on frame 1, and
+        # neither on frame 2: each frame marks exactly the
+        # beacons alarming on its row, with that row's residual.
+        rows = [
+            self._row(2.0, 2.0, 1.0, t=0.0,
+                      alarms=[{"id": "A", "mean_residual_db": 8.5,
+                               "samples": 20}],
+                      classifications=[
+                          self._classification("A", "uncertain", 8.5)]),
+            self._row(5.0, 5.0, 1.0, t=1.0,
+                      alarms=[{"id": "A", "mean_residual_db": 9.0,
+                               "samples": 20},
+                              {"id": "B", "mean_residual_db": -6.9,
+                               "samples": 20}],
+                      classifications=[
+                          self._classification("A", "moved", 9.0),
+                          self._classification("B", "uncertain", -6.9)]),
+            self._row(8.0, 8.0, 1.0, t=2.0),
+        ]
+        svg = render_track_replay(rows, BEACONS, drift=True)
+        self.assertEqual(svg.count('data-drift-alarm="A"'), 2)
+        self.assertEqual(svg.count('data-drift-alarm="B"'), 1)
+        self.assertEqual(svg.count('data-drift-alarm="'), 3)
+        # Both of A's residuals ride on the replay, each on its
+        # own frame, with the verdict that frame's monitor gave.
+        self.assertIn("ALARM +8.5 dB \u00b7 uncertain", svg)
+        self.assertIn("ALARM +9.0 dB \u00b7 moved", svg)
+        self.assertIn("ALARM -6.9 dB \u00b7 uncertain", svg)
+        # The summary carries each beacon's frame range and the
+        # residual and verdict at its last alarming frame.
+        self.assertIn("Drift alarms during replay: "
+                      "A +9.0 dB (moved), frames 0–1, "
+                      "B -6.9 dB (uncertain), frame 1", svg)
+
+    def test_single_frame_track_marks_its_alarm_without_animation(self):
+        rows = [self._row(2.0, 2.0, 1.0, t=0.0,
+                          alarms=[{"id": "A",
+                                   "mean_residual_db": 8.5,
+                                   "samples": 20}],
+                          classifications=[
+                              self._classification("A", "uncertain",
+                                                   8.5)])]
+        svg = render_track_replay(rows, BEACONS, drift=True)
+        self.assertIn('data-drift-alarm="A"', svg)
+        self.assertIn("ALARM +8.5 dB \u00b7 uncertain", svg)
+        self.assertIn("Drift alarms during replay: "
+                      "A +8.5 dB (uncertain), frame 0", svg)
+        # A single frame has no animation at all: no element
+        # hides behind a visibility toggle.
+        self.assertNotIn('visibility="hidden"', svg)
 
     def test_no_alarms_marks_nothing(self):
         rows = [self._row(2.0, 2.0, 1.0, t=0.0),
                 self._row(5.0, 5.0, 1.0, t=1.0)]
         svg = render_track_replay(rows, BEACONS, drift=True)
         self.assertNotIn("data-drift-alarm=", svg)
-        self.assertIn("Drift alarms at end of track: none", svg)
+        self.assertIn("Drift alarms during replay: none", svg)
         # A track recorded without a monitor carries no drift
         # keys at all; that renders the same as no alarms.
         bare = [{key: value for key, value in row.items()
@@ -3820,7 +3884,7 @@ class TestDriftTrackReplay(unittest.TestCase):
         svg = render_track_replay(self._alarming_rows(), BEACONS)
         self.assertNotIn("data-drift-alarm=", svg)
         self.assertNotIn("ALARM", svg)
-        self.assertNotIn("Drift alarms at end of track:", svg)
+        self.assertNotIn("Drift alarms during replay:", svg)
 
     def test_alarm_without_classification_has_no_verdict(self):
         rows = [self._row(2.0, 2.0, 1.0, t=0.0),
@@ -3831,7 +3895,8 @@ class TestDriftTrackReplay(unittest.TestCase):
         svg = render_track_replay(rows, BEACONS, drift=True)
         self.assertIn("ALARM -6.9 dB", svg)
         self.assertNotIn("data-drift-verdict=", svg)
-        self.assertIn("Drift alarms at end of track: A -6.9 dB", svg)
+        self.assertIn("Drift alarms during replay: A -6.9 dB, frame 1",
+                      svg)
 
     def test_drift_marks_the_real_alarm_end_to_end(self):
         # A reads 12 dB too loud on a real walk, streamed through
@@ -3847,14 +3912,24 @@ class TestDriftTrackReplay(unittest.TestCase):
                      for i, step in enumerate(steps)]
         rows = track_rows(positions)
         svg = render_track_replay(rows, BEACONS, drift=True)
-        self.assertEqual(svg.count('data-drift-alarm="'), 1)
+        # Seed 7: A alarms on frames 4–39, and C flickers into
+        # alarm on frames 25–33 and clears — the per-frame
+        # marking catches the C flicker the end-of-track badge
+        # never showed.
+        self.assertEqual(svg.count('data-drift-alarm="A"'), 36)
+        self.assertEqual(svg.count('data-drift-alarm="C"'), 9)
+        self.assertEqual(svg.count('data-drift-alarm="'), 45)
         self.assertIn('data-drift-alarm="A"', svg)
+        self.assertIn('data-drift-alarm="C"', svg)
         # Seed 7: A alarms at +8.5 dB on 20 readings and the
         # monitor calls it uncertain — the same alarm and verdict
-        # the export carries, now on the replay.
+        # the export carries, now on the replay — and C's last
+        # alarming frame reads +5.1 dB, moved.
         self.assertIn("ALARM +8.5 dB \u00b7 uncertain", svg)
-        self.assertIn("Drift alarms at end of track: "
-                      "A +8.5 dB (uncertain)", svg)
+        self.assertIn("ALARM +5.1 dB \u00b7 moved", svg)
+        self.assertIn("Drift alarms during replay: "
+                      "A +8.5 dB (uncertain), frames 4–39, "
+                      "C +5.1 dB (moved), frames 25–33", svg)
 
     def test_drift_composes_with_heatmap(self):
         here = os.path.dirname(os.path.abspath(__file__))
@@ -3867,7 +3942,7 @@ class TestDriftTrackReplay(unittest.TestCase):
                                   drift=True)
         self.assertEqual(svg.count("data-heatmap-cell="), 60)
         self.assertIn("Coverage heatmap:", svg)
-        self.assertIn("Drift alarms at end of track: none", svg)
+        self.assertIn("Drift alarms during replay: none", svg)
         # And with a real alarm the badge rides on top of the
         # heatmap: both overlays compose.
         svg = render_track_replay(self._alarming_rows(), BEACONS,
@@ -3895,7 +3970,7 @@ class TestDriftTrackReplay(unittest.TestCase):
             # The example export was recorded without a monitor,
             # so nothing is marked — and the legend says so.
             self.assertNotIn("data-drift-alarm=", svg)
-            self.assertIn("Drift alarms at end of track: none", svg)
+            self.assertIn("Drift alarms during replay: none", svg)
 
     def test_replay_canvas_grows_with_the_legend(self):
         # The plain replay's "Replay:" line used to run past the

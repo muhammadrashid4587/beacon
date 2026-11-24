@@ -773,30 +773,34 @@ carries it as recorded.
 
 The static overlay shows which beacon was going bad when the
 walk ended; the replay shows it too, while the shift plays
-back. `render_track_replay(..., drift=True)` reads the same
-drift alarms and classifications off the track's last plotted
-row and marks every beacon still alarming with the same red
-ring and red "!" badge, plus the same label — its rolling mean
-residual in dB and the drift classification verdict when the
-monitor gave one, e.g. `ALARM +8.5 dB · uncertain` — and the
-legend carries the same summary line, `Drift alarms at end of
-track: A +8.5 dB (uncertain)`, or `none` when nothing alarms.
-The badge is static: it marks the alarm state at the end of
-the track, not the alarm history, so it stays put while the
-dot glides. The marking composes with the replay's coverage
-heatmap, and the legend drops a line so the alarm label under
-a bottom-row beacon never prints over it — and the replay's
-canvas now grows with its legend, so no legend line is ever
-clipped below it (the plain replay's own "Replay:" line
-already ran past the 560 px canvas before this change).
+back — frame by frame. `render_track_replay(..., drift=True)`
+reads the drift alarms and classifications off each plotted
+row and marks the beacons alarming on that row with the same
+red ring and red "!" badge, plus the same label — its rolling
+mean residual in dB and the drift classification verdict when
+the monitor gave one, e.g. `ALARM +8.5 dB · uncertain` — but
+the marking for a frame is visible only while that frame is
+current, so the badge animates with the replay: a beacon that
+alarmed mid-track and cleared is badged while it was alarming
+and unmarked once it cleared, and a beacon that only starts
+alarming late appears part-way through. The legend carries the
+alarm history in one line, e.g. `Drift alarms during replay: A
++8.5 dB (uncertain), frames 4–39`, with each beacon's frame
+range and the residual and verdict at its last alarming frame
+— or `none` when nothing alarms on any frame. The marking
+composes with the replay's coverage heatmap, and the legend
+drops a line so the alarm label under a bottom-row beacon
+never prints over it — and the replay's canvas now grows with
+its legend, so no legend line is ever clipped below it (the
+plain replay's own "Replay:" line already ran past the 560 px
+canvas before this change).
 
 ```sh
 python3 -m beacon.cli --map-overlay ward-a-track.json --map-output ward-a-track-replay.svg --map-replay --map-drift
 python3 -m beacon.cli --map-overlay ward-a-track.json --map-replay --map-drift --map-heatmap
 ```
 
-The same limits as the overlay apply: a beacon that alarmed
-mid-track and cleared is not marked, a track recorded
+The same limits as the overlay apply: a track recorded
 without a drift monitor marks nothing — an unmarked beacon
 means no alarm was recorded, not that the beacon is healthy —
 and the badge marks what the monitor recorded, not a
@@ -804,14 +808,26 @@ ground-truth diagnosis: the monitor's reference is the
 track's own estimate, so a beacon 8 dB too quiet can alarm
 on the wrong beacon, and the verdict on the label is the same
 hint the classifier gives, not a verdict on the hardware.
+What the per-frame marking adds over the end-of-track badge
+is the history: a beacon that alarmed and cleared is no
+longer invisible, so a flicker that the static overlay never
+showed now plays back as a badge that appears and disappears
+— and the frame range in the legend says exactly when.
 
 Measured behaviour: on the default ward walk with beacon A
-reading 12 dB too loud, the replay badges A only — `ALARM
-+8.5 dB · uncertain`, summary `A +8.5 dB (uncertain)` on seed
-7 — the same alarm and verdict the overlay carries, since
-both read the same last row. Seeds 1 and 3 badge A only too,
-at +8.4 dB and +8.0 dB, with the verdict the monitor gave
-(`moved` on seed 1, `uncertain` on seeds 3 and 7).
+reading 12 dB too loud, the replay badges A on frames 4–39
+— the first alarm is frame 4, as soon as the monitor has its
+5 readings, at +9.2 dB on seed 7 (+9.8 dB seed 1, +9.7 dB
+seed 3) — and the summary reads `A +8.5 dB (uncertain),
+frames 4–39` on seed 7 (+8.4 dB `moved` seed 1, +8.0 dB
+`uncertain` seed 3), the same final alarm and verdict the
+overlay carries, since both read the same last row. On seed 7
+the replay also badges C on frames 25–33, at +5.0 to +5.1 dB
+with verdict `moved` — the flicker the live track's own
+notes record ("C flickers into alarm briefly mid-walk and
+clears on its own") — which the end-of-track badge never
+showed, since C is quiet again by the last row. Seeds 1 and 3
+badge A only.
 
 ## Planner forecast flags on the live track
 
@@ -2335,6 +2351,28 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   same verdicts as the overlay. The same limits as the overlay
   apply: cleared alarms unmarked, no-monitor tracks mark
   nothing, and the badge marks what the monitor recorded, not
-  a ground-truth diagnosis. The roadmap grows as new needs
-  surface — the drift alarms on the replay are the latest
-  addition.
+  a ground-truth diagnosis.
+- Drift alarms animated per frame on the live-track replay —
+  done: `render_track_replay(..., drift=True)` now reads the
+  drift alarms and classifications off each plotted row
+  instead of the last row only, and marks the beacons alarming
+  on that row with the same red ring, red "!" badge and label
+  as the static overlay — one group per alarming frame,
+  visible only while that frame is current, so the badge
+  animates with the replay: a beacon that alarmed mid-track
+  and cleared is badged while it was alarming and unmarked
+  once it cleared, and the legend carries the alarm history
+  in one line, with each beacon's frame range and the residual
+  and verdict at its last alarming frame; `python -m
+  beacon.cli --map-overlay track.json --map-replay --map-drift`
+  renders it (v0.39.0); measured on the default ward walk with
+  beacon A reading 12 dB too loud: the replay badges A on
+  frames 4–39 — the first alarm is frame 4, at +9.2 dB on seed
+  7 — and on seed 7 it also badges C on frames 25–33 at +5.0
+  to +5.1 dB, the flicker the end-of-track badge never showed,
+  since C is quiet again by the last row; seeds 1 and 3 badge
+  A only. The same limits as the overlay apply: no-monitor
+  tracks mark nothing, and the badge marks what the monitor
+  recorded, not a ground-truth diagnosis. The roadmap grows as
+  new needs surface — the per-frame drift alarms on the replay
+  are the latest addition.

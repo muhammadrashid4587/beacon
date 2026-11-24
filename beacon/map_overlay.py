@@ -348,6 +348,24 @@ def planner_heatmap_summary(cells: list[PlannerCell]
         n_cells=len(cells))
 
 
+def _drift_state_at_row(row: dict
+                        ) -> dict[str, tuple[float, str | None]]:
+    """The drift alarms on one track row.
+
+    Returns beacon id -> (rolling mean residual in dB,
+    classification verdict or None). Rows carry the alarms and
+    classifications ``export_track_json`` / ``export_track_csv``
+    write; a track recorded without a monitor carries empty
+    lists, so nothing is marked — an unmarked beacon means no
+    alarm was recorded, not that the beacon is healthy.
+    """
+    verdicts = {c["id"]: c["verdict"]
+                for c in row.get("drift_classifications") or []}
+    return {alarm["id"]: (alarm["mean_residual_db"],
+                          verdicts.get(alarm["id"]))
+            for alarm in row.get("drift_alarms") or []}
+
+
 def _drift_state(floor_rows: list[dict]
                  ) -> dict[str, tuple[float, str | None]]:
     """The drift alarms on the track's last plotted row.
@@ -355,18 +373,9 @@ def _drift_state(floor_rows: list[dict]
     The overlay shows the alarm state at the end of the track, not
     every alarm that fired mid-track: a beacon that alarmed and
     cleared is not marked. Returns beacon id -> (rolling mean
-    residual in dB, classification verdict or None). Rows carry
-    the alarms and classifications ``export_track_json`` /
-    ``export_track_csv`` write; a track recorded without a monitor
-    carries empty lists, so nothing is marked — an unmarked beacon
-    means no alarm was recorded, not that the beacon is healthy.
+    residual in dB, classification verdict or None).
     """
-    last = floor_rows[-1]
-    verdicts = {c["id"]: c["verdict"]
-                for c in last.get("drift_classifications") or []}
-    return {alarm["id"]: (alarm["mean_residual_db"],
-                          verdicts.get(alarm["id"]))
-            for alarm in last.get("drift_alarms") or []}
+    return _drift_state_at_row(floor_rows[-1])
 
 
 def _drift_label(mean_residual_db: float, verdict: str | None) -> str:
