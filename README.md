@@ -822,6 +822,96 @@ A tag starting one hour after the first and running five more
 hours flags 8.3 h remaining while the second tag, four hours
 in, flags 9.3 h — the two clocks really are separate.
 
+## Drift flags on the live track
+
+The drift monitor watches the observation stream for a beacon
+going bad — but it needs a position to compare each beacon's
+RSSI against, and a live tracker has no ground truth: the only
+position it has is its own estimate. `LiveTracker` takes an
+optional `DriftMonitor` and feeds it each located step's fresh
+readings together with the live position just computed, so the
+position carries the beacons currently alarming — each with its
+rolling mean RSSI residual in dB and how many readings are in
+its window — plus a plain-language alert per alarming beacon:
+
+```python
+from beacon import Beacon, DriftMonitor, LiveTracker, PositioningEngine
+
+beacons = [Beacon("A", 0, 0), Beacon("B", 20, 0),
+           Beacon("C", 20, 12), Beacon("D", 0, 12)]
+tracker = LiveTracker(PositioningEngine(beacons),
+                      drift_monitor=DriftMonitor(beacons))
+live = tracker.feed({"A": -62.1, "B": -71.4, "C": -68.0, "D": -59.8}, t=0.0)
+# live.drift_alarms — () while every beacon matches its calibration
+# live.drift_alerts — () likewise
+```
+
+The monitor is only fed on steps that locate — a step too thin
+to produce a position has no reference to check against — and
+only with the beacons heard in that reading that sit on the
+track's current floor, since a beacon heard through a slab
+would read as drift. The alarms ride on a null line too, so a
+dashboard sees a beacon going bad even on a step that could
+not be located, and `reset()` clears the monitor along with the
+track, so a new device starts with a clean window. The alert
+states only what the alarm establishes — `A: RSSI +8.5 dB off
+calibration` — and the classification verdict is deliberately
+not in it: with the track's own estimate as the reference the
+verdict is a hint, not a diagnosis, so it stays available
+through `tracker.drift_classifications()` for inspection
+instead of riding on the position. The stream carries the
+flags with `--drift`, and `--drift-beacon A:12` (demo only)
+offsets one beacon's RSSI by that many dB for the whole demo
+walk, so the demo shows a beacon going bad mid-track:
+
+```sh
+python3 -m beacon.tracking --demo --drift
+python3 -m beacon.tracking --demo --drift --drift-beacon A:12
+python3 -m beacon.tracking --drift < readings.jsonl
+```
+
+The reference is the track's own estimate, not ground truth,
+so the monitor is a consistency check on the live track — each
+beacon checked against the position the consensus of the
+beacons produced — and the measured behaviour shows both sides
+of that. A beacon reading too loud is caught: it alarms on the
+right beacon, because the estimate is only pulled part-way
+towards it. A beacon reading too quiet is not: the quiet beacon
+drags the estimate with it, the distance inversion blows the
+track up, and the monitor blames a healthy beacon. A slow sag
+and a move never alarm at all through the live track — their
+residuals stay under the threshold against the dragged
+estimate — even though the same monitor fed a reference
+position classifies both. The reliable per-beacon verdict still
+comes from feeding the monitor a reference position (a
+reference tag at a known spot), as `DriftMonitor` documents;
+the live-track flags say the track is inconsistent and name
+the prime suspect, nothing more.
+
+Measured behaviour (simulator, 2 dB RSSI noise, default ward
+walk, seeds 1, 3, 7 — the alarms below are the final state
+after the 40-step walk):
+
+- Healthy walk: no alarms on any seed. Seed 11 classifies D
+  `noisy` with no alarm — a false verdict, not a false alarm.
+- A reading 12 dB too loud alarms on A from step 4 — as soon
+  as the monitor has its 5 readings — at a rolling mean of
+  +8.0 to +8.5 dB, attenuated from +12 dB because the estimate
+  is pulled towards the loud beacon, and only A alarms at the
+  end of the walk. On seed 7 C flickers into alarm briefly
+  mid-walk and clears on its own.
+- A reading 6 dB too loud never alarms at the end of the walk:
+  the pull attenuates the mean below the 5 dB threshold (on
+  seed 1 it flickers into alarm for a step, then clears).
+- C reading 8 dB too quiet — the battery-sag direction —
+  alarms on D, not on C, at +5.3 to +7.6 dB, while B flickers
+  into alarm early on and clears. The track's mean error in
+  that scenario is 11–59 m, so the track is already broken by
+  the time the alarm fires.
+- A beacon draining at 0.3 per hour over two loops never
+  alarms and classifies `noisy`, not `battery-sag`. A beacon
+  moved 7 m never alarms either, and classifies `noisy`.
+
 ## Trajectory smoothing
 
 The live filter is causal: each estimate only uses the observations
@@ -1928,3 +2018,25 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   and CSV exports load back to identical rows. The roadmap
   grows as new needs surface — the exported forecast flags are
   the latest addition.
+- Drift flags on the live track — done: `LiveTracker` takes an
+  optional `DriftMonitor` and feeds it each located step's
+  fresh readings together with the live position just computed,
+  so every live position carries the beacons currently alarming
+  — each with its rolling mean RSSI residual in dB and how many
+  readings are in its window — plus a plain-language alert per
+  alarming beacon (`A: RSSI +8.5 dB off calibration`); the
+  alarms ride on null lines too, only the beacons on the
+  track's current floor are fed to the monitor, `reset()`
+  clears the monitor with the track, and `python -m
+  beacon.tracking --drift` attaches the monitor to the stream,
+  with `--drift-beacon A:12` (demo only) offsetting one
+  beacon's RSSI so the demo shows a beacon going bad (v0.33.0);
+  measured on the default ward walk, seeds 1, 3, 7: a beacon
+  12 dB too loud alarms on the right beacon from step 4 at +8.0
+  to +8.5 dB, a beacon 6 dB too loud never alarms, and a beacon
+  8 dB too quiet alarms on the wrong beacon — the
+  self-referenced monitor is a consistency check on the track,
+  not a diagnosis, and the reliable verdict still comes from
+  feeding the monitor a reference position. The roadmap grows
+  as new needs surface — the live-track drift flags are the
+  latest addition.

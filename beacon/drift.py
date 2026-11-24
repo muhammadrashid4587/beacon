@@ -198,6 +198,14 @@ class DriftAlarm:
     mean_residual_db: float
     samples: int
 
+    def to_dict(self) -> dict:
+        """JSON-friendly form, for the stream output and dashboards."""
+        return {
+            "id": self.id,
+            "mean_residual_db": self.mean_residual_db,
+            "samples": self.samples,
+        }
+
 
 @dataclass(frozen=True)
 class DriftClassification:
@@ -319,6 +327,16 @@ class DriftMonitor:
     def feed(self, step: dict) -> None:
         """Feed one simulator step: ``{"true": (x, y), "rssi": {...}}``."""
         self.observe(step["true"], step["rssi"])
+
+    def reset(self) -> None:
+        """Forget every reading — the rolling windows, the revisit
+        history, and the sequence — so a new device starts with a
+        clean monitor, as a new ``LiveTracker`` would."""
+        for observations in self._observations.values():
+            observations.clear()
+        for history in self._history.values():
+            history.clear()
+        self._seq = 0
 
     def status(self, beacon_id: str) -> DriftAlarm | None:
         """The rolling residual for one beacon, or ``None`` if unheard."""

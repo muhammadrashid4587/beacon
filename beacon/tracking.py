@@ -37,6 +37,16 @@ observation stream into a live track:
   beacon whose milestone falls inside the forecast window (24
   hours by default), so the track warns about a beacon about to
   start lying before it does.
+- With a ``DriftMonitor`` attached, each live position also
+  carries the monitor's drift alarms — the beacons whose rolling
+  mean RSSI residual, measured against the track's own live
+  estimate, has crossed the 5 dB threshold — and a plain-language
+  alert per alarming beacon, so a beacon going bad mid-shift is
+  caught while the ward is running. The reference is the track's
+  own estimate, not ground truth, so the alarm names the beacon
+  that disagrees with the consensus of the others; a beacon
+  reading too quiet can drag the estimate with it and alarm on
+  the wrong beacon — see the README for the measured limits.
 
 The stream format is JSON lines, one reading per line — the same
 shape a BLE scanner would emit, and easy to pipe from anything:
@@ -60,6 +70,7 @@ from dataclasses import dataclass
 from .battery import BatteryModel
 from .beacon import Beacon
 from .deployment import DeploymentPlan, plan_deployment
+from .drift import DriftAlarm, DriftClassification, DriftMonitor
 from .engine import PositioningEngine
 from .schedule import (REASON_DARK, REASON_LOSS, REASON_NEVER, REASON_NOISE)
 from .simulate import rectangular_walk, simulate_walk
@@ -218,6 +229,27 @@ def forecast_alerts(flags: tuple[ForecastFlag, ...],
     return tuple(alerts)
 
 
+def drift_alerts(alarms: tuple[DriftAlarm, ...]) -> tuple[str, ...]:
+    """The plain-language warnings for beacons currently alarming.
+
+    One line per alarm — ``"A: RSSI +8.5 dB off calibration"`` —
+    stating only what the alarm establishes (the rolling mean
+    residual over the monitor's window). The drift classification
+    (battery-sag, moved, noisy) is deliberately not in the alert:
+    with the track's own estimate as the reference the verdict is
+    a hint, not a diagnosis — a beacon reading too loud can read
+    as moved, and a healthy beacon can inherit a verdict from a
+    neighbour dragging the estimate — so the alert names the
+    suspect and the size of the disagreement, and the
+    classification is left to ``DriftMonitor.classify`` for
+    inspection.
+    """
+    return tuple(
+        f"{alarm.id}: RSSI {alarm.mean_residual_db:+.1f} dB off "
+        f"calibration"
+        for alarm in alarms)
+
+
 @dataclass(frozen=True)
 class LivePosition:
     """One live position estimate, emitted per reading.
@@ -242,7 +274,13 @@ class LivePosition:
     ``forecast_alerts`` the plain-language warnings for the
     beacons whose milestone falls inside the forecast window;
     both are empty when the tracker has no plan, so a track
-    without a planner is unaffected.
+    without a planner is unaffected. ``drift_alarms`` is the
+    beacons currently alarming on the drift monitor the tracker
+    was given — each with its rolling mean RSSI residual in dB
+    and how many readings are in its window — and
+    ``drift_alerts`` the plain-language warning per alarming
+    beacon; both are empty when the tracker has no monitor, so a
+    track without drift monitoring is unaffected.
     """
 
     t: float
@@ -256,6 +294,8 @@ class LivePosition:
     battery: tuple[tuple[str, float], ...] = ()
     forecasts: tuple[ForecastFlag, ...] = ()
     forecast_alerts: tuple[str, ...] = ()
+    drift_alarms: tuple[DriftAlarm, ...] = ()
+    drift_alerts: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         """JSON-friendly form, for the stream output and dashboards."""
@@ -277,6 +317,9 @@ class LivePosition:
                         for beacon_id, level in self.battery},
             "forecasts": [flag.to_dict() for flag in self.forecasts],
             "forecast_alerts": list(self.forecast_alerts),
+            "drift_alarms": [alarm.to_dict()
+                             for alarm in self.drift_alarms],
+            "drift_alerts": list(self.drift_alerts),
         }
 
 
@@ -308,6 +351,22 @@ class LiveTracker:
     a beacon about to start lying before it does. The plan is
     taken as made at the first reading's timestamp, so the
     horizons shrink as the track runs.
+    ``drift_monitor`` is an optional ``DriftMonitor`` (built from
+    the same beacons as the engine): when one is given, every
+    located step feeds it the step's fresh readings together with
+    the live position just computed, and the position carries the
+    beacons currently alarming plus a plain-language alert per
+    alarming beacon. The reference is the track's own estimate,
+    not ground truth — each beacon is checked against the position
+    the consensus of the beacons produced — so a beacon reading
+    too loud alarms on the right beacon, while a beacon reading
+    too quiet drags the estimate with it and can alarm on the
+    wrong one; the monitor is a consistency check on the live
+    track, and the reliable per-beacon verdict still comes from
+    feeding it a reference position (a reference tag at a known
+    spot) directly. Only the beacons on the track's current floor
+    are fed to the monitor, since a beacon heard through a slab
+    would read as drift.
     """
 
     def __init__(self, engine: PositioningEngine,
@@ -317,7 +376,8 @@ class LiveTracker:
                  sigma_rssi_db: float = DEFAULT_SIGMA_RSSI_DB,
                  plan: DeploymentPlan | None = None,
                  forecast_window_hours: float
-                 = DEFAULT_FORECAST_WINDOW_HOURS):
+                 = DEFAULT_FORECAST_WINDOW_HOURS,
+                 drift_monitor: DriftMonitor | None = None):
         if stale_after <= 0:
             raise ValueError("stale_after must be positive")
         if dark_after <= 0:
@@ -340,6 +400,7 @@ class LiveTracker:
         self._sigma_rssi_db = sigma_rssi_db
         self._plan = plan
         self._forecast_window_hours = forecast_window_hours
+        self._drift_monitor = drift_monitor
         # Timestamp of the first reading, when the plan is taken as
         # made — the forecast horizons count down from here.
         self._plan_t0: float | None = None
@@ -479,6 +540,40 @@ class LiveTracker:
         return forecast_alerts(self.forecasts,
                                self._forecast_window_hours)
 
+    @property
+    def drift_monitor(self) -> DriftMonitor | None:
+        """The drift monitor attached to this tracker, or None."""
+        return self._drift_monitor
+
+    @property
+    def drift_alarms(self) -> tuple[DriftAlarm, ...]:
+        """The beacons currently alarming on the drift monitor, in
+        beacon order. Empty before the first located reading, or
+        when the tracker has no monitor."""
+        if self._drift_monitor is None:
+            return ()
+        return tuple(self._drift_monitor.alarms())
+
+    @property
+    def drift_alerts(self) -> tuple[str, ...]:
+        """The plain-language warnings for the beacons currently
+        alarming on the drift monitor. Empty when nothing alarms,
+        or when the tracker has no monitor."""
+        return drift_alerts(self.drift_alarms)
+
+    def drift_classifications(self) -> tuple[DriftClassification, ...]:
+        """Every beacon's drift classification from the attached
+        monitor, in beacon order — the verdict (healthy,
+        battery-sag, moved, noisy, uncertain) with the evidence
+        behind it. Empty when the tracker has no monitor. The
+        verdicts are a hint, not a diagnosis: with the track's own
+        estimate as the reference, a beacon reading too loud can
+        read as moved and a healthy beacon can inherit a verdict
+        from a neighbour dragging the estimate."""
+        if self._drift_monitor is None:
+            return ()
+        return tuple(self._drift_monitor.classifications())
+
     def feed(self, rssi: dict[str, float], t: float,
              battery: dict[str, float] | None = None) -> LivePosition | None:
         """Feed one reading and return the live position it gives.
@@ -497,7 +592,12 @@ class LiveTracker:
         given a deployment plan, the position also carries one
         forecast flag per beacon — the soonest milestone with its
         hours remaining — and an alert for every beacon whose
-        milestone falls inside the forecast window.
+        milestone falls inside the forecast window. When the
+        tracker was given a drift monitor, the position also
+        carries the beacons currently alarming on it — each
+        beacon's rolling mean RSSI residual measured against the
+        live position just computed — with a plain-language alert
+        per alarming beacon.
 
         Returns the live position, or None when fewer than three
         fresh beacons remain — trilateration needs three, and a
@@ -555,6 +655,7 @@ class LiveTracker:
             # valid, it just has no ellipse this step.
             uncertainty = None
         forecasts = self._forecasts_at(t)
+        alarms = self._drift_alarms_at(position, heard_now, rssi)
         live = LivePosition(
             t=t, x=position.x, y=position.y, floor=position.floor,
             floor_confidence=position.floor_confidence,
@@ -563,9 +664,34 @@ class LiveTracker:
             battery=tuple(sorted(self._battery.items())),
             forecasts=forecasts,
             forecast_alerts=forecast_alerts(
-                forecasts, self._forecast_window_hours))
+                forecasts, self._forecast_window_hours),
+            drift_alarms=alarms,
+            drift_alerts=drift_alerts(alarms))
         self._last = live
         return live
+
+    def _drift_alarms_at(self, position, heard_now: set[str],
+                         rssi: dict[str, float]
+                         ) -> tuple[DriftAlarm, ...]:
+        """Feed this step to the drift monitor and return the
+        beacons alarming now. Empty when the tracker has no
+        monitor.
+
+        The monitor gets the live position just computed and the
+        beacons heard in this reading that sit on the track's
+        current floor — a beacon heard through a slab reads as
+        drift, so cross-floor beacons stay out. A step too thin
+        to locate never reaches here, so the monitor is only fed
+        positions the tracker actually produced.
+        """
+        if self._drift_monitor is None:
+            return ()
+        self._drift_monitor.observe(
+            (position.x, position.y),
+            {beacon_id: rssi[beacon_id] for beacon_id in heard_now
+             if self.engine.beacons[beacon_id].floor
+             == position.floor})
+        return tuple(self._drift_monitor.alarms())
 
     def reset(self) -> None:
         """Forget the track (e.g. when tracking a new device)."""
@@ -576,6 +702,8 @@ class LiveTracker:
         self._last_t = None
         self._last = None
         self._plan_t0 = None
+        if self._drift_monitor is not None:
+            self._drift_monitor.reset()
         self.engine.reset()
 
 
@@ -700,7 +828,9 @@ def format_output(t: float, position: LivePosition | None,
                   heard: tuple[str, ...],
                   excluded: tuple[ExcludedBeacon, ...] = (),
                   forecasts: tuple[ForecastFlag, ...] = (),
-                  forecast_alerts: tuple[str, ...] = ()) -> dict:
+                  forecast_alerts: tuple[str, ...] = (),
+                  drift_alarms: tuple[DriftAlarm, ...] = (),
+                  drift_alerts: tuple[str, ...] = ()) -> dict:
     """One output line per input line: the live position, or null
     when the reading was too thin to locate, with the fresh beacons
     listed either way so a dashboard can see the track starving —
@@ -710,6 +840,9 @@ def format_output(t: float, position: LivePosition | None,
     still carries the forecast flags and alerts, so a dashboard
     sees a beacon about to go dark even on a step that could not
     be located; a located position carries them in its own dict.
+    The same holds for the drift monitor: a null line still
+    carries the beacons currently alarming, so a dashboard sees a
+    beacon going bad even on a step that could not be located.
     """
     if position is None:
         line = {"t": t, "position": None, "heard": list(heard),
@@ -717,6 +850,10 @@ def format_output(t: float, position: LivePosition | None,
         if forecasts:
             line["forecasts"] = [flag.to_dict() for flag in forecasts]
             line["forecast_alerts"] = list(forecast_alerts)
+        if drift_alarms:
+            line["drift_alarms"] = [alarm.to_dict()
+                                    for alarm in drift_alarms]
+            line["drift_alerts"] = list(drift_alerts)
         return line
     return {"t": t, "position": position.to_dict(),
             "heard": list(heard)}
@@ -738,7 +875,10 @@ def run_demo(stale_after: float, dark_after: float,
              battery_drain_per_hour: float = 0.0,
              plan: DeploymentPlan | None = None,
              forecast_window_hours: float
-             = DEFAULT_FORECAST_WINDOW_HOURS) -> list[LivePosition | None]:
+             = DEFAULT_FORECAST_WINDOW_HOURS,
+             drift_monitor: DriftMonitor | None = None,
+             drift_beacon: tuple[str, float] | None = None
+             ) -> list[LivePosition | None]:
     """Feed a simulated ward walk through the tracker at 1 Hz and
     print one JSON line per step — the mode with no scanner needed.
     With ``battery_drain_per_hour`` above zero, beacon D drains
@@ -747,8 +887,12 @@ def run_demo(stale_after: float, dark_after: float,
     rides on each live position. With ``plan`` given, each live
     position also carries the plan's forecast flags per beacon,
     with an alert for every beacon whose soonest milestone falls
-    inside ``forecast_window_hours``. Returns the recorded track,
-    so the caller can export it."""
+    inside ``forecast_window_hours``. With ``drift_monitor``
+    given, each live position also carries the beacons currently
+    alarming on it; ``drift_beacon`` is a ``(id, dB)`` pair that
+    offsets one beacon's RSSI by that many dB for the whole demo
+    walk, so the demo can show a beacon going bad mid-track.
+    Returns the recorded track, so the caller can export it."""
     beacons = default_beacons()
     batteries = None
     if battery_drain_per_hour > 0:
@@ -756,13 +900,19 @@ def run_demo(stale_after: float, dark_after: float,
             drain_rate_per_hour=battery_drain_per_hour)}
     steps = simulate_walk(rectangular_walk(20.0, 12.0, 10), beacons,
                           noise_db=2.0, seed=7, batteries=batteries)
+    if drift_beacon is not None:
+        beacon_id, offset_db = drift_beacon
+        for step in steps:
+            if beacon_id in step["rssi"]:
+                step["rssi"][beacon_id] += offset_db
     tracker = LiveTracker(PositioningEngine(beacons),
                           stale_after=stale_after,
                           dark_after=dark_after,
                           readmit_after=readmit_after,
                           sigma_rssi_db=sigma_rssi_db,
                           plan=plan,
-                          forecast_window_hours=forecast_window_hours)
+                          forecast_window_hours=forecast_window_hours,
+                          drift_monitor=drift_monitor)
     positions: list[LivePosition | None] = []
     for i, step in enumerate(steps):
         t = float(i)
@@ -772,7 +922,9 @@ def run_demo(stale_after: float, dark_after: float,
         print(json.dumps(format_output(t, position, tracker.heard,
                                        tracker.excluded,
                                        tracker.forecasts,
-                                       tracker.forecast_alerts)),
+                                       tracker.forecast_alerts,
+                                       tracker.drift_alarms,
+                                       tracker.drift_alerts)),
               file=output_stream)
     return positions
 
@@ -824,6 +976,11 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
     whose soonest milestone falls inside
     ``--forecast-window-hours``; ``--drain-rate`` and
     ``--battery-levels`` build that plan for the default ward.
+    ``--drift`` attaches a drift monitor to the tracker, so each
+    live position carries the beacons currently alarming on
+    drift, with an alert per alarming beacon; ``--drift-beacon``
+    (demo only) offsets one beacon's RSSI so the demo shows a
+    beacon going bad mid-track.
     ``--export-json`` / ``--export-csv`` save the recorded track
     (one row per located position) to a file a ward dashboard can
     consume, in either mode. ``input_stream`` / ``output_stream``
@@ -862,6 +1019,15 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                         help="attach the deployment plan to the tracker, "
                         "so each live position carries the planner's "
                         "forecast flags per beacon")
+    parser.add_argument("--drift", action="store_true",
+                        help="attach a drift monitor to the tracker, "
+                        "so each live position carries the beacons "
+                        "currently alarming on drift")
+    parser.add_argument("--drift-beacon", default=None, metavar="SPEC",
+                        help="demo only: offset one beacon's RSSI by "
+                        "this many dB for the whole demo walk, "
+                        "e.g. A:12 — so the demo shows a beacon "
+                        "going bad mid-track (needs --drift)")
     parser.add_argument("--forecast-window-hours", type=float,
                         default=DEFAULT_FORECAST_WINDOW_HOURS,
                         help="hours ahead a forecast milestone must fall "
@@ -905,6 +1071,21 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 2
+    drift_monitor = None
+    drift_beacon = None
+    if args.drift:
+        drift_monitor = DriftMonitor(default_beacons())
+    if args.drift_beacon is not None:
+        if not args.drift:
+            parser.error("--drift-beacon needs --drift")
+        try:
+            beacon_id, offset_text = args.drift_beacon.split(":", 1)
+            offset_db = float(offset_text)
+        except ValueError:
+            parser.error("--drift-beacon takes ID:DB, e.g. A:12")
+        if beacon_id not in {b.id for b in default_beacons()}:
+            parser.error(f"unknown beacon: {beacon_id!r}")
+        drift_beacon = (beacon_id, offset_db)
 
     if args.demo:
         positions = run_demo(args.stale_after, args.dark_after,
@@ -914,7 +1095,9 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                              =args.battery_drain_per_hour,
                              plan=plan,
                              forecast_window_hours
-                             =args.forecast_window_hours)
+                             =args.forecast_window_hours,
+                             drift_monitor=drift_monitor,
+                             drift_beacon=drift_beacon)
         _export_track(positions, args.export_json, args.export_csv)
         return 0
 
@@ -925,7 +1108,8 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                           sigma_rssi_db=args.sigma_rssi,
                           plan=plan,
                           forecast_window_hours
-                          =args.forecast_window_hours)
+                          =args.forecast_window_hours,
+                          drift_monitor=drift_monitor)
     source = input_stream if input_stream is not None else sys.stdin
     sink = output_stream if output_stream is not None else sys.stdout
     positions = []
@@ -938,7 +1122,9 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
         print(json.dumps(format_output(t, position, tracker.heard,
                                        tracker.excluded,
                                        tracker.forecasts,
-                                       tracker.forecast_alerts)),
+                                       tracker.forecast_alerts,
+                                       tracker.drift_alarms,
+                                       tracker.drift_alerts)),
               file=sink)
     _export_track(positions, args.export_json, args.export_csv)
     return 0
