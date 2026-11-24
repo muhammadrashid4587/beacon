@@ -68,7 +68,9 @@ from .tracking import (DEFAULT_DARK_AFTER_S, DEFAULT_FORECAST_WINDOW_HOURS,
                        DEFAULT_READMIT_AFTER, DEFAULT_SIGMA_RSSI_DB,
                        DEFAULT_STALE_AFTER_S, ExcludedBeacon, LivePosition,
                        LiveTracker, _deployment_plan,
-                       evaluate_multi_device_track, format_multi_device_report,
+                       evaluate_multi_device_track,
+                       evaluate_smoothed_multi_device_track,
+                       format_multi_device_report,
                        format_output, parse_line)
 
 # The default ward walk, walked in reverse, so the demo's second
@@ -498,8 +500,16 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
     overall line over every device's located steps pooled
     together, in the same fields as the single-device demo
     summary — and ``--evaluate-json PATH`` writes the same
-    report as JSON. A stream has no ground truth to score
-    against, so both flags need ``--demo``.
+    report as JSON. ``--evaluate-smoothed`` scores the same
+    walks again after smoothing each device's track
+    (Rauch-Tung-Striebel, the same smoothing the smoothed
+    export and the overlay/replay's smoothed trails use) and
+    prints that report under a "Smoothed track" heading, and
+    ``--evaluate-smoothed-json PATH`` writes it as JSON with a
+    ``smoothed`` flag and the smoothing method — so the
+    improvement the map shows is the improvement the report
+    measures, from the same scoring. A stream has no ground
+    truth to score against, so all four flags need ``--demo``.
     ``input_stream`` / ``output_stream`` exist so tests can drive
     the stream without touching sys.stdin / sys.stdout.
     """
@@ -586,6 +596,18 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
     parser.add_argument("--evaluate-json", default=None, metavar="PATH",
                         help="demo only: write the multi-device track "
                         "accuracy report as JSON to PATH")
+    parser.add_argument("--evaluate-smoothed", action="store_true",
+                        help="demo only: score the two demo walks again "
+                        "after smoothing each device's track "
+                        "(Rauch-Tung-Striebel) and print that report "
+                        "under a 'Smoothed track' heading — the same "
+                        "scoring as --evaluate, over the smoothed "
+                        "positions the overlay and the replay draw")
+    parser.add_argument("--evaluate-smoothed-json", default=None,
+                        metavar="PATH",
+                        help="demo only: write the smoothed-track "
+                        "accuracy report as JSON to PATH, with a "
+                        "smoothed flag and the smoothing method")
     args = parser.parse_args(argv)
     if args.stale_after <= 0:
         parser.error("--stale-after must be positive")
@@ -607,6 +629,12 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
     if args.evaluate_json is not None and not args.demo:
         parser.error("--evaluate-json needs --demo: a stream has "
                      "no ground truth to score against")
+    if args.evaluate_smoothed and not args.demo:
+        parser.error("--evaluate-smoothed needs --demo: a stream "
+                     "has no ground truth to score against")
+    if args.evaluate_smoothed_json is not None and not args.demo:
+        parser.error("--evaluate-smoothed-json needs --demo: a "
+                     "stream has no ground truth to score against")
     plan = None
     if args.forecast:
         try:
@@ -641,7 +669,9 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                                  drift_monitor=drift_monitor)
     sink = output_stream if output_stream is not None else sys.stdout
     if args.demo:
-        want_report = args.evaluate or args.evaluate_json is not None
+        want_report = (args.evaluate or args.evaluate_json is not None
+                       or args.evaluate_smoothed
+                       or args.evaluate_smoothed_json is not None)
         if want_report:
             tracker, truths = run_demo(
                 args.stale_after, args.dark_after,
@@ -651,16 +681,35 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                 drift_monitor=drift_monitor,
                 drift_beacon=drift_beacon,
                 return_truths=True)
-            report = evaluate_multi_device_track(tracker.tracks(),
-                                                 truths)
-            if args.evaluate:
-                print(file=sink)
-                print(format_multi_device_report(report), file=sink)
-            if args.evaluate_json is not None:
-                with open(args.evaluate_json, "w",
-                          encoding="utf-8") as handle:
-                    json.dump(report.to_dict(), handle, indent=2)
-                    handle.write("\n")
+            if args.evaluate or args.evaluate_json is not None:
+                report = evaluate_multi_device_track(tracker.tracks(),
+                                                     truths)
+                if args.evaluate:
+                    print(file=sink)
+                    print(format_multi_device_report(report), file=sink)
+                if args.evaluate_json is not None:
+                    with open(args.evaluate_json, "w",
+                              encoding="utf-8") as handle:
+                        json.dump(report.to_dict(), handle, indent=2)
+                        handle.write("\n")
+            if (args.evaluate_smoothed
+                    or args.evaluate_smoothed_json is not None):
+                smoothed_report = evaluate_smoothed_multi_device_track(
+                    tracker.tracks(), truths)
+                if args.evaluate_smoothed:
+                    print(file=sink)
+                    print("Smoothed track (Rauch-Tung-Striebel):",
+                          file=sink)
+                    print(format_multi_device_report(smoothed_report),
+                          file=sink)
+                if args.evaluate_smoothed_json is not None:
+                    smoothed_dict = smoothed_report.to_dict()
+                    smoothed_dict["smoothed"] = True
+                    smoothed_dict["smoothing_method"] = "rts"
+                    with open(args.evaluate_smoothed_json, "w",
+                              encoding="utf-8") as handle:
+                        json.dump(smoothed_dict, handle, indent=2)
+                        handle.write("\n")
         else:
             tracker = run_demo(args.stale_after, args.dark_after,
                                args.readmit_after, args.sigma_rssi, sink,

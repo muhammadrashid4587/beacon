@@ -2791,7 +2791,10 @@ rejected instead of reporting zeroes. The evaluation scores
 the tracks the tracker actually recorded — including any
 `--drift-beacon` offset on tag-1's walk, so the report shows
 the drifted device's error growing while the other tag stays
-put.
+put. `--evaluate-smoothed` / `--evaluate-smoothed-json PATH`
+score the same walks again after smoothing each device's
+track, in the same report shape — see "Smoothed-track
+accuracy report" below.
 
 Measured behaviour (v0.47.0): the healthy demo prints tag-1
 at mean 2.16 m, median 2.08 m, 90th percentile 4.14 m, worst
@@ -2938,3 +2941,58 @@ map shows is the improvement the export measured, not a
 second opinion.
 The roadmap grows as new needs surface — the smoothed-track
 rendering on the overlay and the replay is the latest addition.
+
+## Smoothed-track accuracy report
+
+The overlay and the replay draw the smoothed track, and the
+export measures it — but until now nothing scored it the way
+the raw track is scored, so the improvement the map showed
+had no report of its own. `evaluate_smoothed_multi_device_track`
+scores every device's recorded track against its own ground
+truth after smoothing, in the same report shape as
+`evaluate_multi_device_track`: one `TrackReport` per device
+plus the overall report over every device's located steps
+pooled together — mean, median, 90th percentile and worst
+error, plus coverage, and floor accuracy when the truth
+carries floors — so the smoothed and raw reports read the
+same way and a ward can compare them line for line. The
+smoothing is the same `smooth_track_rows` the smoothed export
+uses — each device's located steps re-run through the
+Rauch-Tung-Striebel smoother (or the moving-average opt-out,
+`method="moving_average"`, the same opt-out the engine
+offers) and written back onto the track's located steps in
+order — so the report scores exactly the positions the
+overlay and the replay draw from the smoothed export, and the
+scoring is the shared `evaluate_multi_device_track` itself,
+so the raw and smoothed reports cannot disagree about what
+counts as an error. A step too thin to locate stays
+unlocated, so the coverage is the raw track's and the smoothed
+report never claims a step the tracker never located. The CLI
+scores the demo walks the same way, alongside the raw report:
+
+```sh
+python3 -m beacon.multi_device --demo --evaluate --evaluate-smoothed
+python3 -m beacon.multi_device --demo --evaluate-smoothed-json smoothed-report.json
+```
+
+`--evaluate-smoothed` prints the smoothed report under a
+"Smoothed track (Rauch-Tung-Striebel):" heading after the raw
+one, and `--evaluate-smoothed-json PATH` writes it as JSON
+with a `smoothed` flag and the smoothing method, so the
+verdict is available from the command line instead of only in
+code. Both need `--demo`, like `--evaluate`: a stream has no
+ground truth to score against.
+
+Measured behaviour (v0.50.0): on the two-device demo walk
+the smoothed report cuts tag-1's mean error from 2.16 m to
+1.45 m (median 1.20 m, p90 3.10 m, worst 3.90 m) and tag-2's
+from 1.72 m to 1.04 m (median 0.91 m, p90 1.84 m, worst
+2.56 m) — overall 1.94 m to 1.25 m (median 1.05 m, p90
+2.53 m, worst 3.90 m) over the 80 located steps — the same
+numbers the smoothed export and the rendered trails measured,
+so the report, the export and the map now all agree. The
+moving-average opt-out on the same walk measures 2.74 m
+against the raw 1.94 m — worse than doing nothing, which is
+why it stays the opt-out.
+The roadmap grows as new needs surface — the smoothed-track
+accuracy report is the latest addition.

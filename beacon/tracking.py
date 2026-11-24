@@ -65,7 +65,7 @@ import json
 import math
 import statistics
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .battery import BatteryModel
 from .beacon import Beacon
@@ -890,6 +890,68 @@ def evaluate_multi_device_track(
                                   total_located, total_floors_right,
                                   all_have_floor)
     return MultiDeviceTrackReport(by_device=by_device, overall=overall)
+
+
+def evaluate_smoothed_multi_device_track(
+        tracks: dict[str, list[LivePosition | None]],
+        truths: dict[str, list[tuple[float, float]
+                            | tuple[float, float, int]]],
+        method: str = "rts", window: int = 5
+        ) -> MultiDeviceTrackReport:
+    """Score every device's recorded track against its own truth,
+    after smoothing.
+
+    The same report shape as :func:`evaluate_multi_device_track`
+    — one :class:`TrackReport` per device plus the overall report
+    over every device's located steps pooled together — but over
+    the smoothed positions, so a ward can see what the smoothed
+    track the overlay and the replay draw is actually worth
+    against the raw track's report. Each device's located steps
+    are re-run through the smoother (Rauch-Tung-Striebel by
+    default, ``"moving_average"`` as the same opt-out the engine
+    offers) and scored against that device's own ground truth;
+    a step too thin to locate stays unlocated, so the coverage
+    is the raw track's and the smoothed report never claims a
+    step the tracker never located.
+
+    The smoothing is the same :func:`beacon.export.smooth_track_rows`
+    the smoothed export uses — the track's rows are smoothed and
+    written back onto the track's located steps in order, with
+    everything but the (x, y) untouched — so the report scores
+    exactly the positions the overlay and the replay draw from
+    the smoothed export, and the scoring itself is the shared
+    :func:`evaluate_multi_device_track`, so the raw and smoothed
+    reports cannot disagree about what counts as an error. The
+    import is local because ``beacon.export`` imports this module
+    for ``LivePosition``; a top-level import would be circular.
+
+    Raises ValueError on the same inputs the raw scorer rejects
+    — an empty set of tracks, tracks and truths naming different
+    devices, or a device with nothing located — and on an unknown
+    smoothing method, from the smoother.
+    """
+    from .export import smooth_track_rows, track_rows
+    smoothed_tracks: dict[str, list[LivePosition | None]] = {}
+    for device_id, positions in tracks.items():
+        rows = track_rows(positions)
+        if not rows:
+            # Nothing located: no rows to smooth, and the shared
+            # scorer raises on it exactly as it would for the raw
+            # track, instead of reporting zeroes.
+            smoothed_tracks[device_id] = list(positions)
+            continue
+        smoothed_rows = iter(
+            smooth_track_rows(rows, method=method, window=window))
+        smoothed_positions: list[LivePosition | None] = []
+        for position in positions:
+            if position is None:
+                smoothed_positions.append(None)
+                continue
+            smoothed = next(smoothed_rows)
+            smoothed_positions.append(
+                replace(position, x=smoothed["x"], y=smoothed["y"]))
+        smoothed_tracks[device_id] = smoothed_positions
+    return evaluate_multi_device_track(smoothed_tracks, truths)
 
 
 def _format_report_line(label: str, report: TrackReport) -> str:
