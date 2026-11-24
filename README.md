@@ -151,6 +151,11 @@ library, no dependencies, no BLE hardware needed.
   that shows up mid-shift warns on its own clock, and the flags
   ride on a null line too, so a device too thin to locate still
   warns about a beacon about to go dark.
+- Drift flags on multi-device tracks: the same drift alarms on
+  every device's live position — one monitor per device, so a
+  tag alarming on a beacon going bad never dilutes or clears
+  another tag's alarm, and resetting one device clears only
+  its monitor.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -911,6 +916,78 @@ after the 40-step walk):
 - A beacon draining at 0.3 per hour over two loops never
   alarms and classifies `noisy`, not `battery-sag`. A beacon
   moved 7 m never alarms either, and classifies `noisy`.
+
+## Drift flags on multi-device tracks
+
+The drift flags above ride on one device's track; a ward
+dashboard runs several tags at once, and a nurse's badge
+should warn about a dying beacon just as a patient tag does.
+`MultiDeviceTracker` takes the same optional drift monitor,
+and every device's live position carries the beacons
+currently alarming on that device's own track — each with its
+rolling mean RSSI residual in dB and how many readings are in
+its window — plus a plain-language alert per alarming beacon:
+
+```python
+from beacon import Beacon, DriftMonitor, MultiDeviceTracker
+
+beacons = [Beacon("A", 0, 0), Beacon("B", 20, 0),
+           Beacon("C", 20, 12), Beacon("D", 0, 12)]
+tracker = MultiDeviceTracker(beacons,
+                             drift_monitor=DriftMonitor(beacons))
+tag1 = tracker.feed("tag-1", {"A": -62.1, "B": -71.4,
+                              "C": -68.0, "D": -59.8}, t=0.0)
+# tag1.drift_alarms — () while every beacon matches its calibration
+# tag1.drift_alerts — () likewise
+```
+
+Each device gets its own fresh monitor with the same tuning
+(`DriftMonitor.fresh()`), not one monitor shared across the
+ward: a shared window would mix two devices' readings, so one
+tag's healthy readings would dilute another tag's alarm, and
+resetting one device would clear the monitor for every device.
+The monitor passed in is a template for the tuning — it is
+never fed itself — and `reset("tag-1")` clears only tag-1's
+monitor, so a tag handed to a new patient starts with a clean
+window while the other tags keep alarming. A tracker without a
+monitor is unaffected: both fields are empty on every device.
+The alarms ride on a null line too, so a device too thin to
+locate still warns about a beacon going bad, and
+`tracker.drift_alarms(device_id)`, `drift_alerts(device_id)`
+and `drift_classifications(device_id)` expose one device's
+monitor without a position in hand. The stream carries the
+flags with `--drift`, and `--drift-beacon A:12` (demo only)
+offsets one beacon's RSSI on tag-1's walk only, so the demo
+shows one device alarming while the other stays quiet:
+
+```sh
+python3 -m beacon.multi_device --demo --drift
+python3 -m beacon.multi_device --demo --drift --drift-beacon A:12
+python3 -m beacon.multi_device --drift < readings.jsonl
+```
+
+The same honest limit as the single-device track applies per
+device: the reference is each track's own estimate, not ground
+truth, so a beacon reading too quiet can drag the estimate
+with it and alarm on the wrong beacon — the alarm says that
+device's track is inconsistent and names the prime suspect,
+nothing more.
+
+Measured behaviour (simulator, 2 dB RSSI noise, default ward
+walk, seeds 1, 3, 7 — the alarms below are the final state
+after each device's 40-step walk):
+
+- Healthy walks: no alarms on either device, on any seed.
+- A reading 12 dB too loud on tag-1's walk only alarms on A
+  for tag-1 at a rolling mean of +8.0 to +8.5 dB, while tag-2
+  stays quiet — the monitors are separate, so tag-2's healthy
+  readings never dilute tag-1's alarm. The same offset on
+  both devices' walks alarms on A for both.
+- C reading 8 dB too quiet on tag-1's walk alarms on D, not
+  on C, at +5.3 to +7.6 dB, while tag-2 stays quiet — the
+  mis-alarm is per device, not shared across them.
+- Resetting tag-1 after both devices alarm clears only
+  tag-1's monitor; tag-2 keeps alarming.
 
 ## Trajectory smoothing
 
@@ -2037,6 +2114,23 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   8 dB too quiet alarms on the wrong beacon — the
   self-referenced monitor is a consistency check on the track,
   not a diagnosis, and the reliable verdict still comes from
-  feeding the monitor a reference position. The roadmap grows
-  as new needs surface — the live-track drift flags are the
-  latest addition.
+  feeding the monitor a reference position.
+- Drift flags on multi-device tracks — done:
+  `MultiDeviceTracker` takes the same optional `DriftMonitor`
+  and gives each device's tracker its own fresh monitor with
+  the same tuning, so every device's live position carries the
+  beacons currently alarming on its own track, with a
+  plain-language alert per alarming beacon; the alarms ride on
+  null lines too, `reset("tag-1")` clears only tag-1's
+  monitor, and `python -m beacon.multi_device --drift`
+  attaches the monitor to the stream, with `--drift-beacon
+  A:12` (demo only) offsetting one beacon's RSSI on tag-1's
+  walk so the demo shows one device alarming while the other
+  stays quiet (v0.34.0); measured on the default ward walk,
+  seeds 1, 3, 7: a beacon 12 dB too loud on one device's walk
+  alarms on the right beacon for that device at +8.0 to
+  +8.5 dB while the other device stays quiet, and a beacon
+  8 dB too quiet alarms on the wrong beacon for that device
+  only — the same self-referenced limit as the single-device
+  track, per device. The roadmap grows as new needs surface
+  — the multi-device drift flags are the latest addition.

@@ -338,6 +338,29 @@ class DriftMonitor:
             history.clear()
         self._seq = 0
 
+    def fresh(self) -> "DriftMonitor":
+        """An empty monitor with the same tuning as this one — the
+        same window, threshold, minimum samples, noise level and
+        revisit settings, but no readings yet.
+
+        A ward tracks several devices at once, and each device's
+        track is its own observation stream: one monitor per
+        device, so one device's healthy readings never dilute
+        another's alarm and resetting one device never clears
+        another's window. ``MultiDeviceTracker`` builds each
+        device's monitor this way from the monitor it was given.
+        """
+        return DriftMonitor(
+            list(self._beacons.values()),
+            window=self._window,
+            drift_threshold_db=self._threshold,
+            min_samples=self._min_samples,
+            noise_db=self._noise_db,
+            history=max(self._history[b].maxlen
+                        for b in self._history),
+            revisit_gap=self._revisit_gap,
+            revisit_radius_m=self._revisit_radius_m)
+
     def status(self, beacon_id: str) -> DriftAlarm | None:
         """The rolling residual for one beacon, or ``None`` if unheard."""
         observations = self._observations.get(beacon_id)

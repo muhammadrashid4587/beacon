@@ -44,7 +44,12 @@ scanner at all. With a deployment plan attached (``--forecast``),
 every device's live position also carries the planner's forecast
 flags — one per beacon, the soonest milestone with its hours
 remaining — counted down from each device's own first reading,
-so a tag that shows up mid-shift warns on its own clock.
+so a tag that shows up mid-shift warns on its own clock. With a
+drift monitor attached (``--drift``), every device's live position
+also carries the beacons currently alarming on drift — each
+device monitored separately, so one tag's healthy readings never
+dilute another tag's alarm and resetting one tag never clears
+another's window.
 """
 
 import argparse
@@ -53,6 +58,7 @@ import sys
 
 from .beacon import Beacon
 from .deployment import DeploymentPlan
+from .drift import DriftAlarm, DriftClassification, DriftMonitor
 from .engine import PositioningEngine
 from .simulate import rectangular_walk, simulate_walk
 from .tracking import (DEFAULT_DARK_AFTER_S, DEFAULT_FORECAST_WINDOW_HOURS,
@@ -85,6 +91,21 @@ class MultiDeviceTracker:
     the plan taken as made at each device's own first reading, so
     a tag that shows up mid-shift counts the horizons down from
     when it started, not from when the first tag did.
+    ``drift_monitor`` is an optional ``DriftMonitor`` (built from
+    the same beacons as the engine): when one is given, each
+    device's tracker gets its own fresh monitor with the same
+    tuning — ``DriftMonitor.fresh()`` — so every device's live
+    position carries the beacons currently alarming on its own
+    track, with a plain-language alert per alarming beacon. One
+    monitor per device, not one shared across them: a shared
+    window would mix two devices' readings, so one tag's healthy
+    readings would dilute another tag's alarm, and resetting one
+    device would clear the monitor for every device. The alarms
+    are the same consistency check as on a single-device track —
+    each beacon checked against the position the consensus of
+    the beacons produced — with the same honest limit: a beacon
+    reading too quiet can drag the estimate with it and alarm on
+    the wrong beacon.
     """
 
     def __init__(self, beacons: list[Beacon],
@@ -96,7 +117,8 @@ class MultiDeviceTracker:
                  floor_switch_confidence: float = 0.6,
                  plan: DeploymentPlan | None = None,
                  forecast_window_hours: float
-                 = DEFAULT_FORECAST_WINDOW_HOURS):
+                 = DEFAULT_FORECAST_WINDOW_HOURS,
+                 drift_monitor: DriftMonitor | None = None):
         if len(beacons) < 3:
             raise ValueError("positioning needs at least 3 beacons")
         if forecast_window_hours <= 0:
@@ -110,6 +132,7 @@ class MultiDeviceTracker:
         self._floor_switch_confidence = floor_switch_confidence
         self._plan = plan
         self._forecast_window_hours = forecast_window_hours
+        self._drift_monitor = drift_monitor
         # Device id -> its own tracker (and engine, inside it).
         self._trackers: dict[str, LiveTracker] = {}
 
@@ -136,7 +159,9 @@ class MultiDeviceTracker:
                 readmit_after=self._readmit_after,
                 sigma_rssi_db=self._sigma_rssi_db,
                 plan=self._plan,
-                forecast_window_hours=self._forecast_window_hours)
+                forecast_window_hours=self._forecast_window_hours,
+                drift_monitor=(None if self._drift_monitor is None
+                               else self._drift_monitor.fresh()))
             self._trackers[device_id] = tracker
         return tracker
 
@@ -175,6 +200,32 @@ class MultiDeviceTracker:
         return {device_id: tracker.last_position
                 for device_id, tracker in self._trackers.items()
                 if tracker.last_position is not None}
+
+    def drift_alarms(self, device_id: str) -> tuple[DriftAlarm, ...]:
+        """The beacons currently alarming on one device's drift
+        monitor, in beacon order. Empty before the device's first
+        located reading, or when the tracker has no monitor."""
+        tracker = self._trackers.get(device_id)
+        return () if tracker is None else tracker.drift_alarms
+
+    def drift_alerts(self, device_id: str) -> tuple[str, ...]:
+        """The plain-language warnings for the beacons currently
+        alarming on one device's drift monitor. Empty when
+        nothing alarms, or when the tracker has no monitor."""
+        tracker = self._trackers.get(device_id)
+        return () if tracker is None else tracker.drift_alerts
+
+    def drift_classifications(
+            self, device_id: str) -> tuple[DriftClassification, ...]:
+        """Every beacon's drift classification from one device's
+        monitor, in beacon order — the verdict with the evidence
+        behind it. Empty when the tracker has no monitor. The
+        verdicts are a hint, not a diagnosis: with the track's
+        own estimate as the reference, a beacon reading too loud
+        can read as moved and a healthy beacon can inherit a
+        verdict from a neighbour dragging the estimate."""
+        tracker = self._trackers.get(device_id)
+        return () if tracker is None else tracker.drift_classifications()
 
     def reset(self, device_id: str | None = None) -> None:
         """Forget one device's track (``reset("tag-1")`` — a tag
@@ -224,16 +275,23 @@ def format_device_output(device_id: str, t: float,
                          heard: tuple[str, ...],
                          excluded: tuple[ExcludedBeacon, ...] = (),
                          forecasts: tuple = (),
-                         forecast_alerts: tuple[str, ...] = ()) -> dict:
+                         forecast_alerts: tuple[str, ...] = (),
+                         drift_alarms: tuple[DriftAlarm, ...] = (),
+                         drift_alerts: tuple[str, ...] = ()) -> dict:
     """One output line per input line: the device, its live
     position, or null when the reading was too thin to locate,
     with the fresh beacons listed either way. When the tracker
     has a deployment plan, a null line still carries the forecast
     flags and alerts, so a dashboard sees a beacon about to go
     dark even on a step that could not be located; a located
-    position carries them in its own dict."""
+    position carries them in its own dict. The same holds for
+    the drift monitor: a null line still carries the beacons
+    currently alarming on that device's monitor, so a dashboard
+    sees a beacon going bad even on a step that could not be
+    located."""
     output = format_output(t, position, heard, excluded,
-                           forecasts, forecast_alerts)
+                           forecasts, forecast_alerts,
+                           drift_alarms, drift_alerts)
     output["device"] = device_id
     return output
 
@@ -253,27 +311,41 @@ def run_demo(stale_after: float, dark_after: float,
              output_stream,
              plan: DeploymentPlan | None = None,
              forecast_window_hours: float
-             = DEFAULT_FORECAST_WINDOW_HOURS) -> MultiDeviceTracker:
+             = DEFAULT_FORECAST_WINDOW_HOURS,
+             drift_monitor: DriftMonitor | None = None,
+             drift_beacon: tuple[str, float] | None = None
+             ) -> MultiDeviceTracker:
     """Feed two simulated ward walks through the tracker at 1 Hz —
     one forward, one in reverse — and print one JSON line per
     reading. With ``plan`` given, each device's live position
     also carries the plan's forecast flags per beacon, with an
     alert for every beacon whose soonest milestone falls inside
-    ``forecast_window_hours``. Returns the tracker, so the caller
-    can inspect the finished tracks."""
+    ``forecast_window_hours``. With ``drift_monitor`` given, each
+    device's live position also carries the beacons currently
+    alarming on its own monitor; ``drift_beacon`` is a ``(id, dB)``
+    pair that offsets one beacon's RSSI by that many dB on
+    tag-1's walk only, so the demo shows one device alarming
+    while the other stays quiet. Returns the tracker, so the
+    caller can inspect the finished tracks."""
     beacons = default_beacons()
     forward = simulate_walk(rectangular_walk(20.0, 12.0, 10), beacons,
                             noise_db=2.0, seed=7)
     reverse = simulate_walk(
         list(reversed(rectangular_walk(20.0, 12.0, 10))), beacons,
         noise_db=2.0, seed=11)
+    if drift_beacon is not None:
+        beacon_id, offset_db = drift_beacon
+        for step in forward:
+            if beacon_id in step["rssi"]:
+                step["rssi"][beacon_id] += offset_db
     tracker = MultiDeviceTracker(beacons, stale_after=stale_after,
                                  dark_after=dark_after,
                                  readmit_after=readmit_after,
                                  sigma_rssi_db=sigma_rssi_db,
                                  plan=plan,
                                  forecast_window_hours
-                                 =forecast_window_hours)
+                                 =forecast_window_hours,
+                                 drift_monitor=drift_monitor)
     for i, (step_a, step_b) in enumerate(zip(forward, reverse)):
         for device_id, step in (("tag-1", step_a), ("tag-2", step_b)):
             t = float(i)
@@ -282,7 +354,9 @@ def run_demo(stale_after: float, dark_after: float,
             print(json.dumps(format_device_output(
                 device_id, t, position, device_tracker.heard,
                 device_tracker.excluded, device_tracker.forecasts,
-                device_tracker.forecast_alerts)), file=output_stream)
+                device_tracker.forecast_alerts,
+                device_tracker.drift_alarms,
+                device_tracker.drift_alerts)), file=output_stream)
     return tracker
 
 
@@ -300,6 +374,12 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
     every beacon whose soonest milestone falls inside
     ``--forecast-window-hours``; ``--drain-rate`` and
     ``--battery-levels`` build that plan for the default ward.
+    ``--drift`` attaches a drift monitor to every device's tracker
+    (one fresh monitor per device, same tuning), so each live
+    position carries the beacons currently alarming on drift, with
+    an alert per alarming beacon; ``--drift-beacon`` (demo only)
+    offsets one beacon's RSSI on tag-1's walk so the demo shows
+    one device alarming while the other stays quiet.
     ``input_stream`` / ``output_stream`` exist so tests can drive
     the stream without touching sys.stdin / sys.stdout.
     """
@@ -333,6 +413,17 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                         "device's tracker, so each live position "
                         "carries the planner's forecast flags per "
                         "beacon")
+    parser.add_argument("--drift", action="store_true",
+                        help="attach a drift monitor to every "
+                        "device's tracker (one fresh monitor per "
+                        "device), so each live position carries the "
+                        "beacons currently alarming on drift")
+    parser.add_argument("--drift-beacon", default=None, metavar="SPEC",
+                        help="demo only: offset one beacon's RSSI by "
+                        "this many dB on tag-1's walk, e.g. A:12 — "
+                        "so the demo shows one device alarming "
+                        "while the other stays quiet "
+                        "(needs --drift)")
     parser.add_argument("--forecast-window-hours", type=float,
                         default=DEFAULT_FORECAST_WINDOW_HOURS,
                         help="hours ahead a forecast milestone must fall "
@@ -368,6 +459,21 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 2
+    drift_monitor = None
+    drift_beacon = None
+    if args.drift:
+        drift_monitor = DriftMonitor(default_beacons())
+    if args.drift_beacon is not None:
+        if not args.drift:
+            parser.error("--drift-beacon needs --drift")
+        try:
+            beacon_id, offset_text = args.drift_beacon.split(":", 1)
+            offset_db = float(offset_text)
+        except ValueError:
+            parser.error("--drift-beacon takes ID:DB, e.g. A:12")
+        if beacon_id not in {b.id for b in default_beacons()}:
+            parser.error(f"unknown beacon: {beacon_id!r}")
+        drift_beacon = (beacon_id, offset_db)
 
     tracker = MultiDeviceTracker(default_beacons(),
                                  stale_after=args.stale_after,
@@ -376,13 +482,16 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                                  sigma_rssi_db=args.sigma_rssi,
                                  plan=plan,
                                  forecast_window_hours
-                                 =args.forecast_window_hours)
+                                 =args.forecast_window_hours,
+                                 drift_monitor=drift_monitor)
     sink = output_stream if output_stream is not None else sys.stdout
     if args.demo:
         run_demo(args.stale_after, args.dark_after,
                  args.readmit_after, args.sigma_rssi, sink,
                  plan=plan,
-                 forecast_window_hours=args.forecast_window_hours)
+                 forecast_window_hours=args.forecast_window_hours,
+                 drift_monitor=drift_monitor,
+                 drift_beacon=drift_beacon)
         return 0
 
     source = input_stream if input_stream is not None else sys.stdin
@@ -395,7 +504,9 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
         print(json.dumps(format_device_output(
             device_id, t, position, device_tracker.heard,
             device_tracker.excluded, device_tracker.forecasts,
-            device_tracker.forecast_alerts)), file=sink)
+            device_tracker.forecast_alerts,
+            device_tracker.drift_alarms,
+            device_tracker.drift_alerts)), file=sink)
     return 0
 
 
