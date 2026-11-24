@@ -30,6 +30,13 @@ observation stream into a live track:
   heard on ``readmit_after`` consecutive readings (3 by default)
   before it rejoins, so one stray scan cannot flap a dying
   beacon back into the estimate.
+- With a ``DeploymentPlan`` attached, each live position also
+  carries the planner's forecast flags — one per beacon, the
+  soonest of its dark, 3 dB loss and 2 dB noise milestones with
+  the hours remaining — and a plain-language alert for every
+  beacon whose milestone falls inside the forecast window (24
+  hours by default), so the track warns about a beacon about to
+  start lying before it does.
 
 The stream format is JSON lines, one reading per line — the same
 shape a BLE scanner would emit, and easy to pipe from anything:
@@ -50,8 +57,11 @@ import statistics
 import sys
 from dataclasses import dataclass
 
+from .battery import BatteryModel
 from .beacon import Beacon
+from .deployment import DeploymentPlan, plan_deployment
 from .engine import PositioningEngine
+from .schedule import (REASON_DARK, REASON_LOSS, REASON_NEVER, REASON_NOISE)
 from .simulate import rectangular_walk, simulate_walk
 from .uncertainty import PositionUncertainty
 
@@ -84,6 +94,12 @@ DEFAULT_SIGMA_RSSI_DB = 2.0
 # exclusion reason can name the battery as the cause.
 BATTERY_EXHAUSTED_LEVEL = 0.05
 
+# How far ahead a forecast milestone must fall to raise an alert
+# on the live track, in hours. A beacon due a new cell within
+# the next day is worth flagging while the ward is running; one
+# due next week is a planning matter, not a live-track warning.
+DEFAULT_FORECAST_WINDOW_HOURS = 24.0
+
 
 @dataclass(frozen=True)
 class ExcludedBeacon:
@@ -104,6 +120,105 @@ class ExcludedBeacon:
 
 
 @dataclass(frozen=True)
+class ForecastFlag:
+    """One beacon's deployment forecast, as seen on the live track.
+
+    ``milestone`` names the soonest of the beacon's three forecast
+    milestones — ``dark``, ``3 dB loss`` or ``2 dB noise`` — the
+    same tie-breaking as the replacement schedule (going dark
+    beats reading weak, reading weak beats reading noisy), or
+    ``never`` when the beacon does not drain. ``hours`` is the
+    time remaining until that milestone (``math.inf`` when never,
+    0.0 when already past it), and the three horizons ride along
+    so a dashboard can show why the date is what it is.
+    ``status`` is the forecast's own status (``ok``, ``degrading``
+    or ``dark``).
+    """
+
+    beacon_id: str
+    milestone: str
+    hours: float
+    status: str
+    hours_to_dark: float
+    hours_to_rssi_loss_db: float
+    hours_to_extra_noise_db: float
+
+    def to_dict(self) -> dict:
+        """JSON-friendly form; never-reached horizons are null."""
+        def _hours(value: float) -> float | None:
+            return None if math.isinf(value) else value
+
+        return {
+            "beacon": self.beacon_id,
+            "milestone": self.milestone,
+            "hours": _hours(self.hours),
+            "status": self.status,
+            "hours_to_dark": _hours(self.hours_to_dark),
+            "hours_to_rssi_loss_db": _hours(self.hours_to_rssi_loss_db),
+            "hours_to_extra_noise_db": _hours(self.hours_to_extra_noise_db),
+        }
+
+
+def forecast_flags(plan: DeploymentPlan,
+                   elapsed_s: float = 0.0) -> tuple[ForecastFlag, ...]:
+    """One forecast flag per beacon in a deployment plan.
+
+    ``elapsed_s`` is how long the track has been running since the
+    plan was made, in seconds — the horizons shrink as the track
+    runs, so a milestone that passes mid-track reads 0.0 hours
+    remaining rather than going negative. A beacon that never
+    drains keeps ``math.inf`` horizons and the ``never``
+    milestone.
+    """
+    elapsed_h = elapsed_s / 3600.0
+
+    def _remaining(value: float) -> float:
+        return math.inf if math.isinf(value) else max(0.0, value - elapsed_h)
+
+    flags = []
+    for forecast in plan.forecasts:
+        milestones = (
+            (forecast.hours_to_dark, REASON_DARK),
+            (forecast.hours_to_rssi_loss_db, REASON_LOSS),
+            (forecast.hours_to_extra_noise_db, REASON_NOISE),
+        )
+        soonest, milestone = min(milestones, key=lambda m: m[0])
+        if math.isinf(soonest):
+            milestone = REASON_NEVER
+        flags.append(ForecastFlag(
+            beacon_id=forecast.beacon_id,
+            milestone=milestone,
+            hours=_remaining(soonest),
+            status=forecast.status,
+            hours_to_dark=_remaining(forecast.hours_to_dark),
+            hours_to_rssi_loss_db=_remaining(
+                forecast.hours_to_rssi_loss_db),
+            hours_to_extra_noise_db=_remaining(
+                forecast.hours_to_extra_noise_db),
+        ))
+    return tuple(flags)
+
+
+def forecast_alerts(flags: tuple[ForecastFlag, ...],
+                    window_hours: float) -> tuple[str, ...]:
+    """The plain-language warnings for flags due inside a window.
+
+    A flag alerts when its soonest milestone falls within
+    ``window_hours`` — ``"D: 2 dB noise in 13.3h (ok)"``, or
+    ``"D: 3 dB loss now (degrading)"`` when the milestone is
+    already past. A beacon that never drains never alerts.
+    """
+    alerts = []
+    for flag in flags:
+        if math.isinf(flag.hours) or flag.hours > window_hours:
+            continue
+        when = "now" if flag.hours == 0.0 else f"in {flag.hours:.1f}h"
+        alerts.append(f"{flag.beacon_id}: {flag.milestone} {when} "
+                      f"({flag.status})")
+    return tuple(alerts)
+
+
+@dataclass(frozen=True)
 class LivePosition:
     """One live position estimate, emitted per reading.
 
@@ -121,7 +236,13 @@ class LivePosition:
     reported for each beacon at this step (0 to 1), as
     ``(id, level)`` pairs in id order — empty when the readings
     carried no battery state, so a track without batteries is
-    unaffected.
+    unaffected. ``forecasts`` is one ``ForecastFlag`` per beacon
+    in the deployment plan the tracker was given — the soonest
+    forecast milestone per beacon with its hours remaining — and
+    ``forecast_alerts`` the plain-language warnings for the
+    beacons whose milestone falls inside the forecast window;
+    both are empty when the tracker has no plan, so a track
+    without a planner is unaffected.
     """
 
     t: float
@@ -133,6 +254,8 @@ class LivePosition:
     heard: tuple[str, ...]
     excluded: tuple[ExcludedBeacon, ...] = ()
     battery: tuple[tuple[str, float], ...] = ()
+    forecasts: tuple[ForecastFlag, ...] = ()
+    forecast_alerts: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         """JSON-friendly form, for the stream output and dashboards."""
@@ -152,6 +275,8 @@ class LivePosition:
             "excluded": [b.to_dict() for b in self.excluded],
             "battery": {beacon_id: level
                         for beacon_id, level in self.battery},
+            "forecasts": [flag.to_dict() for flag in self.forecasts],
+            "forecast_alerts": list(self.forecast_alerts),
         }
 
 
@@ -174,13 +299,25 @@ class LiveTracker:
     dying beacon cannot flap in and out of the solve.
     ``sigma_rssi_db`` is the assumed RSSI noise for the confidence
     ellipse (default 2.0 dB, matching the simulator).
+    ``plan`` is an optional ``DeploymentPlan``: when one is given,
+    each live position carries one forecast flag per beacon — the
+    soonest of its dark, 3 dB loss and 2 dB noise milestones, with
+    the hours remaining — and a plain-language alert for every
+    beacon whose milestone falls inside ``forecast_window_hours``
+    (24 hours by default), so a dashboard watching the track sees
+    a beacon about to start lying before it does. The plan is
+    taken as made at the first reading's timestamp, so the
+    horizons shrink as the track runs.
     """
 
     def __init__(self, engine: PositioningEngine,
                  stale_after: float = DEFAULT_STALE_AFTER_S,
                  dark_after: float = DEFAULT_DARK_AFTER_S,
                  readmit_after: int = DEFAULT_READMIT_AFTER,
-                 sigma_rssi_db: float = DEFAULT_SIGMA_RSSI_DB):
+                 sigma_rssi_db: float = DEFAULT_SIGMA_RSSI_DB,
+                 plan: DeploymentPlan | None = None,
+                 forecast_window_hours: float
+                 = DEFAULT_FORECAST_WINDOW_HOURS):
         if stale_after <= 0:
             raise ValueError("stale_after must be positive")
         if dark_after <= 0:
@@ -194,11 +331,18 @@ class LiveTracker:
             raise ValueError("readmit_after must be at least 1")
         if sigma_rssi_db <= 0:
             raise ValueError("sigma_rssi_db must be positive")
+        if forecast_window_hours <= 0:
+            raise ValueError("forecast_window_hours must be positive")
         self.engine = engine
         self._stale_after = stale_after
         self._dark_after = dark_after
         self._readmit_after = readmit_after
         self._sigma_rssi_db = sigma_rssi_db
+        self._plan = plan
+        self._forecast_window_hours = forecast_window_hours
+        # Timestamp of the first reading, when the plan is taken as
+        # made — the forecast horizons count down from here.
+        self._plan_t0: float | None = None
         # Beacon id -> (rssi, t) of its most recent reading.
         self._latest: dict[str, tuple[float, float]] = {}
         # Beacon id -> t of its most recent reading, kept even
@@ -309,6 +453,32 @@ class LiveTracker:
             return ()
         return self._excluded_at(self._last_t)
 
+    def _forecasts_at(self, t: float) -> tuple[ForecastFlag, ...]:
+        """The plan's forecast flags at time ``t`` — one per beacon,
+        with the hours remaining counted down from the first
+        reading. Empty when the tracker has no plan."""
+        if self._plan is None or self._plan_t0 is None:
+            return ()
+        return forecast_flags(self._plan, t - self._plan_t0)
+
+    @property
+    def forecasts(self) -> tuple[ForecastFlag, ...]:
+        """The plan's forecast flags at the latest reading — one
+        per beacon, soonest milestone first in plan order. Empty
+        before the first reading, or when the tracker has no plan."""
+        if self._last_t is None:
+            return ()
+        return self._forecasts_at(self._last_t)
+
+    @property
+    def forecast_alerts(self) -> tuple[str, ...]:
+        """The plain-language warnings for beacons whose soonest
+        forecast milestone falls inside the forecast window, at
+        the latest reading. Empty before the first reading, or
+        when the tracker has no plan."""
+        return forecast_alerts(self.forecasts,
+                               self._forecast_window_hours)
+
     def feed(self, rssi: dict[str, float], t: float,
              battery: dict[str, float] | None = None) -> LivePosition | None:
         """Feed one reading and return the live position it gives.
@@ -323,7 +493,11 @@ class LiveTracker:
         as the cause. Unknown beacon ids are ignored rather than
         failing the stream. Timestamps must not go backwards: a
         reading older than the previous one is a replayed or
-        misordered scan, not a live one.
+        misordered scan, not a live one. When the tracker was
+        given a deployment plan, the position also carries one
+        forecast flag per beacon — the soonest milestone with its
+        hours remaining — and an alert for every beacon whose
+        milestone falls inside the forecast window.
 
         Returns the live position, or None when fewer than three
         fresh beacons remain — trilateration needs three, and a
@@ -333,6 +507,9 @@ class LiveTracker:
             raise ValueError(
                 f"timestamps must not go backwards: {t} after {self._last_t}")
         self._last_t = t
+        if self._plan_t0 is None:
+            # The plan counts down from the first reading.
+            self._plan_t0 = t
         if battery is not None:
             for beacon_id, level in battery.items():
                 if beacon_id in self.engine.beacons:
@@ -377,12 +554,16 @@ class LiveTracker:
             # sitting on a beacon): the filtered position is still
             # valid, it just has no ellipse this step.
             uncertainty = None
+        forecasts = self._forecasts_at(t)
         live = LivePosition(
             t=t, x=position.x, y=position.y, floor=position.floor,
             floor_confidence=position.floor_confidence,
             uncertainty=uncertainty, heard=tuple(sorted(fresh)),
             excluded=self._excluded_at(t),
-            battery=tuple(sorted(self._battery.items())))
+            battery=tuple(sorted(self._battery.items())),
+            forecasts=forecasts,
+            forecast_alerts=forecast_alerts(
+                forecasts, self._forecast_window_hours))
         self._last = live
         return live
 
@@ -394,6 +575,7 @@ class LiveTracker:
         self._battery.clear()
         self._last_t = None
         self._last = None
+        self._plan_t0 = None
         self.engine.reset()
 
 
@@ -516,16 +698,26 @@ def parse_line(line: str) -> tuple[float, dict[str, float]]:
 
 def format_output(t: float, position: LivePosition | None,
                   heard: tuple[str, ...],
-                  excluded: tuple[ExcludedBeacon, ...] = ()) -> dict:
+                  excluded: tuple[ExcludedBeacon, ...] = (),
+                  forecasts: tuple[ForecastFlag, ...] = (),
+                  forecast_alerts: tuple[str, ...] = ()) -> dict:
     """One output line per input line: the live position, or null
     when the reading was too thin to locate, with the fresh beacons
     listed either way so a dashboard can see the track starving —
     and the dark beacons excluded from the estimate, so it can see
     why the track is running on fewer beacons than it started
-    with."""
+    with. When the tracker has a deployment plan, a null line
+    still carries the forecast flags and alerts, so a dashboard
+    sees a beacon about to go dark even on a step that could not
+    be located; a located position carries them in its own dict.
+    """
     if position is None:
-        return {"t": t, "position": None, "heard": list(heard),
+        line = {"t": t, "position": None, "heard": list(heard),
                 "excluded": [b.to_dict() for b in excluded]}
+        if forecasts:
+            line["forecasts"] = [flag.to_dict() for flag in forecasts]
+            line["forecast_alerts"] = list(forecast_alerts)
+        return line
     return {"t": t, "position": position.to_dict(),
             "heard": list(heard)}
 
@@ -543,16 +735,20 @@ def default_beacons() -> list[Beacon]:
 def run_demo(stale_after: float, dark_after: float,
              readmit_after: int,
              sigma_rssi_db: float, output_stream,
-             battery_drain_per_hour: float = 0.0) -> list[LivePosition | None]:
+             battery_drain_per_hour: float = 0.0,
+             plan: DeploymentPlan | None = None,
+             forecast_window_hours: float
+             = DEFAULT_FORECAST_WINDOW_HOURS) -> list[LivePosition | None]:
     """Feed a simulated ward walk through the tracker at 1 Hz and
     print one JSON line per step — the mode with no scanner needed.
     With ``battery_drain_per_hour`` above zero, beacon D drains
     at that rate from a full cell, so the walk shows a beacon
     degrading and then going dark mid-track — its battery level
-    rides on each live position. Returns the recorded track, so
-    the caller can export it."""
-    from .battery import BatteryModel
-
+    rides on each live position. With ``plan`` given, each live
+    position also carries the plan's forecast flags per beacon,
+    with an alert for every beacon whose soonest milestone falls
+    inside ``forecast_window_hours``. Returns the recorded track,
+    so the caller can export it."""
     beacons = default_beacons()
     batteries = None
     if battery_drain_per_hour > 0:
@@ -564,7 +760,9 @@ def run_demo(stale_after: float, dark_after: float,
                           stale_after=stale_after,
                           dark_after=dark_after,
                           readmit_after=readmit_after,
-                          sigma_rssi_db=sigma_rssi_db)
+                          sigma_rssi_db=sigma_rssi_db,
+                          plan=plan,
+                          forecast_window_hours=forecast_window_hours)
     positions: list[LivePosition | None] = []
     for i, step in enumerate(steps):
         t = float(i)
@@ -572,9 +770,45 @@ def run_demo(stale_after: float, dark_after: float,
                                 battery=step.get("battery"))
         positions.append(position)
         print(json.dumps(format_output(t, position, tracker.heard,
-                                      tracker.excluded)),
+                                       tracker.excluded,
+                                       tracker.forecasts,
+                                       tracker.forecast_alerts)),
               file=output_stream)
     return positions
+
+
+def _parse_battery_levels(spec: str) -> dict[str, float]:
+    """Parse ``--battery-levels``: ``"A=0.9,B=0.6"`` to a dict."""
+    levels = {}
+    for part in spec.split(","):
+        beacon_id, level_text = part.split("=", 1)
+        levels[beacon_id] = float(level_text)
+    return levels
+
+
+def _deployment_plan(args: argparse.Namespace) -> DeploymentPlan:
+    """Build the deployment plan for the default ward.
+
+    Every beacon drains at ``--drain-rate`` per hour from its
+    ``--battery-levels`` charge (1.0, fresh, unless listed).
+    Raises ValueError for a bad levels spec, an unknown beacon,
+    or a level the battery model rejects.
+    """
+    beacons = default_beacons()
+    known_ids = {b.id for b in beacons}
+    try:
+        levels = _parse_battery_levels(args.battery_levels) \
+            if args.battery_levels is not None else {}
+    except ValueError:
+        raise ValueError(
+            "--battery-levels takes ID=LEVEL,... e.g. A=0.9,D=0.2")
+    unknown = sorted(set(levels) - known_ids)
+    if unknown:
+        raise ValueError(f"unknown beacon: {unknown[0]!r}")
+    return plan_deployment(
+        {b.id: BatteryModel(drain_rate_per_hour=args.drain_rate)
+         for b in beacons},
+        levels=levels)
 
 
 def main(argv=None, input_stream=None, output_stream=None) -> int:
@@ -584,11 +818,17 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
     ``--demo`` runs a simulated walk instead of reading stdin.
     ``--stale-after`` (seconds), ``--dark-after`` (seconds),
     ``--readmit-after`` (readings) and ``--sigma-rssi`` (dB) tune
-    the tracker. ``--export-json`` / ``--export-csv`` save the
-    recorded track (one row per located position) to a file a
-    ward dashboard can consume, in either mode. ``input_stream``
-    / ``output_stream`` exist so tests can drive the stream
-    without touching sys.stdin / sys.stdout.
+    the tracker. ``--forecast`` attaches the deployment plan to
+    the tracker, so each live position carries the planner's
+    forecast flags per beacon, with an alert for every beacon
+    whose soonest milestone falls inside
+    ``--forecast-window-hours``; ``--drain-rate`` and
+    ``--battery-levels`` build that plan for the default ward.
+    ``--export-json`` / ``--export-csv`` save the recorded track
+    (one row per located position) to a file a ward dashboard can
+    consume, in either mode. ``input_stream`` / ``output_stream``
+    exist so tests can drive the stream without touching
+    sys.stdin / sys.stdout.
     """
     parser = argparse.ArgumentParser(
         description="Live BLE indoor-positioning tracker: read RSSI "
@@ -618,6 +858,23 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                         "this fraction of a full charge per hour, so "
                         "the walk shows a beacon degrading and going "
                         "dark mid-track (default: 0, no battery drain)")
+    parser.add_argument("--forecast", action="store_true",
+                        help="attach the deployment plan to the tracker, "
+                        "so each live position carries the planner's "
+                        "forecast flags per beacon")
+    parser.add_argument("--forecast-window-hours", type=float,
+                        default=DEFAULT_FORECAST_WINDOW_HOURS,
+                        help="hours ahead a forecast milestone must fall "
+                        "to alert on the live track "
+                        f"(default: {DEFAULT_FORECAST_WINDOW_HOURS})")
+    parser.add_argument("--drain-rate", type=float, default=0.05,
+                        help="with --forecast: every default beacon's "
+                        "battery drain per hour "
+                        "(default: 0.05)")
+    parser.add_argument("--battery-levels", default=None, metavar="SPEC",
+                        help="with --forecast: measured charges, "
+                        "e.g. A=0.9,B=0.6,C=0.4,D=0.2 "
+                        "(default: all fresh)")
     parser.add_argument("--export-json", default=None, metavar="PATH",
                         help="save the recorded track as JSON to PATH "
                         "(one row per located position)")
@@ -637,13 +894,27 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
         parser.error("--sigma-rssi must be positive")
     if args.battery_drain_per_hour < 0:
         parser.error("--battery-drain-per-hour must not be negative")
+    if args.forecast_window_hours <= 0:
+        parser.error("--forecast-window-hours must be positive")
+    if args.drain_rate < 0:
+        parser.error("--drain-rate must not be negative")
+    plan = None
+    if args.forecast:
+        try:
+            plan = _deployment_plan(args)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
 
     if args.demo:
         positions = run_demo(args.stale_after, args.dark_after,
                              args.readmit_after, args.sigma_rssi,
                              output_stream or sys.stdout,
                              battery_drain_per_hour
-                             =args.battery_drain_per_hour)
+                             =args.battery_drain_per_hour,
+                             plan=plan,
+                             forecast_window_hours
+                             =args.forecast_window_hours)
         _export_track(positions, args.export_json, args.export_csv)
         return 0
 
@@ -651,7 +922,10 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                           stale_after=args.stale_after,
                           dark_after=args.dark_after,
                           readmit_after=args.readmit_after,
-                          sigma_rssi_db=args.sigma_rssi)
+                          sigma_rssi_db=args.sigma_rssi,
+                          plan=plan,
+                          forecast_window_hours
+                          =args.forecast_window_hours)
     source = input_stream if input_stream is not None else sys.stdin
     sink = output_stream if output_stream is not None else sys.stdout
     positions = []
@@ -662,7 +936,9 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
         position = tracker.feed(rssi, t)
         positions.append(position)
         print(json.dumps(format_output(t, position, tracker.heard,
-                                       tracker.excluded)),
+                                       tracker.excluded,
+                                       tracker.forecasts,
+                                       tracker.forecast_alerts)),
               file=sink)
     _export_track(positions, args.export_json, args.export_csv)
     return 0

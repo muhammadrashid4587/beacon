@@ -39,15 +39,17 @@ from .multi_device import MultiDeviceTracker
 from .schedule import (REASON_DARK, REASON_LOSS, REASON_NEVER,
                        REASON_NOISE, ReplacementSchedule, SwapEntry,
                        replacement_schedule)
-from .tracking import (ExcludedBeacon, LivePosition, LiveTracker,
-                       TrackReport, evaluate_live_track)
+from .tracking import (DEFAULT_FORECAST_WINDOW_HOURS, ExcludedBeacon,
+                       ForecastFlag, LivePosition, LiveTracker,
+                       TrackReport, evaluate_live_track, forecast_alerts,
+                       forecast_flags)
 from .trilateration import trilaterate
 from .uncertainty import PositionUncertainty, estimate_uncertainty
 from .validation import (DEFAULT_MAX_WORST_SEMI_MAJOR_M,
                          FloorLayoutVerdict, LayoutValidation,
                          validate_floor_layouts)
 
-__version__ = "0.29.0"
+__version__ = "0.30.0"
 
 __all__ = [
     "BatteryModel",
@@ -93,11 +95,15 @@ __all__ = [
     "two_floor_walk",
     "Survey",
     "ExcludedBeacon",
+    "ForecastFlag",
+    "DEFAULT_FORECAST_WINDOW_HOURS",
     "LivePosition",
     "LiveTracker",
     "MultiDeviceTracker",
     "TrackReport",
     "evaluate_live_track",
+    "forecast_alerts",
+    "forecast_flags",
     "export_track_csv",
     "export_track_json",
     "load_track_csv",

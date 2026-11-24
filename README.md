@@ -135,6 +135,13 @@ library, no dependencies, no BLE hardware needed.
   heatmap shades each cell by when its coverage first degrades,
   so the map shows not just the coverage now but when it will
   thin.
+- Planner forecast flags on the live track: a tracker given a
+  deployment plan carries the planner's forecast on every live
+  position — one flag per beacon, the soonest of its dark, 3 dB
+  loss and 2 dB noise milestones with the hours remaining — and
+  a plain-language alert for every beacon whose milestone falls
+  inside the forecast window, so the track warns about a beacon
+  about to start lying before it does.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -692,6 +699,67 @@ with its legend, so the plan and planner summary lines are never
 clipped below the SVG — the plain overlay's legend already
 overflowed its 560 px canvas before this change, and now renders
 at 594 px.
+
+## Planner forecast flags on the live track
+
+The planner-aware overlay shows when coverage will thin, but
+only when someone opens the map. A dashboard watching the live
+track needs the same warning in the stream itself: a beacon
+that is about to start lying should flag while the ward is
+running, not at the next map render. `LiveTracker` takes an
+optional deployment plan, and every live position it emits
+carries one `ForecastFlag` per beacon — the soonest of its
+dark, 3 dB loss and 2 dB noise milestones, with the hours
+remaining and all three horizons riding along — plus a
+plain-language alert for every beacon whose soonest milestone
+falls inside the forecast window (24 hours by default):
+
+```python
+from beacon import (BatteryModel, Beacon, LiveTracker,
+                    PositioningEngine, plan_deployment)
+
+beacons = [Beacon("A", 0, 0), Beacon("B", 20, 0),
+           Beacon("C", 20, 12), Beacon("D", 0, 12)]
+plan = plan_deployment({
+    b.id: BatteryModel(drain_rate_per_hour=0.05) for b in beacons},
+    levels={"D": 0.2})   # D measured at 20% charge
+tracker = LiveTracker(PositioningEngine(beacons), plan=plan)
+live = tracker.feed({"A": -62.1, "B": -71.4, "C": -68.0, "D": -59.8}, t=0.0)
+# live.forecasts — D first: milestone "3 dB loss", hours 0.0,
+# status "degrading"; the rest "2 dB noise" in 13.3 h
+# live.forecast_alerts — ("D: 3 dB loss now (degrading)", ...)
+```
+
+The milestone names match the replacement schedule's reasons,
+with the same tie-breaking (going dark beats reading weak,
+reading weak beats reading noisy), so the flag and the work
+order never disagree about which milestone drives a beacon. A
+beacon that never drains flags `never` with infinite horizons,
+which serialise as null, and never alerts. The plan is taken
+as made at the first reading's timestamp, so the horizons count
+down as the track runs — a milestone that passes mid-track
+reads 0.0 hours remaining rather than going negative — and
+`reset()` restarts the clock for a new device. A tracker
+without a plan is unaffected: both fields are empty. The
+stream carries the flags too, including on a line whose
+position is null, so a dashboard sees a beacon about to go
+dark even on a step that could not be located:
+
+```sh
+python3 -m beacon.tracking --demo --forecast
+python3 -m beacon.tracking --demo --forecast --battery-levels A=0.9,B=0.6,C=0.4,D=0.2
+python3 -m beacon.tracking --demo --forecast --forecast-window-hours 1.0
+```
+
+Measured behaviour: on the default ward with four fresh
+beacons at 0.05 per hour every flag reads `2 dB noise in
+13.3h (ok)` and all four alert inside the 24-hour window,
+while a 1-hour window alerts on none of them — the flags are
+still on the position, only the warnings go quiet. With
+measured levels 0.9, 0.6, 0.4, 0.2 the flags read D `3 dB
+loss now (degrading)`, C `2 dB noise in 1.3h (ok)`, B in
+5.3 h and A in 11.3 h — the same order and milestones as the
+replacement schedule, now riding on the live track.
 
 ## Trajectory smoothing
 
@@ -1743,5 +1811,21 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   an all-green planner heatmap at 13.3 hours, while measured
   levels 0.9, 0.6, 0.4, 0.2 turn all 60 cells red — every cell's
   three nearest include C or D, so the whole ward starts
-  degrading within 1.3 hours. The roadmap grows as new needs
-  surface — the planner-aware overlay is the latest addition.
+  degrading within 1.3 hours.
+- Planner forecast flags on the live track — done: `LiveTracker`
+  takes an optional `DeploymentPlan` and every live position
+  carries one `ForecastFlag` per beacon — the soonest of its
+  dark, 3 dB loss and 2 dB noise milestones with the hours
+  remaining, all three horizons riding along — plus a
+  plain-language alert (`D: 3 dB loss now (degrading)`) for
+  every beacon whose milestone falls inside the forecast window
+  (24 hours by default); `python -m beacon.tracking --demo
+  --forecast` attaches the plan to the stream, reusing
+  `--battery-levels` and `--drain-rate`, and the flags ride on
+  null lines too (v0.30.0); four fresh beacons flag `2 dB noise
+  in 13.3h (ok)` and all alert inside 24 hours but none inside
+  1 hour, while measured levels 0.9, 0.6, 0.4, 0.2 flag D `3 dB
+  loss now`, C in 1.3 h, B in 5.3 h, A in 11.3 h — the same
+  order and milestones as the replacement schedule. The roadmap
+  grows as new needs surface — the forecast flags are the latest
+  addition.
