@@ -142,6 +142,13 @@ library, no dependencies, no BLE hardware needed.
   a plain-language alert for every beacon whose milestone falls
   inside the forecast window, so the track warns about a beacon
   about to start lying before it does.
+- Planner forecast flags on multi-device tracks: the same
+  forecast flags on every device's live position — one per
+  beacon, the soonest milestone with its hours remaining —
+  counted down from each device's own first reading, so a tag
+  that shows up mid-shift warns on its own clock, and the flags
+  ride on a null line too, so a device too thin to locate still
+  warns about a beacon about to go dark.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -760,6 +767,58 @@ measured levels 0.9, 0.6, 0.4, 0.2 the flags read D `3 dB
 loss now (degrading)`, C `2 dB noise in 1.3h (ok)`, B in
 5.3 h and A in 11.3 h — the same order and milestones as the
 replacement schedule, now riding on the live track.
+
+## Planner forecast flags on multi-device tracks
+
+The forecast flags above ride on one device's track; a ward
+dashboard runs several tags at once, and a nurse's badge
+should warn about a dying beacon just as a patient tag does.
+`MultiDeviceTracker` takes the same optional deployment plan,
+and every device's live position carries the same flags — one
+per beacon, the soonest milestone with its hours remaining,
+with the plain-language alerts inside the forecast window —
+because each device's tracker is built with the plan:
+
+```python
+from beacon import (BatteryModel, Beacon, MultiDeviceTracker,
+                    plan_deployment)
+
+beacons = [Beacon("A", 0, 0), Beacon("B", 20, 0),
+           Beacon("C", 20, 12), Beacon("D", 0, 12)]
+plan = plan_deployment({
+    b.id: BatteryModel(drain_rate_per_hour=0.05) for b in beacons},
+    levels={"D": 0.2})   # D measured at 20% charge
+tracker = MultiDeviceTracker(beacons, plan=plan)
+tag1 = tracker.feed("tag-1", {"A": -62.1, "B": -71.4,
+                              "C": -68.0, "D": -59.8}, t=0.0)
+# tag1.forecasts — D first: "3 dB loss", 0.0 hours, "degrading"
+# tag1.forecast_alerts — ("D: 3 dB loss now (degrading)", ...)
+```
+
+The plan is taken as made at each device's own first reading,
+not at the first tag's: each device's clock is its own, so a
+tag that shows up an hour into the shift counts its horizons
+down from when it started, and resetting one device restarts
+only its clock. A tracker without a plan is unaffected: both
+fields are empty on every device. The stream carries the flags
+too, including on a null line, so a device too thin to locate
+still warns about a beacon about to go dark:
+
+```sh
+python3 -m beacon.multi_device --demo --forecast
+python3 -m beacon.multi_device --demo --forecast --battery-levels A=0.9,B=0.6,C=0.4,D=0.2
+python3 -m beacon.multi_device --demo --forecast --forecast-window-hours 1.0
+```
+
+Measured behaviour: on the default ward with four fresh
+beacons at 0.05 per hour both demo devices flag `2 dB noise
+in 13.3h (ok)` and all four alert inside the 24-hour window.
+With measured levels 0.9, 0.6, 0.4, 0.2 both devices flag D
+`3 dB loss now`, C in 1.3 h, B in 5.3 h and A in 11.3 h —
+the same flags as the single-device track, on every device.
+A tag starting one hour after the first and running five more
+hours flags 8.3 h remaining while the second tag, four hours
+in, flags 9.3 h — the two clocks really are separate.
 
 ## Trajectory smoothing
 
@@ -1829,3 +1888,21 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   order and milestones as the replacement schedule. The roadmap
   grows as new needs surface — the forecast flags are the latest
   addition.
+- Planner forecast flags on multi-device tracks — done:
+  `MultiDeviceTracker` takes the same optional `DeploymentPlan`
+  and passes it to every device's `LiveTracker`, so every
+  device's live position carries the same forecast flags — one
+  per beacon, soonest milestone with its hours remaining, with
+  the plain-language alerts inside the forecast window (24
+  hours by default) — counted down from each device's own first
+  reading, so a tag that shows up mid-shift warns on its own
+  clock, and resetting one device restarts only its clock; the
+  flags ride on null lines too, and `python -m
+  beacon.multi_device --demo --forecast` attaches the plan,
+  reusing `--battery-levels` and `--drain-rate` (v0.31.0); four
+  fresh beacons flag `2 dB noise in 13.3h (ok)` on both demo
+  devices, and measured levels 0.9, 0.6, 0.4, 0.2 flag D `3 dB
+  loss now`, C in 1.3 h, B in 5.3 h, A in 11.3 h — the same
+  flags as the single-device track, on every device. The roadmap
+  grows as new needs surface — the multi-device forecast flags
+  are the latest addition.

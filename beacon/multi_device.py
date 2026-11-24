@@ -40,7 +40,11 @@ lines from stdin and prints one JSON line per reading with the
 device and its live position attached (``position`` is null on a
 reading too thin to locate). ``--demo`` runs two simulated walks
 through the tracker instead, so the mode can be tried with no
-scanner at all.
+scanner at all. With a deployment plan attached (``--forecast``),
+every device's live position also carries the planner's forecast
+flags — one per beacon, the soonest milestone with its hours
+remaining — counted down from each device's own first reading,
+so a tag that shows up mid-shift warns on its own clock.
 """
 
 import argparse
@@ -48,12 +52,14 @@ import json
 import sys
 
 from .beacon import Beacon
+from .deployment import DeploymentPlan
 from .engine import PositioningEngine
 from .simulate import rectangular_walk, simulate_walk
-from .tracking import (DEFAULT_DARK_AFTER_S, DEFAULT_READMIT_AFTER,
-                       DEFAULT_SIGMA_RSSI_DB, DEFAULT_STALE_AFTER_S,
-                       ExcludedBeacon, LivePosition, LiveTracker,
-                       format_output, parse_line)
+from .tracking import (DEFAULT_DARK_AFTER_S, DEFAULT_FORECAST_WINDOW_HOURS,
+                       DEFAULT_READMIT_AFTER, DEFAULT_SIGMA_RSSI_DB,
+                       DEFAULT_STALE_AFTER_S, ExcludedBeacon, LivePosition,
+                       LiveTracker, _deployment_plan, format_output,
+                       parse_line)
 
 # The default ward walk, walked in reverse, so the demo's second
 # device follows a different path from the first.
@@ -72,7 +78,13 @@ class MultiDeviceTracker:
     passed through to each device's tracker unchanged (see
     ``LiveTracker`` for what they mean). ``filter`` and
     ``floor_switch_confidence`` are passed through to each
-    device's engine.
+    device's engine. ``plan`` is an optional ``DeploymentPlan``,
+    passed through to each device's tracker, so every device's
+    live position carries the planner's forecast flags — one per
+    beacon, the soonest milestone with its hours remaining — with
+    the plan taken as made at each device's own first reading, so
+    a tag that shows up mid-shift counts the horizons down from
+    when it started, not from when the first tag did.
     """
 
     def __init__(self, beacons: list[Beacon],
@@ -81,9 +93,14 @@ class MultiDeviceTracker:
                  readmit_after: int = DEFAULT_READMIT_AFTER,
                  sigma_rssi_db: float = DEFAULT_SIGMA_RSSI_DB,
                  filter: str = "kalman",
-                 floor_switch_confidence: float = 0.6):
+                 floor_switch_confidence: float = 0.6,
+                 plan: DeploymentPlan | None = None,
+                 forecast_window_hours: float
+                 = DEFAULT_FORECAST_WINDOW_HOURS):
         if len(beacons) < 3:
             raise ValueError("positioning needs at least 3 beacons")
+        if forecast_window_hours <= 0:
+            raise ValueError("forecast_window_hours must be positive")
         self.beacons = list(beacons)
         self._stale_after = stale_after
         self._dark_after = dark_after
@@ -91,6 +108,8 @@ class MultiDeviceTracker:
         self._sigma_rssi_db = sigma_rssi_db
         self._filter = filter
         self._floor_switch_confidence = floor_switch_confidence
+        self._plan = plan
+        self._forecast_window_hours = forecast_window_hours
         # Device id -> its own tracker (and engine, inside it).
         self._trackers: dict[str, LiveTracker] = {}
 
@@ -115,7 +134,9 @@ class MultiDeviceTracker:
                 stale_after=self._stale_after,
                 dark_after=self._dark_after,
                 readmit_after=self._readmit_after,
-                sigma_rssi_db=self._sigma_rssi_db)
+                sigma_rssi_db=self._sigma_rssi_db,
+                plan=self._plan,
+                forecast_window_hours=self._forecast_window_hours)
             self._trackers[device_id] = tracker
         return tracker
 
@@ -201,11 +222,18 @@ def parse_device_line(line: str) -> tuple[str, float, dict[str, float]]:
 def format_device_output(device_id: str, t: float,
                          position: LivePosition | None,
                          heard: tuple[str, ...],
-                         excluded: tuple[ExcludedBeacon, ...] = ()) -> dict:
+                         excluded: tuple[ExcludedBeacon, ...] = (),
+                         forecasts: tuple = (),
+                         forecast_alerts: tuple[str, ...] = ()) -> dict:
     """One output line per input line: the device, its live
     position, or null when the reading was too thin to locate,
-    with the fresh beacons listed either way."""
-    output = format_output(t, position, heard, excluded)
+    with the fresh beacons listed either way. When the tracker
+    has a deployment plan, a null line still carries the forecast
+    flags and alerts, so a dashboard sees a beacon about to go
+    dark even on a step that could not be located; a located
+    position carries them in its own dict."""
+    output = format_output(t, position, heard, excluded,
+                           forecasts, forecast_alerts)
     output["device"] = device_id
     return output
 
@@ -222,11 +250,17 @@ def default_beacons() -> list[Beacon]:
 
 def run_demo(stale_after: float, dark_after: float,
              readmit_after: int, sigma_rssi_db: float,
-             output_stream) -> MultiDeviceTracker:
+             output_stream,
+             plan: DeploymentPlan | None = None,
+             forecast_window_hours: float
+             = DEFAULT_FORECAST_WINDOW_HOURS) -> MultiDeviceTracker:
     """Feed two simulated ward walks through the tracker at 1 Hz —
     one forward, one in reverse — and print one JSON line per
-    reading. Returns the tracker, so the caller can inspect the
-    finished tracks."""
+    reading. With ``plan`` given, each device's live position
+    also carries the plan's forecast flags per beacon, with an
+    alert for every beacon whose soonest milestone falls inside
+    ``forecast_window_hours``. Returns the tracker, so the caller
+    can inspect the finished tracks."""
     beacons = default_beacons()
     forward = simulate_walk(rectangular_walk(20.0, 12.0, 10), beacons,
                             noise_db=2.0, seed=7)
@@ -236,7 +270,10 @@ def run_demo(stale_after: float, dark_after: float,
     tracker = MultiDeviceTracker(beacons, stale_after=stale_after,
                                  dark_after=dark_after,
                                  readmit_after=readmit_after,
-                                 sigma_rssi_db=sigma_rssi_db)
+                                 sigma_rssi_db=sigma_rssi_db,
+                                 plan=plan,
+                                 forecast_window_hours
+                                 =forecast_window_hours)
     for i, (step_a, step_b) in enumerate(zip(forward, reverse)):
         for device_id, step in (("tag-1", step_a), ("tag-2", step_b)):
             t = float(i)
@@ -244,7 +281,8 @@ def run_demo(stale_after: float, dark_after: float,
             device_tracker = tracker.tracker(device_id)
             print(json.dumps(format_device_output(
                 device_id, t, position, device_tracker.heard,
-                device_tracker.excluded)), file=output_stream)
+                device_tracker.excluded, device_tracker.forecasts,
+                device_tracker.forecast_alerts)), file=output_stream)
     return tracker
 
 
@@ -256,9 +294,14 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
     ``--demo`` runs two simulated walks instead of reading stdin.
     ``--stale-after`` (seconds), ``--dark-after`` (seconds),
     ``--readmit-after`` (readings) and ``--sigma-rssi`` (dB) tune
-    each device's tracker. ``input_stream`` / ``output_stream``
-    exist so tests can drive the stream without touching
-    sys.stdin / sys.stdout.
+    each device's tracker. ``--forecast`` attaches the deployment
+    plan to every device's tracker, so each live position carries
+    the planner's forecast flags per beacon, with an alert for
+    every beacon whose soonest milestone falls inside
+    ``--forecast-window-hours``; ``--drain-rate`` and
+    ``--battery-levels`` build that plan for the default ward.
+    ``input_stream`` / ``output_stream`` exist so tests can drive
+    the stream without touching sys.stdin / sys.stdout.
     """
     parser = argparse.ArgumentParser(
         description="Multi-device BLE indoor-positioning tracker: "
@@ -285,6 +328,24 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                         default=DEFAULT_SIGMA_RSSI_DB,
                         help="assumed RSSI noise in dB for the confidence "
                         f"ellipse (default: {DEFAULT_SIGMA_RSSI_DB})")
+    parser.add_argument("--forecast", action="store_true",
+                        help="attach the deployment plan to every "
+                        "device's tracker, so each live position "
+                        "carries the planner's forecast flags per "
+                        "beacon")
+    parser.add_argument("--forecast-window-hours", type=float,
+                        default=DEFAULT_FORECAST_WINDOW_HOURS,
+                        help="hours ahead a forecast milestone must fall "
+                        "to alert on the live track "
+                        f"(default: {DEFAULT_FORECAST_WINDOW_HOURS})")
+    parser.add_argument("--drain-rate", type=float, default=0.05,
+                        help="with --forecast: every default beacon's "
+                        "battery drain per hour "
+                        "(default: 0.05)")
+    parser.add_argument("--battery-levels", default=None, metavar="SPEC",
+                        help="with --forecast: measured charges, "
+                        "e.g. A=0.9,B=0.6,C=0.4,D=0.2 "
+                        "(default: all fresh)")
     args = parser.parse_args(argv)
     if args.stale_after <= 0:
         parser.error("--stale-after must be positive")
@@ -296,16 +357,32 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
         parser.error("--readmit-after must be at least 1")
     if args.sigma_rssi <= 0:
         parser.error("--sigma-rssi must be positive")
+    if args.forecast_window_hours <= 0:
+        parser.error("--forecast-window-hours must be positive")
+    if args.drain_rate < 0:
+        parser.error("--drain-rate must not be negative")
+    plan = None
+    if args.forecast:
+        try:
+            plan = _deployment_plan(args)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
 
     tracker = MultiDeviceTracker(default_beacons(),
                                  stale_after=args.stale_after,
                                  dark_after=args.dark_after,
                                  readmit_after=args.readmit_after,
-                                 sigma_rssi_db=args.sigma_rssi)
+                                 sigma_rssi_db=args.sigma_rssi,
+                                 plan=plan,
+                                 forecast_window_hours
+                                 =args.forecast_window_hours)
     sink = output_stream if output_stream is not None else sys.stdout
     if args.demo:
         run_demo(args.stale_after, args.dark_after,
-                 args.readmit_after, args.sigma_rssi, sink)
+                 args.readmit_after, args.sigma_rssi, sink,
+                 plan=plan,
+                 forecast_window_hours=args.forecast_window_hours)
         return 0
 
     source = input_stream if input_stream is not None else sys.stdin
@@ -317,7 +394,8 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
         device_tracker = tracker.tracker(device_id)
         print(json.dumps(format_device_output(
             device_id, t, position, device_tracker.heard,
-            device_tracker.excluded)), file=sink)
+            device_tracker.excluded, device_tracker.forecasts,
+            device_tracker.forecast_alerts)), file=sink)
     return 0
 
 
