@@ -2996,3 +2996,80 @@ against the raw 1.94 m — worse than doing nothing, which is
 why it stays the opt-out.
 The roadmap grows as new needs surface — the smoothed-track
 accuracy report is the latest addition.
+
+## Scoring a smoothed track file
+
+The smoothed report scores the demo walks, but a ward that
+recorded a real walk has a file, not a demo — a smoothed
+export from a shift, and a ground truth from wherever the
+walk's true positions are known. `--evaluate-smoothed-file`
+scores that file from the command line, with no demo
+involved: it loads the smoothed export (JSON or CSV, as
+`--export-smoothed-json` / `--export-smoothed-csv` write it),
+aligns its rows to the ground truth, and prints the same
+per-device + overall report as `--evaluate-smoothed` — one
+line per device plus the overall line over every device's
+located steps pooled together — and
+`--evaluate-smoothed-file-json PATH` writes the same report
+as JSON, with a `smoothed` flag and the smoothing method,
+so the verdict is available from the command line instead of
+only in code.
+
+The ground truth is a JSON file mapping each device id to
+its true positions, one point per step of the walk, in step
+order, each point carrying its timestamp on the same clock
+as the track file's rows:
+
+```json
+{"tag-1": [{"t": 0.0, "x": 1.0, "y": 2.0},
+           {"t": 1.0, "x": 1.5, "y": 2.5, "floor": 0}],
+ "tag-2": [...]}
+```
+
+Rows are matched to truth steps by timestamp, not by
+position in the file, so the alignment survives a step too
+thin to locate: a truth step with no row stays unlocated and
+counts against the coverage, exactly as the live track would.
+The scoring itself is the shared `evaluate_multi_device_track`
+over the file's own positions — the file is already smoothed,
+so it is scored as it stands, not smoothed a second time —
+which is what makes the file report and the demo's smoothed
+report the same report: the same scorer, the same fields,
+the same numbers for the same walk. As a library,
+`load_ground_truth` reads the truth file,
+`tracks_from_export_rows` rebuilds the per-device tracks
+aligned to it, and `load_smoothed_track_file` loads the
+export with its smoothing method.
+
+```sh
+python3 -m beacon.multi_device --demo --export-smoothed-json ward-a-smoothed.json
+python3 -m beacon.multi_device --evaluate-smoothed-file ward-a-smoothed.json --ground-truth ward-a-truth.json
+python3 -m beacon.multi_device --evaluate-smoothed-file ward-a-smoothed.json --ground-truth ward-a-truth.json --evaluate-smoothed-file-json ward-a-smoothed-report.json
+```
+
+A JSON file whose header does not say `smoothed` is refused
+rather than scored — a raw export scored as a smoothed one
+would report the live filter's numbers under the smoother's
+name — and a file and a truth that disagree about the walk
+are refused too: a row whose timestamp has no truth step, a
+device the truth names but the track never had, or rows with
+no device when the truth names more than one. A single-device
+export with no device on its rows scores against the truth's
+single device. A CSV export carries no smoothing marker in
+its columns, so it loads unchecked and the report records
+the default RTS method — the file is assumed to be the
+smoothed export the flag asks for. The rebuilt positions
+carry the row's timestamp, (x, y), floor, ellipse, beacons
+used and excluded, and battery; the forecast flags and drift
+state are not rebuilt, since the report scores positions,
+not the monitor.
+
+Measured behaviour (v0.51.0): scoring the demo's own
+smoothed export file reproduces the demo's smoothed report
+exactly — tag-1 1.45 m, tag-2 1.04 m, overall 1.25 m over the
+80 located steps, in JSON and in CSV — and a track starved
+of one step scores 39 of 40 located on that device, coverage
+0.98, instead of silently dropping the step from the
+denominator.
+The roadmap grows as new needs surface — scoring a smoothed
+track file is the latest addition.

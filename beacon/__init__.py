@@ -42,7 +42,9 @@ from .map_overlay import (CoverageCell, HeatmapSummary, PlannerCell,
                         load_track_for_overlay, planner_colour,
                         planner_heatmap, planner_heatmap_summary,
                         render_map_overlay, write_map_overlay)
-from .multi_device import MultiDeviceTracker
+from .multi_device import (MultiDeviceTracker, load_ground_truth,
+                           load_smoothed_track_file,
+                           tracks_from_export_rows)
 from .schedule import (REASON_DARK, REASON_LOSS, REASON_NEVER,
                        REASON_NOISE, ReplacementSchedule, SwapEntry,
                        replacement_schedule)
@@ -59,7 +61,7 @@ from .validation import (DEFAULT_MAX_WORST_SEMI_MAJOR_M,
                          FloorLayoutVerdict, LayoutValidation,
                          validate_floor_layouts)
 
-__version__ = "0.50.0"
+__version__ = "0.51.0"
 
 __all__ = [
     "BatteryModel",
@@ -110,6 +112,9 @@ __all__ = [
     "LivePosition",
     "LiveTracker",
     "MultiDeviceTracker",
+    "load_ground_truth",
+    "load_smoothed_track_file",
+    "tracks_from_export_rows",
     "MultiDeviceTrackReport",
     "TrackReport",
     "evaluate_live_track",

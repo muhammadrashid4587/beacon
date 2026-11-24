@@ -54,6 +54,7 @@ another's window.
 
 import argparse
 import json
+import os
 import sys
 
 from .beacon import Beacon
@@ -62,7 +63,8 @@ from .drift import DriftAlarm, DriftClassification, DriftMonitor
 from .engine import PositioningEngine
 from .export import (export_multi_track_csv, export_multi_track_json,
                      export_smoothed_multi_track_csv,
-                     export_smoothed_multi_track_json)
+                     export_smoothed_multi_track_json, load_track_csv,
+                     load_track_json, track_from_dict)
 from .simulate import rectangular_walk, simulate_walk
 from .tracking import (DEFAULT_DARK_AFTER_S, DEFAULT_FORECAST_WINDOW_HOURS,
                        DEFAULT_READMIT_AFTER, DEFAULT_SIGMA_RSSI_DB,
@@ -72,6 +74,7 @@ from .tracking import (DEFAULT_DARK_AFTER_S, DEFAULT_FORECAST_WINDOW_HOURS,
                        evaluate_smoothed_multi_device_track,
                        format_multi_device_report,
                        format_output, parse_line)
+from .uncertainty import PositionUncertainty
 
 # The default ward walk, walked in reverse, so the demo's second
 # device follows a different path from the first.
@@ -465,6 +468,233 @@ def run_demo(stale_after: float, dark_after: float,
     return tracker
 
 
+def load_ground_truth(path: str) -> dict[str, list[dict]]:
+    """Read a ground-truth JSON file for scoring a track export.
+
+    The file maps each device id to its true positions, one
+    point per step of the walk, in step order::
+
+        {"tag-1": [{"t": 0.0, "x": 1.0, "y": 2.0},
+                   {"t": 1.0, "x": 1.5, "y": 2.5, "floor": 0}],
+         "tag-2": [...]}
+
+    ``t`` is the step's timestamp on the same clock as the track
+    file's rows, so a row is matched to its truth by timestamp,
+    not by position in the file — a step too thin to locate has
+    a truth point and no row, and the alignment survives it.
+    ``floor`` is optional, but a device's points must all carry
+    it or none of them: the scorer refuses a truth that mixes
+    (x, y) and (x, y, floor). Each point comes back as a dict
+    with ``t``, ``x``, ``y`` and ``floor`` (None when the point
+    carries none). Raises ValueError on a file that is not that
+    shape — not an object, an empty device list, a point that is
+    not an object or lacks ``t``, ``x`` or ``y``, a non-numeric
+    coordinate, a device mixing floored and unfloored points, or
+    two points at the same timestamp — instead of scoring a
+    misread file.
+    """
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, dict) or not data:
+        raise ValueError(
+            f"ground truth in {path!r} must be a non-empty object "
+            f"mapping device ids to their true positions")
+    truths: dict[str, list[dict]] = {}
+    for device_id, points in data.items():
+        if not isinstance(device_id, str) or not device_id:
+            raise ValueError(
+                f"ground truth in {path!r} needs non-empty string "
+                f"device ids, not {device_id!r}")
+        if not isinstance(points, list) or not points:
+            raise ValueError(
+                f"ground truth for {device_id!r} in {path!r} must be "
+                f"a non-empty list of points")
+        parsed: list[dict] = []
+        for point in points:
+            if not isinstance(point, dict):
+                raise ValueError(
+                    f"ground-truth point for {device_id!r} in {path!r} "
+                    f"must be an object with t, x and y, not "
+                    f"{point!r}")
+            try:
+                t = float(point["t"])
+                x = float(point["x"])
+                y = float(point["y"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"ground-truth point for {device_id!r} in {path!r} "
+                    f"needs numeric t, x and y: {point!r}") from exc
+            floor = point.get("floor")
+            if floor is not None:
+                try:
+                    floor = int(floor)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"ground-truth point for {device_id!r} in "
+                        f"{path!r} needs an integer floor: "
+                        f"{point!r}") from exc
+                if floor != point["floor"]:
+                    raise ValueError(
+                        f"ground-truth point for {device_id!r} in "
+                        f"{path!r} needs an integer floor: "
+                        f"{point!r}")
+            parsed.append({"t": t, "x": x, "y": y, "floor": floor})
+        floors = [point["floor"] is not None for point in parsed]
+        if any(floors) and not all(floors):
+            raise ValueError(
+                f"ground truth for {device_id!r} in {path!r} must be "
+                f"all (x, y) or all (x, y, floor), not mixed")
+        if len({point["t"] for point in parsed}) != len(parsed):
+            raise ValueError(
+                f"ground truth for {device_id!r} in {path!r} has two "
+                f"points at the same timestamp — one point per step")
+        truths[device_id] = parsed
+    return truths
+
+
+def _position_from_row(row: dict) -> LivePosition:
+    """One exported row back as a ``LivePosition``.
+
+    Carries the row's timestamp, (x, y), floor, ellipse,
+    beacons used and excluded, and battery — the position the
+    row records, rebuilt so it scores like the live position
+    it came from.
+    """
+    return LivePosition(
+        t=row["t"], x=row["x"], y=row["y"], floor=row["floor"],
+        floor_confidence=row["floor_confidence"],
+        uncertainty=(
+            None if row["ellipse_semi_major_m"] is None
+            else PositionUncertainty(
+                row["ellipse_semi_major_m"],
+                row["ellipse_semi_minor_m"],
+                row["ellipse_angle_deg"])),
+        heard=tuple(row["beacons_used"]),
+        excluded=tuple(ExcludedBeacon(b["id"], b["reason"])
+                       for b in row["beacons_excluded"]),
+        battery=tuple(sorted(row["battery"].items())))
+
+
+def tracks_from_export_rows(
+        rows: list[dict],
+        truths: dict[str, list[dict]]
+        ) -> tuple[dict[str, list[LivePosition | None]],
+                   dict[str, list[tuple[float, float]
+                                 | tuple[float, float, int]]]]:
+    """Rebuild per-device tracks from exported rows, aligned to truth.
+
+    ``rows`` are the row dicts ``load_track_json`` /
+    ``load_track_csv`` return — the rows of a track export, raw
+    or smoothed — and ``truths`` is the ground truth
+    :func:`load_ground_truth` returns. Returns ``(tracks,
+    scorer_truths)``: ``tracks`` maps each device id to its
+    recorded track — one ``LivePosition`` (or None, for a step
+    too thin to locate) per truth step, in truth order — and
+    ``scorer_truths`` is the same truth in the scorer's shape,
+    one ``(x, y)`` (or ``(x, y, floor)``) per step, so the pair
+    feeds :func:`beacon.tracking.evaluate_multi_device_track`
+    directly.
+
+    Rows are matched to truth steps by timestamp: a truth step
+    with no row is a step the tracker never located, so it stays
+    None and counts against the coverage, exactly as the live
+    track would. A row whose timestamp has no truth step, two
+    rows for one device at the same timestamp, a device with
+    rows but no truth, or rows with no device when the truth
+    names more than one device, raise ValueError — the file and
+    the truth disagree about the walk, and scoring them together
+    would invent the alignment. Rows with no device score
+    against the truth's single device, so a single-device export
+    loads without a device column. The rebuilt positions carry
+    the row's timestamp, (x, y), floor, ellipse, beacons used
+    and excluded, and battery; the forecast flags and drift
+    state are not rebuilt, since the report scores positions,
+    not the monitor.
+    """
+    row_devices: dict[str | None, list[dict]] = {}
+    for row in rows:
+        row_devices.setdefault(row.get("device"), []).append(row)
+    if None in row_devices:
+        if len(truths) != 1:
+            raise ValueError(
+                "track rows carry no device, so the ground truth "
+                "must name exactly one device, not "
+                f"{sorted(truths)}")
+        only_device = next(iter(truths))
+        row_devices[only_device] = row_devices.pop(None)
+    unknown = sorted(set(row_devices) - set(truths))
+    if unknown:
+        raise ValueError(
+            f"track has rows for {unknown} but the ground truth "
+            f"names {sorted(truths)}")
+    tracks: dict[str, list[LivePosition | None]] = {}
+    scorer_truths: dict[str, list[tuple[float, float]
+                               | tuple[float, float, int]]] = {}
+    for device_id, points in truths.items():
+        if device_id not in row_devices:
+            raise ValueError(
+                f"ground truth names {device_id!r} but the track "
+                f"has no rows for it")
+        by_t: dict[float, dict] = {}
+        for row in row_devices.get(device_id, []):
+            if row["t"] in by_t:
+                raise ValueError(
+                    f"track has two rows for {device_id!r} at "
+                    f"t={row['t']}")
+            by_t[row["t"]] = row
+        truth_ts = {point["t"] for point in points}
+        extra = sorted(t for t in by_t if t not in truth_ts)
+        if extra:
+            raise ValueError(
+                f"track has rows for {device_id!r} at t={extra} with "
+                f"no ground-truth step")
+        positions: list[LivePosition | None] = []
+        for point in points:
+            row = by_t.get(point["t"])
+            positions.append(None if row is None
+                             else _position_from_row(row))
+        tracks[device_id] = positions
+        scorer_truths[device_id] = [
+            (point["x"], point["y"])
+            if point["floor"] is None
+            else (point["x"], point["y"], point["floor"])
+            for point in points]
+    return tracks, scorer_truths
+
+
+def load_smoothed_track_file(path: str) -> tuple[list[dict], str]:
+    """Load a smoothed track export, by extension, with its method.
+
+    ``.json`` reads an ``export_smoothed_track_json`` /
+    ``export_smoothed_multi_track_json`` file, ``.csv`` the CSV
+    form; anything else raises ValueError instead of guessing.
+    A JSON file whose header does not say ``smoothed`` is
+    refused — scoring a raw export as a smoothed one would
+    report the live filter's numbers under the smoother's name,
+    so the file is checked rather than trusted. A CSV export
+    carries no smoothing marker in its columns, so it loads
+    unchecked and the method comes back as the default ``"rts"``
+    — the file is assumed to be the smoothed export the caller
+    asked for. Returns ``(rows, smoothing_method)``.
+    """
+    suffix = os.path.splitext(path)[1].lower()
+    if suffix == ".json":
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        if not data.get("smoothed"):
+            raise ValueError(
+                f"{path!r} is not a smoothed track export: export "
+                f"one with --export-smoothed-json and score that")
+        rows = track_from_dict(data)
+        method = data.get("smoothing_method") or "rts"
+        return rows, str(method)
+    if suffix == ".csv":
+        return load_track_csv(path), "rts"
+    raise ValueError(
+        f"cannot score a smoothed track from {path!r}: expected a "
+        f".json or .csv live-track export")
+
+
 def main(argv=None, input_stream=None, output_stream=None) -> int:
     """Stream entry point: read JSON-line readings from stdin, print
     one JSON line per reading with the device and its live position
@@ -510,6 +740,14 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
     improvement the map shows is the improvement the report
     measures, from the same scoring. A stream has no ground
     truth to score against, so all four flags need ``--demo``.
+    ``--evaluate-smoothed-file PATH`` scores a smoothed track
+    file instead of the demo — a ``--export-smoothed-json`` /
+    ``--export-smoothed-csv`` file, JSON or CSV — against the
+    ground truth in ``--ground-truth`` and prints the same
+    per-device + overall report, and
+    ``--evaluate-smoothed-file-json PATH`` writes that report
+    as JSON as well, so a smoothed export recorded on a real
+    walk can be scored without re-running the demo.
     ``input_stream`` / ``output_stream`` exist so tests can drive
     the stream without touching sys.stdin / sys.stdout.
     """
@@ -608,6 +846,28 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                         help="demo only: write the smoothed-track "
                         "accuracy report as JSON to PATH, with a "
                         "smoothed flag and the smoothing method")
+    parser.add_argument("--evaluate-smoothed-file", default=None,
+                        metavar="PATH",
+                        help="score a smoothed track export (JSON or "
+                        "CSV, as --export-smoothed-json / "
+                        "--export-smoothed-csv write it) against the "
+                        "ground truth in --ground-truth and print the "
+                        "same per-device + overall report as "
+                        "--evaluate-smoothed — so a smoothed export "
+                        "recorded on a real walk can be scored "
+                        "without re-running the demo")
+    parser.add_argument("--evaluate-smoothed-file-json", default=None,
+                        metavar="PATH",
+                        help="with --evaluate-smoothed-file: write the "
+                        "smoothed-track-file report as JSON to PATH "
+                        "as well, with a smoothed flag and the "
+                        "smoothing method")
+    parser.add_argument("--ground-truth", default=None, metavar="PATH",
+                        help="with --evaluate-smoothed-file: the "
+                        "ground truth to score against, a JSON file "
+                        "mapping each device id to its true "
+                        "positions, one {\"t\", \"x\", \"y\"} point per "
+                        "step (\"floor\" too on multi-floor walks)")
     args = parser.parse_args(argv)
     if args.stale_after <= 0:
         parser.error("--stale-after must be positive")
@@ -635,6 +895,30 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
     if args.evaluate_smoothed_json is not None and not args.demo:
         parser.error("--evaluate-smoothed-json needs --demo: a "
                      "stream has no ground truth to score against")
+    if (args.evaluate_smoothed_file_json is not None
+            and args.evaluate_smoothed_file is None):
+        parser.error("--evaluate-smoothed-file-json needs "
+                     "--evaluate-smoothed-file: the report's track "
+                     "file")
+    want_file_report = args.evaluate_smoothed_file is not None
+    if want_file_report and args.ground_truth is None:
+        parser.error("--evaluate-smoothed-file needs --ground-truth: "
+                     "a track file has positions but no truth to "
+                     "score against")
+    if args.ground_truth is not None and not want_file_report:
+        parser.error("--ground-truth needs --evaluate-smoothed-file: "
+                     "it scores a track file, not the demo or a "
+                     "stream")
+    if want_file_report and args.demo:
+        parser.error("--evaluate-smoothed-file scores a track file, "
+                     "not the demo: drop --demo")
+    if want_file_report and (args.export_json is not None
+                             or args.export_csv is not None
+                             or args.export_smoothed_json is not None
+                             or args.export_smoothed_csv is not None):
+        parser.error("--evaluate-smoothed-file scores a track file "
+                     "and runs no track of its own, so there is "
+                     "nothing to export")
     plan = None
     if args.forecast:
         try:
@@ -657,6 +941,38 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
         if beacon_id not in {b.id for b in default_beacons()}:
             parser.error(f"unknown beacon: {beacon_id!r}")
         drift_beacon = (beacon_id, offset_db)
+
+    if want_file_report:
+        # A track file scores on its own: no stream, no demo, no
+        # tracker — the file's rows are the track, and the ground
+        # truth file is the walk. A missing or misshapen file, a
+        # raw export passed as a smoothed one, or a file and a
+        # truth that disagree about the walk all fail with the
+        # reason on stderr instead of a traceback.
+        sink = output_stream if output_stream is not None else sys.stdout
+        try:
+            rows, method = load_smoothed_track_file(
+                args.evaluate_smoothed_file)
+            truths = load_ground_truth(args.ground_truth)
+            tracks, scorer_truths = tracks_from_export_rows(
+                rows, truths)
+            report = evaluate_multi_device_track(tracks,
+                                                 scorer_truths)
+        except (OSError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        if args.evaluate_smoothed_file_json is not None:
+            report_dict = report.to_dict()
+            report_dict["smoothed"] = True
+            report_dict["smoothing_method"] = method
+            with open(args.evaluate_smoothed_file_json, "w",
+                      encoding="utf-8") as handle:
+                json.dump(report_dict, handle, indent=2)
+                handle.write("\n")
+        print(f"Smoothed track file ({args.evaluate_smoothed_file}, "
+              f"{method}):", file=sink)
+        print(format_multi_device_report(report), file=sink)
+        return 0
 
     tracker = MultiDeviceTracker(default_beacons(),
                                  stale_after=args.stale_after,
