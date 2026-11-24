@@ -13,6 +13,8 @@ Usage:
         [--drain-rate 0.05]
     python -m beacon.cli --map-overlay track.json --map-drift
         [--map-output map.svg]
+    python -m beacon.cli --map-overlay track.json
+        --map-smoothed track-smoothed.json [--map-output map.svg]
     python -m beacon.cli --drift-classify [--seed 7]
         [--battery-degrade D] [--move-beacon D:5,-5]
     python -m beacon.cli --deployment-plan
@@ -287,6 +289,14 @@ def main(argv=None) -> int:
                         help="render the track as an animated replay "
                         "SVG (SMIL, no JavaScript) instead of the "
                         "static overlay")
+    parser.add_argument("--map-smoothed", default=None, metavar="PATH",
+                        help="render the smoothed track from a smoothed "
+                        "export (.json or .csv) as a dashed series "
+                        "alongside the raw track on the overlay or "
+                        "the replay — needs --map-overlay; the rows "
+                        "come from the smoothed export file, so the "
+                        "overlay and the replay draw exactly what "
+                        "the export says")
     parser.add_argument("--replay-step-seconds", type=float, default=1.0,
                         help="replay time per step in seconds "
                         "(default: 1.0)")
@@ -398,13 +408,16 @@ def main(argv=None) -> int:
                 print(str(exc), file=sys.stderr)
                 return 2
         rows = load_track_for_overlay(args.map_overlay)
+        smoothed_rows = (load_track_for_overlay(args.map_smoothed)
+                         if args.map_smoothed is not None else None)
         if args.map_replay:
             svg = render_track_replay(
                 rows, default_beacons(),
                 width_m=WARD_WIDTH_M, height_m=WARD_HEIGHT_M,
                 floor=args.map_floor, heatmap=args.map_heatmap,
                 seconds_per_step=args.replay_step_seconds,
-                drift=args.map_drift, forecast=args.map_forecast)
+                drift=args.map_drift, forecast=args.map_forecast,
+                smoothed_rows=smoothed_rows)
         else:
             svg = render_map_overlay(rows, default_beacons(),
                                      width_m=WARD_WIDTH_M,
@@ -413,7 +426,8 @@ def main(argv=None) -> int:
                                      heatmap=args.map_heatmap,
                                      plan=plan,
                                      planner=args.map_planner,
-                                     drift=args.map_drift)
+                                     drift=args.map_drift,
+                                     smoothed_rows=smoothed_rows)
         if args.map_output is not None:
             with open(args.map_output, "w", encoding="utf-8") as handle:
                 handle.write(svg)

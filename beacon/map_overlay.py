@@ -23,6 +23,14 @@ cannot disagree about which rows belong to which device. A row
 with no device is one unnamed device, so a single-device track
 renders exactly as before.
 
+With the smoothed export's rows (see :func:`_smoothed_series`),
+each device's smoothed track is drawn alongside its raw one as
+a dashed series in that device's own colour, with a hollow dot
+per smoothed point — the export's own (x, y), never a second
+smoothing, so the map cannot disagree with the export about
+where the smoothed track went. With no smoothed rows the
+overlay renders exactly as before.
+
 The SVG is plain text with no dependencies, so a dashboard can
 embed it, save it, or open it in a browser as-is. Rows on other
 floors are not plotted on top of each other: the overlay renders
@@ -458,6 +466,66 @@ def _group_rows_by_device(rows: list[dict]
     return grouped
 
 
+def _smoothed_series(floor_rows: list[dict],
+                     smoothed_rows: list[dict] | None
+                     ) -> list[tuple[str | None, list[dict]]] | None:
+    """The smoothed rows aligned to the plotted raw series, or None.
+
+    ``floor_rows`` are the raw rows already filtered to the plotted
+    floor; ``smoothed_rows`` are the rows of the smoothed export
+    of the same track (see :func:`beacon.export.smooth_track_rows`)
+    — the same data the smoothed export file carries, so the
+    overlay and the replay draw exactly what the export says and
+    never a second smoothing of their own. Returns
+    ``[(device, rows)]`` in the raw series' first-seen device
+    order, or None when no smoothed rows were given. Raises
+    ValueError when the smoothed rows are not the smoothing of
+    this track: no smoothed points on the plotted floor, a device
+    the raw track never had, a device missing, a different step
+    count, or different timestamps — drawing those over this
+    track would be a lie, so they are refused instead.
+    """
+    if smoothed_rows is None:
+        return None
+    floor = floor_rows[0]["floor"]
+    smoothed_floor = [row for row in smoothed_rows
+                      if row["floor"] == floor]
+    if not smoothed_floor:
+        raise ValueError(f"no smoothed points on floor {floor}")
+    raw_series = _group_rows_by_device(floor_rows)
+    smoothed_grouped = dict(_group_rows_by_device(smoothed_floor))
+    extra = sorted({device for device in smoothed_grouped}
+                   - {device for device, _ in raw_series},
+                   key=lambda device: "" if device is None
+                   else str(device))
+    if extra:
+        raise ValueError(
+            "smoothed rows carry devices the track never had: "
+            + ", ".join("unnamed device" if device is None
+                        else str(device) for device in extra))
+    aligned = []
+    for device, device_rows in raw_series:
+        if device not in smoothed_grouped:
+            raise ValueError(
+                "smoothed rows are missing device "
+                + ("unnamed device" if device is None else str(device)))
+        smoothed_device_rows = smoothed_grouped[device]
+        if len(smoothed_device_rows) != len(device_rows):
+            raise ValueError(
+                "smoothed rows for device "
+                + ("unnamed device" if device is None else str(device))
+                + f" have {len(smoothed_device_rows)} steps, the raw "
+                f"track has {len(device_rows)}")
+        if ([row["t"] for row in smoothed_device_rows]
+                != [row["t"] for row in device_rows]):
+            raise ValueError(
+                "smoothed rows for device "
+                + ("unnamed device" if device is None else str(device))
+                + " do not share the raw track's timestamps")
+        aligned.append((device, smoothed_device_rows))
+    return aligned
+
+
 def _project(x: float, y: float, scale: float,
              width_m: float, height_m: float) -> tuple[float, float]:
     """Ward metres to SVG pixels; y is flipped, so up stays up."""
@@ -473,7 +541,8 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
                        sigma_rssi_db: float = 2.0,
                        plan: DeploymentPlan | None = None,
                        planner: bool = False,
-                       drift: bool = False) -> str:
+                       drift: bool = False,
+                       smoothed_rows: list[dict] | None = None) -> str:
     """Render an exported live track as a ward-map SVG string.
 
     ``rows`` are the row dicts ``load_track_json`` /
@@ -510,6 +579,21 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
     quiet can alarm on the wrong beacon, so the badge marks what
     the monitor recorded, not a ground-truth diagnosis, and a
     track recorded without a monitor marks nothing.
+
+    With ``smoothed_rows`` — the rows of the smoothed export of
+    the same track, as ``load_track_json`` loads a
+    ``export_smoothed_track_json`` file — each device's smoothed
+    track is drawn alongside its raw one: a dashed trail in that
+    device's own colour with a hollow dot per smoothed point, so
+    the dashboard can see how much the smoothing steadied the
+    path, and the legend keys each device's smoothed series. The
+    smoothed rows are the export's own data (see
+    :func:`_smoothed_series`): the overlay never smooths the raw
+    rows itself, so it cannot disagree with the export, and a
+    smoothed file from a different walk is refused instead of
+    drawn. With no smoothed rows the overlay renders exactly as
+    before — a single-device track is byte-identical to the
+    render without smoothing.
 
     With rows from more than one device — each row carrying its
     ``device`` (see :func:`beacon.export.track_rows`) — the
@@ -561,6 +645,11 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
     multi_device = len(series) > 1
     series_colours = [DEVICE_COLOURS[i % len(DEVICE_COLOURS)]
                       for i in range(len(series))]
+    # The smoothed track, aligned to these series — the export's
+    # own rows, never a second smoothing, so the overlay cannot
+    # disagree with the smoothed export. None when no smoothed
+    # rows were given, and the overlay renders exactly as before.
+    smoothed = _smoothed_series(floor_rows, smoothed_rows)
     # The drift alarms at the end of each device's own track —
     # beacon id -> [(device, mean residual, verdict)] in device
     # order — so one tag's alarm never colours another tag's
@@ -742,6 +831,37 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
             f'font-size="11" font-weight="bold" text-anchor="middle">'
             f'{label}</text>')
 
+    # The smoothed track, one dashed series per device in that
+    # device's own colour — the same colour as its raw trail, so
+    # a tag is one colour on the map and the dash is what says
+    # smoothed — with a hollow dot per smoothed point. The
+    # points are the smoothed export's own (x, y), projected
+    # like the raw ones, so the dashed trail is the export's
+    # track on the map, not a re-derivation of it.
+    if smoothed is not None:
+        for (device, device_rows), colour in zip(smoothed,
+                                                 series_colours):
+            points = " ".join(
+                f"{_project(row['x'], row['y'], scale, width_m, height_m)[0]:.1f},"
+                f"{_project(row['x'], row['y'], scale, width_m, height_m)[1]:.1f}"
+                for row in device_rows)
+            device_attr = (
+                "" if not multi_device or device is None
+                else f' data-device="{escape(str(device))}"')
+            parts.append(
+                f'<polyline points="{points}" fill="none" '
+                f'stroke="{colour}" stroke-width="2" '
+                f'stroke-dasharray="6 3" data-smoothed="true"'
+                f"{device_attr}/>")
+            for row in device_rows:
+                cx, cy = _project(row["x"], row["y"], scale,
+                                  width_m, height_m)
+                parts.append(
+                    f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="3" '
+                    f'fill="#ffffff" stroke="{colour}" '
+                    f'stroke-width="1.5" data-smoothed="true"'
+                    f"{device_attr}/>")
+
     # Beacons: a diamond marker plus its id, so the track can be
     # read against the hardware that located it. With a plan, the
     # diamond is coloured by the beacon's forecast status and a
@@ -847,6 +967,16 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
                                                   series_colours):
             label = (f"{device} track" if device is not None
                      else "unnamed device track")
+            legend_items.append((colour, label))
+    if smoothed is not None:
+        # One swatch per device's smoothed series, in the same
+        # colour as its raw trail — the dash is what says
+        # smoothed, so the legend says so too.
+        for (device, _device_rows), colour in zip(smoothed,
+                                                  series_colours):
+            label = (f"{device} smoothed track (dashed)"
+                     if device is not None
+                     else "smoothed track (dashed)")
             legend_items.append((colour, label))
     if forecasts is not None:
         legend_items.append(
@@ -1015,13 +1145,16 @@ def write_map_overlay(track_path: str, beacons: list[Beacon],
                       sigma_rssi_db: float = 2.0,
                       plan: DeploymentPlan | None = None,
                       planner: bool = False,
-                      drift: bool = False) -> str:
+                      drift: bool = False,
+                      smoothed_rows: list[dict] | None = None) -> str:
     """Render the overlay for ``track_path`` and write it to
     ``output_path``. Returns the SVG string. With ``plan`` the
     overlay is planner-aware (see :func:`render_map_overlay`);
     ``planner`` shades the cells by when their coverage first
     degrades; ``drift`` marks the beacons alarming at the end of
-    the track."""
+    the track. With ``smoothed_rows`` — the rows of the smoothed
+    export of the same track — each device's smoothed track is
+    drawn as a dashed series alongside its raw one."""
     svg = render_map_overlay(load_track_for_overlay(track_path),
                              beacons, width_m=width_m,
                              height_m=height_m, floor=floor,
@@ -1029,7 +1162,7 @@ def write_map_overlay(track_path: str, beacons: list[Beacon],
                              heatmap_spacing=heatmap_spacing,
                              sigma_rssi_db=sigma_rssi_db,
                              plan=plan, planner=planner,
-                             drift=drift)
+                             drift=drift, smoothed_rows=smoothed_rows)
     with open(output_path, "w", encoding="utf-8") as handle:
         handle.write(svg)
     return svg

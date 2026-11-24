@@ -42,6 +42,20 @@ alarm never colours another tag's track. A row with no device
 is one unnamed device, so a single-device track renders exactly
 as before.
 
+With the smoothed export's rows (see
+:func:`beacon.map_overlay._smoothed_series`), each device's
+smoothed track replays alongside its raw one: a hollow dot
+glides along the smoothed positions on the same key times as
+the raw dot, over a dashed trail in that device's own colour —
+the export's own (x, y), never a second smoothing, so the
+replay cannot disagree with the export about where the smoothed
+track went. The smoothed trail is drawn whole from the start,
+so it reads as where the smoothed path ends up while the raw
+trail draws itself; the ellipses stay on the raw frames only,
+since the ellipse is the live estimate's, not the smoothed
+position's. With no smoothed rows the replay renders exactly
+as before.
+
 The animation is SMIL, not JavaScript: the dot's ``cx`` / ``cy``
 animate through the projected positions on the track's key times,
 the trail is a polyline whose ``stroke-dashoffset`` animates from
@@ -82,6 +96,7 @@ from .map_overlay import (
     _group_rows_by_device,
     _most_common_floor,
     _project,
+    _smoothed_series,
     confidence_colour,
     coverage_heatmap,
     heatmap_summary,
@@ -481,7 +496,8 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
                         heatmap_spacing: float = 2.0,
                         sigma_rssi_db: float = 2.0,
                         drift: bool = False,
-                        forecast: bool = False) -> str:
+                        forecast: bool = False,
+                        smoothed_rows: list[dict] | None = None) -> str:
     """Render an exported live track as an animated SVG string.
 
     ``rows`` are the row dicts ``load_track_json`` /
@@ -554,6 +570,21 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
     multi-device file reads the same either way — the replay
     adds the motion, the overlay the still picture.
 
+    With ``smoothed_rows`` — the rows of the smoothed export of
+    the same track — each device's smoothed track replays
+    alongside its raw one: a hollow dot glides along the smoothed
+    positions on the same key times as the raw dot, over a dashed
+    trail in that device's own colour, and the legend keys each
+    device's smoothed series. The smoothed rows are the export's
+    own data (see :func:`beacon.map_overlay._smoothed_series`):
+    the replay never smooths the raw rows itself, so it cannot
+    disagree with the export, and a smoothed file from a
+    different walk is refused instead of drawn. The ellipses
+    stay on the raw frames only, since the ellipse is the live
+    estimate's, not the smoothed position's. With no smoothed
+    rows the replay renders exactly as before — a single-device
+    track is byte-identical to the render without smoothing.
+
     Raises ValueError on an empty track, with no beacons, a
     non-positive ``seconds_per_step``, or when the chosen floor
     has no located points.
@@ -577,6 +608,11 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
     series = _device_series(floor_rows, scale, width_m, height_m,
                             seconds_per_step, drift, forecast)
     multi_device = len(series) > 1
+    # The smoothed track, aligned to these series — the export's
+    # own rows, never a second smoothing, so the replay cannot
+    # disagree with the smoothed export. None when no smoothed
+    # rows were given, and the replay renders exactly as before.
+    smoothed = _smoothed_series(floor_rows, smoothed_rows)
     any_drift = any(state for s in series for state in s.frame_drift)
     any_forecast = any(state for s in series
                        for state in s.frame_forecast)
@@ -728,6 +764,48 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
                 f'repeatCount="{repeat}"/>')
         dot.append("</circle>")
         parts.append("".join(dot))
+
+        # The smoothed track for this device, from the smoothed
+        # export's own rows: a dashed trail in the device's own
+        # colour, drawn whole from the start so it reads as where
+        # the smoothed path ends up while the raw trail draws
+        # itself, and a hollow dot gliding along the smoothed
+        # positions on the same key times as the raw dot — the
+        # same timestamps, so the two dots stay in step and the
+        # gap between them is the smoothing, not a timing skew.
+        # A single point has no trail and a static smoothed dot.
+        if smoothed is not None:
+            smoothed_points = [
+                _project(row["x"], row["y"], scale, width_m, height_m)
+                for row in smoothed[series_index][1]]
+            if n > 1:
+                trail = " ".join(
+                    f"{px:.1f},{py:.1f}" for px, py in smoothed_points)
+                parts.append(
+                    f'<polyline points="{trail}" fill="none" '
+                    f'stroke="{s.colour}" stroke-width="2" '
+                    f'stroke-dasharray="6 3" '
+                    f'data-smoothed-trail="true"{device_attr}/>')
+            first_smoothed = smoothed_points[0]
+            smoothed_dot = [
+                f'<circle cx="{first_smoothed[0]:.1f}" '
+                f'cy="{first_smoothed[1]:.1f}" r="4" fill="#ffffff" '
+                f'stroke="{s.colour}" stroke-width="1.5" '
+                f'data-smoothed-dot="true"{device_attr}>']
+            if n > 1:
+                key_times_str = ";".join(f"{k:.4f}" for k in key_times)
+                xs = ";".join(f"{px:.1f}" for px, _ in smoothed_points)
+                ys = ";".join(f"{py:.1f}" for _, py in smoothed_points)
+                smoothed_dot.append(
+                    f'<animate attributeName="cx" values="{xs}" '
+                    f'keyTimes="{key_times_str}" dur="{duration:g}s" '
+                    f'repeatCount="{repeat}"/>')
+                smoothed_dot.append(
+                    f'<animate attributeName="cy" values="{ys}" '
+                    f'keyTimes="{key_times_str}" dur="{duration:g}s" '
+                    f'repeatCount="{repeat}"/>')
+            smoothed_dot.append("</circle>")
+            parts.append("".join(smoothed_dot))
 
         # One timestamp label per frame, visible only while its
         # frame is current, so the replay reads as a clock as
@@ -998,6 +1076,15 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
             label = (f"{s.device} track" if s.device is not None
                      else "unnamed device track")
             legend_items.append((s.colour, label))
+    if smoothed is not None:
+        # One swatch per device's smoothed series, in the same
+        # colour as its raw dot and trail — the dash is what says
+        # smoothed, so the legend says so too.
+        for (device, _rows), s in zip(smoothed, series):
+            label = (f"{device} smoothed track (dashed)"
+                     if device is not None
+                     else "smoothed track (dashed)")
+            legend_items.append((s.colour, label))
     if drift:
         legend_items.append(
             (DRIFT_ALARM_COLOUR,
@@ -1179,13 +1266,17 @@ def write_track_replay(track_path: str, beacons: list[Beacon],
                        heatmap_spacing: float = 2.0,
                        sigma_rssi_db: float = 2.0,
                        drift: bool = False,
-                       forecast: bool = False) -> str:
+                       forecast: bool = False,
+                       smoothed_rows: list[dict] | None = None) -> str:
     """Render the replay for ``track_path`` and write it to
     ``output_path``. Returns the SVG string. ``drift`` marks the
     beacons alarming at each frame's row (see
     :func:`render_track_replay`); ``forecast`` marks the beacons
     whose planner forecast is due on each frame's row and checks
-    it against the drift that followed."""
+    it against the drift that followed. With ``smoothed_rows`` —
+    the rows of the smoothed export of the same track — each
+    device's smoothed track replays as a dashed series alongside
+    its raw one."""
     svg = render_track_replay(load_track_for_overlay(track_path),
                               beacons, width_m=width_m,
                               height_m=height_m, floor=floor,
@@ -1193,7 +1284,8 @@ def write_track_replay(track_path: str, beacons: list[Beacon],
                               loop=loop, heatmap=heatmap,
                               heatmap_spacing=heatmap_spacing,
                               sigma_rssi_db=sigma_rssi_db,
-                              drift=drift, forecast=forecast)
+                              drift=drift, forecast=forecast,
+                              smoothed_rows=smoothed_rows)
     with open(output_path, "w", encoding="utf-8") as handle:
         handle.write(svg)
     return svg

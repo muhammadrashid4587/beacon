@@ -2894,5 +2894,47 @@ to 2.15 m; seed 7: 2.16 m to 1.45 m; seed 11: 1.83 m to
 1.19 m). The moving-average opt-out on the same single-device
 walk measures 2.93 m against the raw 2.16 m — worse than doing
 nothing, which is why it stays the opt-out.
+
+## Smoothed track on the ward-map overlay and replay
+
+The smoothed export is a file; a dashboard still has to see
+the smoothed path next to the raw one. `render_map_overlay`
+and `render_track_replay` both take the smoothed export's
+rows — `smoothed_rows`, as `load_track_json` loads a smoothed
+export file — and draw each device's smoothed track alongside
+its raw one: on the overlay a dashed trail in that device's
+own colour, the same colour as its raw trail, with a hollow
+dot per smoothed point; in the replay a hollow dot gliding
+along the smoothed positions on the same key times as the raw
+dot, over a dashed trail in the device's own colour, with the
+legend keying each device's smoothed series. The renders never
+smooth the raw rows themselves — they draw the export's own
+(x, y), so the overlay and the replay cannot disagree with the
+export about where the smoothed track went, and a smoothed
+file from a different walk (a device the track never had, a
+device missing, a different step count, or different
+timestamps) is refused instead of drawn over the wrong track.
+The smoothed trail in the replay is drawn whole from the
+start, so it reads as where the smoothed path ends up while
+the raw trail draws itself; the ellipses stay on the raw
+frames only, since the ellipse is the live estimate's, not
+the smoothed position's. With no smoothed rows both renders
+are exactly as before — a single-device track is byte-identical
+to the render without smoothing.
+
+```sh
+python3 -m beacon.cli --map-overlay ward-a-and-b.json --map-smoothed ward-a-and-b-smoothed.json --map-output ward-a-and-b-map.svg
+python3 -m beacon.cli --map-overlay ward-a-and-b.json --map-smoothed ward-a-and-b-smoothed.json --map-replay --map-output ward-a-and-b-replay.svg
+```
+
+Measured behaviour (v0.49.0): on the two-device demo walk
+the dashed trails on the overlay, unprojected back to metres,
+score exactly the smoothed export's numbers — tag-1 1.45 m
+against the raw 2.16 m, tag-2 1.04 m against 1.72 m, overall
+1.25 m against 1.94 m over the 80 located steps — and on the
+single-device demo walk the rendered smoothed trail scores
+1.45 m against the raw 2.16 m on seed 7. The improvement the
+map shows is the improvement the export measured, not a
+second opinion.
 The roadmap grows as new needs surface — the smoothed-track
-export is the latest addition.
+rendering on the overlay and the replay is the latest addition.
