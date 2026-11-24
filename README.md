@@ -114,6 +114,12 @@ library, no dependencies, no BLE hardware needed.
   step appears with the dot, and a timestamp label steps through
   the track's own times — SMIL animation, no JavaScript, looping
   by default, so a dashboard can watch a shift play back.
+- Multi-device replay: the replay plays every device's track
+  together — one dot, trail, ellipse series and timestamp label
+  per device, each in its own colour — with the per-frame drift
+  badges, the timeline strip and the forecast checks computed
+  per device from that device's own rows, so one tag's alarm
+  never colours another tag's track.
 - Multi-device tracking: one tracker for the whole ward, with a
   separate live track per device id — a patient tag, a nurse's
   badge, a pump on a trolley — each with its own filter and floor
@@ -922,6 +928,60 @@ every frame and checks A `confirmed, alarm from frame 4`,
 C `contradicted, alarm from frame 25` (its 11.3 h forecast
 against an alarm 25 seconds in), and B and D `not observed in
 this track`.
+
+## Replay of multi-device tracks
+
+The replay played one device's track; a ward runs several tags
+at once, and a shift is all of them together. `track_rows(...,
+device="tag-1")` tags a track's rows with its device — the tag
+rides the JSON export and the CSV export (a new `device`
+column, last, empty for a single unnamed device), and
+`multi_track_rows({"tag-1": positions_a, "tag-2": positions_b})`
+combines several devices' tracks into one row list, each
+device's rows keeping that device's own coverage — so a
+combined file is just the per-device exports with their `rows`
+concatenated. `render_track_replay` on combined rows plays
+every device together: one dot, trail, ellipse series and
+timestamp label per device, each in its own colour, on its own
+timing — a device that starts late or walks fewer steps still
+plays at its own pace — and the drift badges, the timeline
+strip and the forecast checks are computed per device from
+that device's own rows, so one tag's alarm never colours
+another tag's track. The legend carries one line per device
+for the replay length, the alarm history and the forecast
+check. A row with no device is one unnamed device, so a
+single-device track renders exactly as before, and old
+exports (no `device` key or column) load with the device
+defaulting to None.
+
+```sh
+python3 -m beacon.cli --map-overlay ward-a-and-b.json --map-output ward-a-and-b-replay.svg --map-replay --map-drift --map-forecast
+```
+
+The same honest limits as the drift flags and the forecast
+check apply, per device: the badges mark what each device's
+own monitor recorded, and the check judges each device's
+forecast against that device's own alarms — so a tag that
+never alarms can only ever say "not observed", even when
+another tag on the same beacons confirms the same forecast.
+Two devices alarming on the same beacon at the same time
+share that beacon's badge spot, and the strip and legend tell
+them apart. The static overlay still renders one track: replay
+a multi-device file with `--map-replay`, not as a plain
+overlay, or the rows plot as one zigzag path between devices.
+
+Measured behaviour (v0.43.0): two simulated walks through one
+`MultiDeviceTracker` — tag-1 forward, seed 7, with beacon A
+reading 12 dB too loud, tag-2 the reverse walk, seed 11,
+healthy — with the plan's levels A=0.2, B=0.9, C=0.9, D=0.9:
+the replay draws two dots, two trails, 80 ellipses and 80
+timestamp labels; tag-1 alarms on A frames 4–39 (moved, then
+uncertain) and C flickers frames 25–33 (moved), tag-2 alarms
+on nothing; tag-1's forecast checks read A `confirmed, alarm
+from frame 4`, C `contradicted, alarm from frame 25`, B and D
+`not observed in this track`, while tag-2 — carrying the same
+forecasts, due on the same beacons — reads all four `not
+observed in this track`.
 
 ## Planner forecast flags on the live track
 
@@ -2513,5 +2573,28 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   with beacon A reading 12 dB too loud and the plan's levels A=0.2,
   B=0.9, C=0.9, D=0.9: A is confirmed from frame 4, C is
   contradicted from frame 25 against an 11.3 h forecast, and B and D
-  are not observed. The roadmap grows as new needs surface — the
-  per-frame forecast check is the latest addition.
+  are not observed.
+- Replay of multi-device tracks — done: `track_rows(...,
+  device="tag-1")` tags a track's rows with its device, the tag
+  riding the JSON export and a new `device` column on the CSV
+  export, and `multi_track_rows` combines several devices'
+  tracks into one row list; `render_track_replay` on combined
+  rows plays every device together — one dot, trail, ellipse
+  series and timestamp label per device, each in its own colour
+  and on its own timing — with the drift badges, the timeline
+  strip and the forecast checks computed per device from that
+  device's own rows, so one tag's alarm never colours another
+  tag's track; a row with no device is one unnamed device, so a
+  single-device track renders exactly as before, and old exports
+  load with the device defaulting to None; `python -m beacon.cli
+  --map-overlay tracks.json --map-replay --map-drift --map-forecast`
+  renders it (v0.43.0); measured on two simulated walks through
+  one `MultiDeviceTracker` — tag-1 forward, seed 7, with beacon
+  A reading 12 dB too loud, tag-2 the reverse walk, seed 11,
+  healthy, plan levels A=0.2, B=0.9, C=0.9, D=0.9: two dots, two
+  trails, 80 ellipses and 80 timestamp labels; tag-1 alarms on A
+  frames 4–39 and C frames 25–33, tag-2 on nothing; tag-1's
+  forecast checks read A confirmed from frame 4 and C
+  contradicted from frame 25, while tag-2 reads all four not
+  observed. The roadmap grows as new needs surface — the
+  multi-device replay is the latest addition.

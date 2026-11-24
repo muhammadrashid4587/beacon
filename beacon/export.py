@@ -11,7 +11,7 @@ too thin to locate) as JSON or CSV, one row per located position:
     timestamp, x, y, floor, confidence ellipse (semi-major,
     semi-minor, angle), beacons used, beacons excluded, coverage,
     battery, planner forecast flags and alerts, drift alarms and
-    alerts
+    alerts, and the device the track belongs to
 
 The coverage on every row is the track's overall located share
 (located steps / all steps), so a dashboard can read it off any
@@ -72,9 +72,12 @@ FORMAT_VERSION = 1
 # ``battery`` was added in v0.25.0; ``forecasts`` and
 # ``forecast_alerts`` in v0.32.0; ``drift_alarms`` and
 # ``drift_alerts`` in v0.35.0; ``drift_classifications`` in
-# v0.36.0. Files written before that (sixteen columns, no drift
-# classifications) still load — see ``load_track_csv`` — with
-# the classifications defaulting to empty, and files before
+# v0.36.0; ``device`` in v0.43.0. Files written before that
+# (seventeen columns, no device) still load — see
+# ``load_track_csv`` — with the device defaulting to None, and
+# files before v0.36.0 (sixteen columns, no drift
+# classifications) still load the same way, with the
+# classifications defaulting to empty, and files before
 # v0.35.0 (fourteen columns, no drift alarms) still load the
 # same way.
 CSV_FIELDS = (
@@ -95,10 +98,12 @@ CSV_FIELDS = (
     "drift_alarms",
     "drift_alerts",
     "drift_classifications",
+    "device",
 )
 
 
-def track_rows(positions: list[LivePosition | None]) -> list[dict]:
+def track_rows(positions: list[LivePosition | None],
+               device: str | None = None) -> list[dict]:
     """One row per located position in a recorded track.
 
     ``positions`` is the track — one ``LivePosition`` (or None,
@@ -124,6 +129,13 @@ def track_rows(positions: list[LivePosition | None]) -> list[dict]:
     overall coverage — the located share of the walk, the same on
     every row.
 
+    ``device`` names the device the track belongs to — a patient
+    tag, a nurse's badge — so rows from several devices can be
+    combined into one multi-device track (see
+    :func:`multi_track_rows`) and replayed together. It is None
+    for a single unnamed device, so a one-device export is
+    unaffected.
+
     Raises ValueError on an empty track: with no steps there is
     no coverage to report. A track with steps but nothing located
     returns no rows and coverage 0.0 — the starvation is visible
@@ -131,6 +143,9 @@ def track_rows(positions: list[LivePosition | None]) -> list[dict]:
     """
     if not positions:
         raise ValueError("cannot export an empty track")
+    if device is not None and (not isinstance(device, str)
+                               or not device):
+        raise ValueError("device must be a non-empty string")
     located = sum(1 for position in positions if position is not None)
     coverage = located / len(positions)
     rows = []
@@ -162,13 +177,35 @@ def track_rows(positions: list[LivePosition | None]) -> list[dict]:
             "drift_alerts": list(position.drift_alerts),
             "drift_classifications": [c.to_dict() for c in
                                       position.drift_classifications],
+            "device": device,
         })
     return rows
 
 
-def track_to_dict(positions: list[LivePosition | None]) -> dict:
+def multi_track_rows(
+        tracks: dict[str, list[LivePosition | None]]) -> list[dict]:
+    """One combined row list for several devices' tracks.
+
+    ``tracks`` maps each device id to its recorded track — one
+    ``LivePosition`` (or None) per step, in order, as
+    :func:`track_rows` takes. The rows come back tagged with
+    their device, in device order, so a ward dashboard can
+    replay a whole shift — every tag at once — from one row
+    list (see :func:`beacon.replay.render_track_replay`). Each
+    device's rows keep that device's own coverage, so a tag
+    starved by dead beacons still shows up as low coverage on
+    its own rows rather than being averaged away.
+    """
+    rows = []
+    for device_id, positions in tracks.items():
+        rows.extend(track_rows(positions, device=device_id))
+    return rows
+
+
+def track_to_dict(positions: list[LivePosition | None],
+                  device: str | None = None) -> dict:
     """Serialise a recorded track to plain JSON-ready data."""
-    rows = track_rows(positions)
+    rows = track_rows(positions, device=device)
     return {
         "format": FORMAT,
         "version": FORMAT_VERSION,
@@ -313,16 +350,23 @@ def track_from_dict(data: dict) -> list[dict]:
             "drift_classifications":
                 _drift_classifications_from_dict(
                     row.get("drift_classifications")),
+            "device": (None if row.get("device") is None
+                       else str(row["device"])),
         }
         for row in rows
     ]
 
 
 def export_track_json(positions: list[LivePosition | None],
-                      path: str) -> None:
-    """Write a recorded track to ``path`` as JSON."""
+                      path: str,
+                      device: str | None = None) -> None:
+    """Write a recorded track to ``path`` as JSON.
+
+    ``device`` names the device the track belongs to, so the
+    file's rows carry it (see :func:`track_rows`)."""
     with open(path, "w", encoding="utf-8") as handle:
-        json.dump(track_to_dict(positions), handle, indent=2)
+        json.dump(track_to_dict(positions, device=device), handle,
+                  indent=2)
         handle.write("\n")
 
 
@@ -362,6 +406,8 @@ def _row_to_csv(row: dict) -> dict:
         "drift_alerts": ";".join(row["drift_alerts"]),
         "drift_classifications": json.dumps(
             row["drift_classifications"]),
+        "device": ("" if row.get("device") is None
+                   else str(row["device"])),
     }
 
 
@@ -450,6 +496,7 @@ def _row_from_csv(raw: dict) -> dict:
             raw.get("drift_alerts")),
         "drift_classifications": _drift_classifications_from_csv(
             raw.get("drift_classifications")),
+        "device": raw.get("device") or None,
     }
 
 
@@ -468,14 +515,17 @@ def _battery_from_csv(raw_battery: str) -> dict:
 
 
 def export_track_csv(positions: list[LivePosition | None],
-                     path: str) -> None:
+                     path: str,
+                     device: str | None = None) -> None:
     """Write a recorded track to ``path`` as CSV, one row per
     located position, with the fixed column order in
-    ``CSV_FIELDS``."""
+    ``CSV_FIELDS``. ``device`` names the device the track
+    belongs to, so the file's rows carry it (see
+    :func:`track_rows`)."""
     with open(path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(CSV_FIELDS))
         writer.writeheader()
-        for row in track_rows(positions):
+        for row in track_rows(positions, device=device):
             writer.writerow(_row_to_csv(row))
 
 
@@ -483,36 +533,45 @@ def load_track_csv(path: str) -> list[dict]:
     """Read back the rows from a file written by
     ``export_track_csv``.
 
-    Files written before v0.36.0 have no drift-classifications
-    column — their sixteen-column header is accepted too, and
-    those rows load with empty drift classifications, so old
-    exports keep working; files written before v0.35.0 have no
-    drift-alarms columns either, and files written before
-    v0.32.0 have no forecasts columns either, and files written
-    before v0.25.0 have no battery column either, and load with
-    empty drift alarms, forecasts and battery the same way.
+    Files written before v0.43.0 have no device column — their
+    seventeen-column header is accepted too, and those rows load
+    with the device defaulting to None, so old exports keep
+    working; files written before v0.36.0 have no
+    drift-classifications column — their sixteen-column header
+    is accepted too, and those rows load with empty drift
+    classifications, so old exports keep working; files written
+    before v0.35.0 have no drift-alarms columns either, and
+    files written before v0.32.0 have no forecasts columns
+    either, and files written before v0.25.0 have no battery
+    column either, and load with empty drift alarms, forecasts
+    and battery the same way.
     """
     with open(path, encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         if reader.fieldnames == list(CSV_FIELDS):
             pass
         elif reader.fieldnames == list(CSV_FIELDS[:-1]):
+            # Pre-device export: no device column. DictReader
+            # fills the missing field with None, which
+            # ``_row_from_csv`` treats as an unnamed device.
+            pass
+        elif reader.fieldnames == list(CSV_FIELDS[:-2]):
             # Pre-classifications export: no drift_classifications
             # column. DictReader fills the missing field with
             # None, which ``_row_from_csv`` treats as no drift
             # classifications.
             pass
-        elif reader.fieldnames == list(CSV_FIELDS[:-3]):
+        elif reader.fieldnames == list(CSV_FIELDS[:-4]):
             # Pre-drift export: no drift_alarms or drift_alerts
             # column. DictReader fills the missing fields with
             # None, which ``_row_from_csv`` treats as no drift
             # state.
             pass
-        elif reader.fieldnames == list(CSV_FIELDS[:-5]):
+        elif reader.fieldnames == list(CSV_FIELDS[:-6]):
             # Pre-forecast export: no forecasts or forecast_alerts
             # column either.
             pass
-        elif reader.fieldnames == list(CSV_FIELDS[:-6]):
+        elif reader.fieldnames == list(CSV_FIELDS[:-7]):
             # Pre-battery export: no battery column either.
             pass
         else:

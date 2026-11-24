@@ -47,7 +47,9 @@ from beacon import (
     load_track_csv,
     load_track_for_overlay,
     load_track_json,
+    multi_track_rows,
     placement_uncertainty,
+    plan_deployment,
     PositionUncertainty,
     render_map_overlay,
     render_track_replay,
@@ -2484,7 +2486,7 @@ class TestLiveTrackExport(unittest.TestCase):
                                  "beacons_excluded,coverage,battery,"
                                  "forecasts,forecast_alerts,"
                                  "drift_alarms,drift_alerts,"
-                                 "drift_classifications")
+                                 "drift_classifications,device")
 
     def _planned_track(self):
         """Feed the default walk through a tracker with a
@@ -4439,6 +4441,317 @@ class TestForecastCheckTrackReplay(unittest.TestCase):
                              "live-track-export.json")
         self.assertEqual(main(argv=["--map-overlay", track,
                                    "--map-forecast"]), 2)
+
+
+class TestMultiDeviceTrackReplay(unittest.TestCase):
+    def _row(self, x, y, semi_major, floor=0, t=0.0, device=None,
+             alarms=(), classifications=(), forecasts=(),
+             forecast_alerts=()):
+        row = {
+            "t": t, "x": x, "y": y, "floor": floor,
+            "floor_confidence": 1.0,
+            "ellipse_semi_major_m": semi_major,
+            "ellipse_semi_minor_m": (semi_major or 1.0) / 2.0,
+            "ellipse_angle_deg": 30.0,
+            "beacons_used": ["A", "B", "C", "D"],
+            "beacons_excluded": [], "coverage": 1.0,
+            "forecasts": [dict(f) for f in forecasts],
+            "forecast_alerts": list(forecast_alerts),
+            "drift_alarms": [dict(alarm) for alarm in alarms],
+            "drift_classifications": [
+                dict(c) for c in classifications],
+        }
+        if device is not None:
+            row["device"] = device
+        return row
+
+    def _forecast(self, beacon_id, milestone, hours, status="ok"):
+        return {"beacon": beacon_id, "milestone": milestone,
+                "hours": hours, "status": status,
+                "hours_to_dark": hours,
+                "hours_to_rssi_loss_db": hours,
+                "hours_to_extra_noise_db": hours}
+
+    def _alarm(self, beacon_id, mean_db):
+        return {"id": beacon_id, "mean_residual_db": mean_db,
+                "samples": 20}
+
+    def _classification(self, beacon_id, verdict, mean_db):
+        return {"id": beacon_id, "verdict": verdict,
+                "mean_residual_db": mean_db, "residual_std_db": 1.0,
+                "time_slope_db_per_step": 0.0, "time_correlation": 0.0,
+                "revisit_delta_db": None, "revisit_pairs": 0,
+                "samples": 20, "reason": "test fixture"}
+
+    def _two_devices(self):
+        # Two three-frame tracks on different paths: tag-1 walks
+        # one diagonal, tag-2 the other.
+        return [
+            self._row(2.0, 2.0, 1.0, t=0.0, device="tag-1"),
+            self._row(5.0, 5.0, 1.0, t=1.0, device="tag-1"),
+            self._row(8.0, 8.0, 1.0, t=2.0, device="tag-1"),
+            self._row(18.0, 10.0, 1.0, t=0.0, device="tag-2"),
+            self._row(15.0, 7.0, 1.0, t=1.0, device="tag-2"),
+            self._row(12.0, 4.0, 1.0, t=2.0, device="tag-2"),
+        ]
+
+    def _positions(self):
+        steps = simulate_walk(rectangular_walk(20.0, 12.0, 10),
+                              BEACONS, noise_db=2.0, seed=7)
+        tracker = LiveTracker(PositioningEngine(BEACONS))
+        return [tracker.feed(step["rssi"], float(i))
+                for i, step in enumerate(steps)]
+
+    def test_two_devices_get_their_own_dot_trail_and_series(self):
+        rows = self._two_devices()
+        svg = render_track_replay(rows, BEACONS)
+        # One moving dot, one trail, one ellipse and one timestamp
+        # label per device per frame.
+        self.assertEqual(svg.count('data-dot="true"'), 2)
+        self.assertEqual(svg.count('data-trail="true"'), 2)
+        self.assertEqual(svg.count("<ellipse"), 6)
+        self.assertEqual(svg.count("data-timestamp="), 6)
+        # Each device's dot and trail carry its id, in its own
+        # colour: tag-1 keeps the single-device pink, tag-2 blue.
+        self.assertIn('data-dot="true" data-device="tag-1"', svg)
+        self.assertIn('data-dot="true" data-device="tag-2"', svg)
+        self.assertEqual(svg.count('fill="#d81b60" stroke="#ffffff"'), 1)
+        self.assertEqual(svg.count('fill="#1565c0" stroke="#ffffff"'), 1)
+        # Timestamp labels name their device and stack, one line
+        # per device, so they never print over each other.
+        self.assertIn(">tag-1 · t = 0 s<", svg)
+        self.assertIn(">tag-2 · t = 0 s<", svg)
+        # Start and end markers per device.
+        self.assertEqual(svg.count(">S</text>"), 2)
+        self.assertEqual(svg.count(">E</text>"), 2)
+        # The heading counts both devices, and the legend keys them.
+        self.assertIn("6 points across 2 devices", svg)
+        self.assertIn("tag-1 track", svg)
+        self.assertIn("tag-2 track", svg)
+        # Each device replays at its own length: 2 s, 3 frames.
+        self.assertIn("Replay tag-1: 2 s loop, 3 frames", svg)
+        self.assertIn("Replay tag-2: 2 s loop, 3 frames", svg)
+        # Interleaved rows group the same way: the replay reads
+        # rows per device, not in file order.
+        interleaved = [rows[0], rows[3], rows[1],
+                       rows[4], rows[2], rows[5]]
+        svg2 = render_track_replay(interleaved, BEACONS)
+        self.assertEqual(svg2.count('data-dot="true"'), 2)
+        self.assertEqual(svg2.count("data-timestamp="), 6)
+
+    def test_single_unnamed_device_renders_as_before(self):
+        rows = [self._row(2.0, 2.0, 1.0, t=0.0),
+                self._row(5.0, 5.0, 1.0, t=1.0)]
+        svg = render_track_replay(rows, BEACONS)
+        self.assertNotIn("data-device=", svg)
+        self.assertNotIn("across 2 devices", svg)
+        self.assertEqual(svg.count('data-dot="true"'), 1)
+        self.assertEqual(svg.count('data-trail="true"'), 1)
+        self.assertIn("Replay: 1 s loop, 2 frames", svg)
+        self.assertIn(">t = 0 s<", svg)
+
+    def test_drift_badges_and_strip_stay_per_device(self):
+        rows = [
+            self._row(2.0, 2.0, 1.0, t=0.0, device="tag-1"),
+            self._row(5.0, 5.0, 1.0, t=1.0, device="tag-1",
+                      alarms=[self._alarm("A", 8.5)],
+                      classifications=[
+                          self._classification("A", "uncertain", 8.5)]),
+            self._row(8.0, 8.0, 1.0, t=2.0, device="tag-1",
+                      alarms=[self._alarm("A", 9.0)],
+                      classifications=[
+                          self._classification("A", "moved", 9.0)]),
+            self._row(18.0, 10.0, 1.0, t=0.0, device="tag-2"),
+            self._row(15.0, 7.0, 1.0, t=1.0, device="tag-2"),
+            self._row(12.0, 4.0, 1.0, t=2.0, device="tag-2"),
+        ]
+        svg = render_track_replay(rows, BEACONS, drift=True)
+        # A alarms on tag-1's frames 1 and 2 only; tag-2 stays quiet.
+        self.assertEqual(svg.count('data-drift-alarm="A"'), 2)
+        self.assertEqual(
+            svg.count('data-drift-alarm-frame="A" data-device="tag-1"'),
+            2)
+        self.assertNotIn(
+            'data-drift-alarm-frame="A" data-device="tag-2"', svg)
+        # The strip has one row for tag-1's alarm, labelled with both.
+        self.assertIn("tag-1 · A · frames 1–2", svg)
+        self.assertNotIn("tag-2 · A", svg)
+        # The history is one line per device: tag-1 alarmed, tag-2 none.
+        self.assertIn("Drift alarms during replay — tag-1: "
+                      "A +9.0 dB (moved), frames 1–2", svg)
+        self.assertIn("Drift alarms during replay — tag-2: none", svg)
+
+    def test_forecast_checks_are_per_device(self):
+        rows = [
+            self._row(2.0, 2.0, 1.0, t=0.0, device="tag-1",
+                      forecasts=[self._forecast("A", "3 dB loss", 0.0,
+                                                "degrading")],
+                      forecast_alerts=["A: 3 dB loss now (degrading)"]),
+            self._row(5.0, 5.0, 1.0, t=1.0, device="tag-1",
+                      forecasts=[self._forecast("A", "3 dB loss", 0.0,
+                                                "degrading")],
+                      forecast_alerts=["A: 3 dB loss now (degrading)"],
+                      alarms=[self._alarm("A", 9.2)],
+                      classifications=[
+                          self._classification("A", "moved", 9.2)]),
+            self._row(18.0, 10.0, 1.0, t=0.0, device="tag-2",
+                      forecasts=[self._forecast("A", "3 dB loss", 0.0,
+                                                "degrading")],
+                      forecast_alerts=["A: 3 dB loss now (degrading)"]),
+            self._row(15.0, 7.0, 1.0, t=1.0, device="tag-2",
+                      forecasts=[self._forecast("A", "3 dB loss", 0.0,
+                                                "degrading")],
+                      forecast_alerts=["A: 3 dB loss now (degrading)"]),
+        ]
+        svg = render_track_replay(rows, BEACONS, drift=True, forecast=True)
+        # tag-1's forecast is confirmed by its frame-1 alarm; tag-2
+        # carries the same forecast but never alarms, so its check
+        # is not observed — one tag's confirmation never speaks for
+        # the other.
+        self.assertIn("Forecast check — tag-1 · A: 3 dB loss now, "
+                      "confirmed, alarm from frame 1", svg)
+        self.assertIn("Forecast check — tag-2 · A: 3 dB loss now, "
+                      "not observed in this track", svg)
+        # The F markers ride on both devices' frames, each with its
+        # own check outcome.
+        self.assertIn('data-forecast-outcome="confirmed"', svg)
+        self.assertIn('data-forecast-outcome="not observed"', svg)
+
+    def test_device_tag_round_trips_through_json_and_csv(self):
+        positions = self._positions()
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "tag-1.json")
+            csv_path = os.path.join(tmp, "tag-1.csv")
+            export_track_json(positions, json_path, device="tag-1")
+            export_track_csv(positions, csv_path, device="tag-1")
+            json_rows = load_track_json(json_path)
+            csv_rows = load_track_csv(csv_path)
+        self.assertEqual(json_rows, csv_rows)
+        self.assertEqual(len(json_rows), 40)
+        self.assertTrue(all(row["device"] == "tag-1"
+                            for row in json_rows))
+        self.assertEqual(json_rows, track_rows(positions,
+                                               device="tag-1"))
+        # A file written before the device column still loads, with
+        # the device defaulting to None.
+        here = os.path.dirname(os.path.abspath(__file__))
+        old_rows = load_track_json(
+            os.path.join(here, "..", "examples", "live-track-export.json"))
+        self.assertTrue(all(row["device"] is None for row in old_rows))
+        old_csv = load_track_csv(
+            os.path.join(here, "..", "examples", "live-track-export.csv"))
+        self.assertEqual(old_csv, old_rows)
+
+    def test_empty_or_non_string_device_is_rejected(self):
+        positions = self._positions()
+        with self.assertRaises(ValueError):
+            track_rows(positions, device="")
+        with self.assertRaises(ValueError):
+            track_rows(positions, device=7)
+
+    def test_combined_multi_device_file_replays_both_devices(self):
+        from beacon.cli import main
+        from beacon.export import CSV_FIELDS, _row_to_csv
+        import csv
+
+        # Two real tracked walks, exported per device and combined
+        # into one file — the shape a ward dashboard writes.
+        tracks = {}
+        for device_id, walk in (
+                ("tag-1", rectangular_walk(20.0, 12.0, 10)),
+                ("tag-2", list(reversed(
+                    rectangular_walk(20.0, 12.0, 10))))):
+            steps = simulate_walk(walk, BEACONS, noise_db=2.0, seed=7)
+            tracker = LiveTracker(PositioningEngine(BEACONS))
+            tracks[device_id] = [tracker.feed(step["rssi"], float(i))
+                                 for i, step in enumerate(steps)]
+        rows = multi_track_rows(tracks)
+        self.assertEqual(len(rows), 80)
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "both.json")
+            csv_path = os.path.join(tmp, "both.csv")
+            with open(json_path, "w", encoding="utf-8") as handle:
+                json.dump({"format": "beacon-live-track", "version": 1,
+                           "steps": len(rows), "located": len(rows),
+                           "coverage": 1.0, "rows": rows}, handle)
+            with open(csv_path, "w", encoding="utf-8",
+                      newline="") as handle:
+                writer = csv.DictWriter(handle,
+                                        fieldnames=list(CSV_FIELDS))
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow(_row_to_csv(row))
+            out = os.path.join(tmp, "both.svg")
+            self.assertEqual(main(argv=["--map-overlay", json_path,
+                                       "--map-output", out,
+                                       "--map-replay"]), 0)
+            with open(out, encoding="utf-8") as handle:
+                json_svg = handle.read()
+            out_csv = os.path.join(tmp, "both-csv.svg")
+            self.assertEqual(main(argv=["--map-overlay", csv_path,
+                                       "--map-output", out_csv,
+                                       "--map-replay"]), 0)
+            with open(out_csv, encoding="utf-8") as handle:
+                csv_svg = handle.read()
+        self.assertEqual(json_svg, csv_svg)
+        self.assertEqual(json_svg.count('data-dot="true"'), 2)
+        self.assertEqual(json_svg.count("data-timestamp="), 80)
+
+    def test_measured_two_device_demo(self):
+        # Two simulated walks through one MultiDeviceTracker —
+        # tag-1 forward with beacon A reading 12 dB too loud,
+        # tag-2 the reverse walk, healthy — with the plan's levels
+        # A=0.2, the rest 0.9, so A is due 3 dB loss now and the
+        # rest 2 dB noise in 11.3 h.
+        plan = plan_deployment(
+            {b.id: BatteryModel(drain_rate_per_hour=0.05)
+             for b in BEACONS},
+            levels={"A": 0.2, "B": 0.9, "C": 0.9, "D": 0.9})
+        forward = simulate_walk(rectangular_walk(20.0, 12.0, 10),
+                                BEACONS, noise_db=2.0, seed=7)
+        reverse = simulate_walk(
+            list(reversed(rectangular_walk(20.0, 12.0, 10))),
+            BEACONS, noise_db=2.0, seed=11)
+        for step in forward:
+            step["rssi"]["A"] += 12.0
+        tracker = MultiDeviceTracker(BEACONS, plan=plan,
+                                     drift_monitor=DriftMonitor(BEACONS))
+        positions = {"tag-1": [], "tag-2": []}
+        for i, (step_a, step_b) in enumerate(zip(forward, reverse)):
+            for device_id, step in (("tag-1", step_a), ("tag-2", step_b)):
+                positions[device_id].append(
+                    tracker.feed(device_id, step["rssi"], float(i)))
+        rows = multi_track_rows(positions)
+        svg = render_track_replay(rows, BEACONS, drift=True,
+                                  forecast=True)
+        self.assertEqual(svg.count('data-dot="true"'), 2)
+        self.assertEqual(svg.count("data-timestamp="), 80)
+        # tag-1 alarms on A from frame 4 (moved, then uncertain)
+        # and C flickers frames 25–33; tag-2 never alarms.
+        self.assertEqual(
+            svg.count('data-drift-alarm-frame="A" data-device="tag-1"'),
+            36)
+        self.assertEqual(
+            svg.count('data-drift-alarm-frame="C" data-device="tag-1"'),
+            9)
+        self.assertNotIn(
+            'data-drift-alarm-frame="A" data-device="tag-2"', svg)
+        self.assertIn("tag-1 · A · frames 4–39", svg)
+        self.assertIn("tag-1 · C · frames 25–33", svg)
+        self.assertIn("Drift alarms during replay — tag-1: "
+                      "A +8.5 dB (uncertain), frames 4–39, "
+                      "C +5.1 dB (moved), frames 25–33", svg)
+        self.assertIn("Drift alarms during replay — tag-2: none", svg)
+        # tag-1's forecast is confirmed for A and contradicted for
+        # C; tag-2 carries the same forecasts but alarms on nothing.
+        self.assertIn("Forecast check — tag-1 · A: 3 dB loss now, "
+                      "confirmed, alarm from frame 4", svg)
+        self.assertIn("Forecast check — tag-1 · C: 2 dB noise in 11.3h, "
+                      "contradicted, alarm from frame 25", svg)
+        self.assertIn("Forecast check — tag-2 · A: 3 dB loss now, "
+                      "not observed in this track", svg)
+        self.assertIn("Forecast check — tag-2 · B: 2 dB noise in 11.3h, "
+                      "not observed in this track", svg)
 
 
 class TestMultiDeviceTracking(unittest.TestCase):
