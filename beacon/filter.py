@@ -200,6 +200,25 @@ class KalmanFilter:
         after it to revise it with). Returns [] when no updates
         have been fed yet.
         """
+        return [(x, y) for x, y, _ in self.smooth_with_covariance()]
+
+    def smooth_with_covariance(
+            self) -> list[tuple[float, float, list[list[float]]]]:
+        """Rauch-Tung-Striebel smoothed positions with their
+        posterior covariances: one (x, y, 2x2 covariance) per
+        update so far.
+
+        The same backward recursion as :meth:`smooth`, keeping
+        the smoothed covariance at each step alongside the
+        smoothed position — the covariance the smoother's own
+        posterior gives the revised position, so a smoothed track
+        can carry its own 95% ellipse (see
+        :func:`beacon.uncertainty.ellipse_from_covariance`)
+        instead of reusing the live estimate's. The covariance
+        is the 2x2 position block of the smoothed 4x4 state
+        covariance. Returns [] when no updates have been fed
+        yet.
+        """
         n = len(self._history)
         if n == 0:
             return []
@@ -225,7 +244,9 @@ class KalmanFilter:
                  + sum(gain[i][m] * cov_diff[m][l] * gain[j][l]
                        for m in range(4) for l in range(4))
                  for j in range(4)] for i in range(4)]
-        return [(s[0], s[1]) for s in smoothed_states]
+        return [(s[0], s[1],
+                 [[cov[0][0], cov[0][1]], [cov[1][0], cov[1][1]]])
+                for s, cov in zip(smoothed_states, smoothed_covs)]
 
     @property
     def velocity(self) -> tuple[float, float]:

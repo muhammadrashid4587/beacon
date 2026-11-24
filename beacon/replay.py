@@ -49,12 +49,14 @@ glides along the smoothed positions on the same key times as
 the raw dot, over a dashed trail in that device's own colour —
 the export's own (x, y), never a second smoothing, so the
 replay cannot disagree with the export about where the smoothed
-track went. The smoothed trail is drawn whole from the start,
-so it reads as where the smoothed path ends up while the raw
-trail draws itself; the ellipses stay on the raw frames only,
-since the ellipse is the live estimate's, not the smoothed
-position's. With no smoothed rows the replay renders exactly
-as before.
+track went — and a dashed 95% ellipse appears with the
+smoothed dot at each frame, from the smoothed export's own
+smoothed ellipse (see :func:`beacon.export.smooth_track_rows`),
+so the replay shows how much the smoothing trusts each revised
+position as it plays. The smoothed trail is drawn whole from
+the start, so it reads as where the smoothed path ends up
+while the raw trail draws itself. With no smoothed rows the
+replay renders exactly as before.
 
 The animation is SMIL, not JavaScript: the dot's ``cx`` / ``cy``
 animate through the projected positions on the track's key times,
@@ -575,15 +577,22 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
     alongside its raw one: a hollow dot glides along the smoothed
     positions on the same key times as the raw dot, over a dashed
     trail in that device's own colour, and the legend keys each
-    device's smoothed series. The smoothed rows are the export's
-    own data (see :func:`beacon.map_overlay._smoothed_series`):
-    the replay never smooths the raw rows itself, so it cannot
-    disagree with the export, and a smoothed file from a
-    different walk is refused instead of drawn. The ellipses
-    stay on the raw frames only, since the ellipse is the live
-    estimate's, not the smoothed position's. With no smoothed
-    rows the replay renders exactly as before — a single-device
-    track is byte-identical to the render without smoothing.
+    device's smoothed series — and a dashed 95% ellipse appears
+    with the smoothed dot at each frame, from the smoothed
+    export's own smoothed ellipse (see
+    :func:`beacon.export.smooth_track_rows`), in the same
+    device colour, so the replay shows how much the smoothing
+    trusts each revised position as it plays. A smoothed frame
+    with no smoothed ellipse (a moving-average smoothing, or a
+    step whose smoothed covariance was degenerate) shows no
+    ellipse rather than a made-up one. The smoothed rows are the
+    export's own data (see
+    :func:`beacon.map_overlay._smoothed_series`): the replay
+    never smooths the raw rows itself, so it cannot disagree
+    with the export, and a smoothed file from a different walk
+    is refused instead of drawn. With no smoothed rows the
+    replay renders exactly as before — a single-device track is
+    byte-identical to the render without smoothing.
 
     Raises ValueError on an empty track, with no beacons, a
     non-positive ``seconds_per_step``, or when the chosen floor
@@ -613,6 +622,16 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
     # disagree with the smoothed export. None when no smoothed
     # rows were given, and the replay renders exactly as before.
     smoothed = _smoothed_series(floor_rows, smoothed_rows)
+    # Whether any smoothed frame carries a smoothed ellipse at
+    # all — the legend keys the smoothed ellipse only when one
+    # is actually drawn, so a moving-average smoothing (which
+    # has no covariance) gets no legend line for it.
+    smoothed_has_ellipse = (
+        smoothed is not None
+        and any(row.get("smoothed_ellipse_semi_major_m") is not None
+                and row.get("smoothed_ellipse_semi_minor_m") is not None
+                for _, device_rows in smoothed
+                for row in device_rows))
     any_drift = any(state for s in series for state in s.frame_drift)
     any_forecast = any(state for s in series
                        for state in s.frame_forecast)
@@ -769,11 +788,15 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
         # export's own rows: a dashed trail in the device's own
         # colour, drawn whole from the start so it reads as where
         # the smoothed path ends up while the raw trail draws
-        # itself, and a hollow dot gliding along the smoothed
-        # positions on the same key times as the raw dot — the
-        # same timestamps, so the two dots stay in step and the
-        # gap between them is the smoothing, not a timing skew.
-        # A single point has no trail and a static smoothed dot.
+        # itself, a dashed 95% ellipse per frame from the
+        # smoothed export's own smoothed ellipse — visible only
+        # while its frame is current, like the raw ellipse, so
+        # the smoothed dot's confidence plays with it — and a
+        # hollow dot gliding along the smoothed positions on the
+        # same key times as the raw dot — the same timestamps, so
+        # the two dots stay in step and the gap between them is
+        # the smoothing, not a timing skew. A single point has
+        # no trail and a static smoothed dot and ellipse.
         if smoothed is not None:
             smoothed_points = [
                 _project(row["x"], row["y"], scale, width_m, height_m)
@@ -786,6 +809,30 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
                     f'stroke="{s.colour}" stroke-width="2" '
                     f'stroke-dasharray="6 3" '
                     f'data-smoothed-trail="true"{device_attr}/>')
+            for i, row in enumerate(smoothed[series_index][1]):
+                if (row.get("smoothed_ellipse_semi_major_m") is None
+                        or row.get("smoothed_ellipse_semi_minor_m")
+                        is None):
+                    continue
+                cx, cy = smoothed_points[i]
+                angle = -(row.get("smoothed_ellipse_angle_deg") or 0.0)
+                hidden = "" if n == 1 else ' visibility="hidden"'
+                anim = ""
+                if n > 1:
+                    anim = _visibility_animation(boundaries[i],
+                                                 boundaries[i + 1],
+                                                 duration, repeat)
+                parts.append(
+                    f'<ellipse cx="{cx:.1f}" cy="{cy:.1f}" '
+                    f'rx="{row["smoothed_ellipse_semi_major_m"] * scale:.1f}" '
+                    f'ry="{row["smoothed_ellipse_semi_minor_m"] * scale:.1f}" '
+                    f'fill="{s.colour}" fill-opacity="0.12" '
+                    f'stroke="{s.colour}" stroke-width="1" '
+                    f'stroke-dasharray="4 2" '
+                    f'transform="rotate({angle:.1f} {cx:.1f} {cy:.1f})"'
+                    f'{hidden} data-smoothed-ellipse="true" '
+                    f'data-frame="{i}"{device_attr}>'
+                    f"{anim}</ellipse>")
             first_smoothed = smoothed_points[0]
             smoothed_dot = [
                 f'<circle cx="{first_smoothed[0]:.1f}" '
@@ -1085,6 +1132,13 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
                      if device is not None
                      else "smoothed track (dashed)")
             legend_items.append((s.colour, label))
+        if smoothed_has_ellipse:
+            # One swatch for the smoothed ellipse, in the first
+            # device's smoothed colour — the dashed outline is
+            # what says smoothed, the same on every device.
+            legend_items.append(
+                (series[0].colour,
+                 "smoothed 95% ellipse (dashed)"))
     if drift:
         legend_items.append(
             (DRIFT_ALARM_COLOUR,

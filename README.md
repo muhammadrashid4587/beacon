@@ -3113,3 +3113,54 @@ opt-out — and smoothing a moving-average walk helps a little
 (2.73 m to 2.60 m) but stays worse than the Kalman default.
 The roadmap grows as new needs surface — the smoothed-track
 accuracy in the demo summary is the latest addition.
+
+## Smoothed-track uncertainty ellipses on the overlay and replay
+
+The smoothed track on the map and in the replay showed where
+the smoothing put the device, but not how much the smoothing
+trusted each revised position: the ellipses drawn were the
+live estimate's, on the raw frames only. Each smoothed export
+row now carries its own 95% ellipse — the
+Rauch-Tung-Striebel smoother's posterior covariance at that
+step (see `beacon.uncertainty.ellipse_from_covariance`), so
+the ellipse is the smoother's own, tightened by the
+observations that came after, instead of the live geometry's
+reused at the new point — and the overlay draws one dashed
+ellipse per smoothed point, in that device's own colour, while
+the replay animates one per frame with the smoothed dot, with
+a legend entry for it. The moving-average opt-out has no
+covariance, so its smoothed rows carry no smoothed ellipse
+and draw none — and a step whose smoothed covariance was
+degenerate draws none either, rather than a made-up one. The
+ellipses are the export's own data, like the smoothed
+positions: the overlay and the replay draw what the smoothed
+file says, and a smoothed file from a different walk is
+refused instead of drawn.
+
+```sh
+python3 -m beacon.multi_device --demo --export-smoothed-json ward-a-smoothed.json
+python3 -m beacon.cli --map-overlay ward-a-track.json --map-smoothed ward-a-track-smoothed.json --map-output ward-a-track.svg
+python3 -m beacon.cli --map-overlay ward-a-track.json --map-smoothed ward-a-track-smoothed.json --map-replay --map-output ward-a-track-replay.svg
+```
+
+Measured behaviour (v0.53.0): on the default demo walk the
+smoothed ellipse averages 1.14 m semi-major against the raw
+ellipse's 6.32 m — the smoother has seen the observations
+that came after, so it trusts each revised position far more
+than the live geometry did — and the overlay draws all 40 and
+the replay animates all 40, from the JSON export and from the
+CSV export alike. But the 95% claim is only as good as the
+filter's noise model, and the filter assumes 1 m measurement
+noise while the live estimates err by about 2 m: only 20 of
+the 40 true positions fall inside the smoothed ellipse on the
+demo walk (6–20 across seeds 1, 2, 3, 7, 11), against 33 of
+40 inside the raw ellipse — so the smoothed ellipse reads
+tighter than the track's actual accuracy, and it shows the
+smoother's confidence under its own model, not a calibrated
+interval. The filter's noise model is isotropic, so the
+smoothed ellipse is near-circular on every seed (semi-minor
+1.14 m too) — it carries almost no orientation, unlike the raw
+geometry ellipse, which stretches along the weak axis.
+The roadmap grows as new needs surface — the smoothed-track
+uncertainty ellipse on the overlay and replay is the latest
+addition.

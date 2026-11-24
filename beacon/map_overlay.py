@@ -28,8 +28,12 @@ each device's smoothed track is drawn alongside its raw one as
 a dashed series in that device's own colour, with a hollow dot
 per smoothed point — the export's own (x, y), never a second
 smoothing, so the map cannot disagree with the export about
-where the smoothed track went. With no smoothed rows the
-overlay renders exactly as before.
+where the smoothed track went — and a dashed 95% ellipse per
+smoothed point, from the smoothed export's own smoothed
+ellipse (see :func:`beacon.export.smooth_track_rows`), so the
+map shows how much the smoothing trusts each revised position
+too. With no smoothed rows the overlay renders exactly as
+before.
 
 The SVG is plain text with no dependencies, so a dashboard can
 embed it, save it, or open it in a browser as-is. Rows on other
@@ -586,8 +590,16 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
     track is drawn alongside its raw one: a dashed trail in that
     device's own colour with a hollow dot per smoothed point, so
     the dashboard can see how much the smoothing steadied the
-    path, and the legend keys each device's smoothed series. The
-    smoothed rows are the export's own data (see
+    path, and a dashed 95% ellipse per smoothed point — the
+    smoothed export's own smoothed ellipse (see
+    :func:`beacon.export.smooth_track_rows`), in the same
+    device colour, so the map shows how much the smoothing
+    trusts each revised position too — and the legend keys each
+    device's smoothed series and the smoothed ellipse. A
+    smoothed row with no smoothed ellipse (a moving-average
+    smoothing, or a step whose smoothed covariance was
+    degenerate) draws no ellipse rather than a made-up one.
+    The smoothed rows are the export's own data (see
     :func:`_smoothed_series`): the overlay never smooths the raw
     rows itself, so it cannot disagree with the export, and a
     smoothed file from a different walk is refused instead of
@@ -650,6 +662,16 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
     # disagree with the smoothed export. None when no smoothed
     # rows were given, and the overlay renders exactly as before.
     smoothed = _smoothed_series(floor_rows, smoothed_rows)
+    # Whether any smoothed point carries a smoothed ellipse at
+    # all — the legend keys the smoothed ellipse only when one
+    # is actually drawn, so a moving-average smoothing (which
+    # has no covariance) gets no legend line for it.
+    smoothed_has_ellipse = (
+        smoothed is not None
+        and any(row.get("smoothed_ellipse_semi_major_m") is not None
+                and row.get("smoothed_ellipse_semi_minor_m") is not None
+                for _, device_rows in smoothed
+                for row in device_rows))
     # The drift alarms at the end of each device's own track —
     # beacon id -> [(device, mean residual, verdict)] in device
     # order — so one tag's alarm never colours another tag's
@@ -834,10 +856,14 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
     # The smoothed track, one dashed series per device in that
     # device's own colour — the same colour as its raw trail, so
     # a tag is one colour on the map and the dash is what says
-    # smoothed — with a hollow dot per smoothed point. The
-    # points are the smoothed export's own (x, y), projected
+    # smoothed — with a hollow dot per smoothed point, and a
+    # dashed 95% ellipse per smoothed point from the smoothed
+    # export's own smoothed ellipse, in the same device colour.
+    # The points are the smoothed export's own (x, y), projected
     # like the raw ones, so the dashed trail is the export's
-    # track on the map, not a re-derivation of it.
+    # track on the map, not a re-derivation of it. A smoothed
+    # point with no smoothed ellipse draws no ellipse rather
+    # than a made-up one.
     if smoothed is not None:
         for (device, device_rows), colour in zip(smoothed,
                                                  series_colours):
@@ -853,6 +879,23 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
                 f'stroke="{colour}" stroke-width="2" '
                 f'stroke-dasharray="6 3" data-smoothed="true"'
                 f"{device_attr}/>")
+            for row in device_rows:
+                if (row.get("smoothed_ellipse_semi_major_m") is None
+                        or row.get("smoothed_ellipse_semi_minor_m")
+                        is None):
+                    continue
+                cx, cy = _project(row["x"], row["y"], scale,
+                                  width_m, height_m)
+                angle = -(row.get("smoothed_ellipse_angle_deg") or 0.0)
+                parts.append(
+                    f'<ellipse cx="{cx:.1f}" cy="{cy:.1f}" '
+                    f'rx="{row["smoothed_ellipse_semi_major_m"] * scale:.1f}" '
+                    f'ry="{row["smoothed_ellipse_semi_minor_m"] * scale:.1f}" '
+                    f'fill="{colour}" fill-opacity="0.12" '
+                    f'stroke="{colour}" stroke-width="1" '
+                    f'stroke-dasharray="4 2" '
+                    f'transform="rotate({angle:.1f} {cx:.1f} {cy:.1f})" '
+                    f'data-smoothed-ellipse="true"{device_attr}/>')
             for row in device_rows:
                 cx, cy = _project(row["x"], row["y"], scale,
                                   width_m, height_m)
@@ -978,6 +1021,13 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
                      if device is not None
                      else "smoothed track (dashed)")
             legend_items.append((colour, label))
+        if smoothed_has_ellipse:
+            # One swatch for the smoothed ellipse, in the first
+            # device's smoothed colour — the dashed outline is
+            # what says smoothed, the same on every device.
+            legend_items.append(
+                (series_colours[0],
+                 "smoothed 95% ellipse (dashed)"))
     if forecasts is not None:
         legend_items.append(
             (FORECAST_STATUS_COLOURS["degrading"], "beacon degrading"))

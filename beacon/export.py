@@ -74,16 +74,29 @@ floor, the confidence ellipse, the beacons used and excluded,
 the battery, the forecasts and the drift state are the recorded
 step's own, carried unchanged — the ellipse is the live
 estimate's, not the smoothed position's, so it still reads as
-wide as the live geometry was. A device's series is smoothed
-separately from every other device's, so one tag's walk never
-pulls another tag's positions, and a series that changes floor
-is split at the change — the live filter resets on a floor
-change, so the smoother does too — instead of smoothing
-across two planes. The moving-average method is available as
-an opt-out (``method="moving_average"``), the same filter the
-engine offers; on a track that is already live-filtered it
-adds lag and measures worse than the raw track, so the
-Rauch-Tung-Striebel method is the default.
+wide as the live geometry was. The smoothed rows also carry
+their own ellipse — ``smoothed_ellipse_semi_major_m``,
+``smoothed_ellipse_semi_minor_m`` and
+``smoothed_ellipse_angle_deg`` — the 95% ellipse from the
+smoother's own posterior covariance at that step (see
+:func:`beacon.uncertainty.ellipse_from_covariance`), so the
+overlay and the replay can draw how much the smoothing trusts
+each revised position instead of reusing the live ellipse at
+the new point: the smoother has seen the observations that
+came after, so its ellipse is tighter than the live one. A
+device's series is smoothed separately from every other
+device's, so one tag's walk never pulls another tag's
+positions, and a series that changes floor is split at the
+change — the live filter resets on a floor change, so the
+smoother does too — instead of smoothing across two planes.
+The moving-average method is available as an opt-out
+(``method="moving_average"``), the same filter the engine
+offers; it has no covariance, so its smoothed rows carry no
+smoothed ellipse — and on a track that is already live-filtered
+it adds lag and measures worse than the raw track, so the
+Rauch-Tung-Striebel method is the default. A smoothed ellipse
+is None where the smoother's covariance was degenerate at
+that step, so no ellipse is drawn rather than a made-up one.
 """
 
 import csv
@@ -92,6 +105,7 @@ import math
 
 from .filter import KalmanFilter, MovingAverageFilter
 from .tracking import LivePosition
+from .uncertainty import PositionUncertainty, ellipse_from_covariance
 
 FORMAT = "beacon-live-track"
 FORMAT_VERSION = 1
@@ -127,6 +141,19 @@ CSV_FIELDS = (
     "drift_alerts",
     "drift_classifications",
     "device",
+)
+
+# The smoothed export's columns: the raw columns plus the
+# smoothed ellipse per step (added in v0.53.0). Only the
+# smoothed CSV writers use these — a raw export keeps the
+# header it always had, so its bytes do not change — and
+# ``load_track_csv`` accepts both headers. A smoothed file
+# written before v0.53.0 has the raw header and loads with no
+# smoothed ellipse, the same way a raw file does.
+SMOOTHED_CSV_FIELDS = CSV_FIELDS + (
+    "smoothed_ellipse_semi_major_m",
+    "smoothed_ellipse_semi_minor_m",
+    "smoothed_ellipse_angle_deg",
 )
 
 
@@ -264,25 +291,42 @@ def multi_track_to_dict(
     }
 
 
-def _smooth_series(positions: list[tuple[float, float]],
-                   method: str, window: int) -> list[tuple[float, float]]:
-    """One device's (x, y) series, smoothed in order.
+def _smooth_series(
+        positions: list[tuple[float, float]], method: str,
+        window: int
+        ) -> list[tuple[float, float, PositionUncertainty | None]]:
+    """One device's (x, y) series, smoothed in order, with the
+    smoothed ellipse per step.
 
-    ``"rts"`` feeds the series through a fresh Kalman filter and
-    returns the Rauch-Tung-Striebel smoothed positions — each past
-    position revised with the observations that came after it.
+    ``"rts"`` feeds the series through a fresh Kalman filter
+    and returns the Rauch-Tung-Striebel smoothed positions with
+    the 95% ellipse from each step's smoothed posterior
+    covariance — each past position revised with the
+    observations that came after it, and its ellipse tightened
+    by the same revision. A step whose smoothed covariance is
+    degenerate carries None instead of a made-up ellipse.
     ``"moving_average"`` runs the moving-average filter over the
-    series instead. The caller splits the series at floor
-    changes, so a run never spans two planes.
+    series instead and carries no ellipse at any step, since a
+    moving average has no covariance. The caller splits the
+    series at floor changes, so a run never spans two planes.
     """
     if method == "rts":
         kalman = KalmanFilter()
         for position in positions:
             kalman.update(position)
-        return kalman.smooth()
+        smoothed = []
+        for x, y, cov in kalman.smooth_with_covariance():
+            try:
+                ellipse = ellipse_from_covariance(cov)
+            except ValueError:
+                ellipse = None
+            smoothed.append((x, y, ellipse))
+        return smoothed
     # method == "moving_average": validated by smooth_track_rows.
     average = MovingAverageFilter(window=window)
-    return [average.update(position) for position in positions]
+    return [(x, y, None)
+            for x, y in (average.update(position)
+                         for position in positions)]
 
 
 def smooth_track_rows(rows: list[dict], method: str = "rts",
@@ -296,7 +340,16 @@ def smooth_track_rows(rows: list[dict], method: str = "rts",
     everything else copied unchanged: the timestamp, the floor,
     the confidence ellipse, the beacons used and excluded, the
     battery, the forecasts, the drift state and the coverage are
-    the recorded step's own. The input rows are not modified.
+    the recorded step's own. Each row also gains the smoothed
+    ellipse — ``smoothed_ellipse_semi_major_m``,
+    ``smoothed_ellipse_semi_minor_m`` and
+    ``smoothed_ellipse_angle_deg`` — the 95% ellipse from the
+    smoother's own posterior covariance at that step, so the
+    overlay and the replay can draw how much the smoothing
+    trusts each revised position; the moving-average method
+    carries None there, since it has no covariance, and a step
+    whose smoothed covariance was degenerate carries None too.
+    The input rows are not modified.
 
     ``method`` is ``"rts"`` (the default) or ``"moving_average"``:
     the Rauch-Tung-Striebel recursion over a fresh Kalman filter,
@@ -340,10 +393,16 @@ def smooth_track_rows(rows: list[dict], method: str = "rts",
                 end += 1
             run = indices[start:end]
             positions = [(rows[i]["x"], rows[i]["y"]) for i in run]
-            for i, (x, y) in zip(
+            for i, (x, y, ellipse) in zip(
                     run, _smooth_series(positions, method, window)):
                 smoothed[i]["x"] = x
                 smoothed[i]["y"] = y
+                smoothed[i]["smoothed_ellipse_semi_major_m"] = (
+                    None if ellipse is None else ellipse.semi_major)
+                smoothed[i]["smoothed_ellipse_semi_minor_m"] = (
+                    None if ellipse is None else ellipse.semi_minor)
+                smoothed[i]["smoothed_ellipse_angle_deg"] = (
+                    None if ellipse is None else ellipse.angle_deg)
             start = end
     return smoothed
 
@@ -360,8 +419,10 @@ def smoothed_track_to_dict(
     revises positions without adding or dropping rows — with a
     ``smoothed`` flag and the ``smoothing_method`` in the header,
     so the file says it is smoothed instead of looking like a
-    raw export. A track with steps but nothing located has no
-    rows to smooth, so it exports empty, like the raw export.
+    raw export, and with the smoothed ellipse on each row (see
+    :func:`smooth_track_rows`). A track with steps but nothing
+    located has no rows to smooth, so it exports empty, like the
+    raw export.
     """
     data = track_to_dict(positions, device=device)
     if data["rows"]:
@@ -385,7 +446,8 @@ def smoothed_multi_track_to_dict(
     :func:`smooth_track_rows`), so one tag's walk never pulls
     another tag's positions. The dict loads back with
     :func:`track_from_dict` exactly like a raw combined export,
-    since the smoothed rows carry the same fields.
+    since the smoothed rows carry the same fields plus the
+    smoothed ellipse.
     """
     if not tracks:
         raise ValueError("cannot export an empty track")
@@ -494,6 +556,33 @@ def _drift_classifications_from_dict(raw) -> list[dict]:
     ]
 
 
+def _smoothed_ellipse_from_dict(row: dict) -> dict:
+    """The row's smoothed ellipse back from its JSON form.
+
+    A raw export has no smoothed ellipse fields at all, so the
+    row loads without them — exactly as :func:`track_rows`
+    produced it — while a smoothed export (see
+    :func:`smooth_track_rows`) carries the three fields, None
+    where the smoother had no ellipse for that step, and loads
+    them back. The keys are only present when the file had
+    them, so a raw file and a smoothed file stay
+    distinguishable after loading.
+    """
+    if "smoothed_ellipse_semi_major_m" not in row:
+        return {}
+    return {
+        "smoothed_ellipse_semi_major_m": (
+            None if row["smoothed_ellipse_semi_major_m"] is None
+            else float(row["smoothed_ellipse_semi_major_m"])),
+        "smoothed_ellipse_semi_minor_m": (
+            None if row["smoothed_ellipse_semi_minor_m"] is None
+            else float(row["smoothed_ellipse_semi_minor_m"])),
+        "smoothed_ellipse_angle_deg": (
+            None if row["smoothed_ellipse_angle_deg"] is None
+            else float(row["smoothed_ellipse_angle_deg"])),
+    }
+
+
 def track_from_dict(data: dict) -> list[dict]:
     """Rebuild the rows from ``track_to_dict`` output. Lossless.
 
@@ -510,8 +599,9 @@ def track_from_dict(data: dict) -> list[dict]:
     rows = data.get("rows")
     if not isinstance(rows, list):
         raise ValueError("live-track file needs a 'rows' list")
-    return [
-        {
+    loaded = []
+    for row in rows:
+        loaded_row = {
             "t": float(row["t"]),
             "x": float(row["x"]),
             "y": float(row["y"]),
@@ -549,8 +639,12 @@ def track_from_dict(data: dict) -> list[dict]:
             "device": (None if row.get("device") is None
                        else str(row["device"])),
         }
-        for row in rows
-    ]
+        # The smoothed ellipse, only when the file carried it —
+        # a raw export loads without the keys, exactly as
+        # track_rows produced it.
+        loaded_row.update(_smoothed_ellipse_from_dict(row))
+        loaded.append(loaded_row)
+    return loaded
 
 
 def export_track_json(positions: list[LivePosition | None],
@@ -592,7 +686,7 @@ def export_smoothed_track_json(
     one. ``device`` names the device the track belongs to, so
     the file's rows carry it. The file loads back with
     :func:`load_track_json`, since the smoothed rows carry the
-    same fields as the raw ones."""
+    raw fields plus the smoothed ellipse."""
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(smoothed_track_to_dict(positions, device=device,
                                          method=method, window=window),
@@ -610,7 +704,7 @@ def export_smoothed_multi_track_json(
     replay the whole shift's steadier paths from one file. The
     file loads back with :func:`load_track_json` to the same
     rows the raw combined export carries, with the (x, y)
-    revised per device."""
+    revised per device and the smoothed ellipse on each row."""
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(smoothed_multi_track_to_dict(tracks, method=method,
                                                window=window),
@@ -624,17 +718,20 @@ def export_smoothed_track_csv(
         method: str = "rts", window: int = 5) -> None:
     """Write a recorded track to ``path`` as CSV, with the
     positions smoothed — the same rows as
-    :func:`export_smoothed_track_json`, in the fixed CSV column
-    order, so a dashboard can take either format. ``device``
-    names the device the track belongs to. The file loads back
-    with :func:`load_track_csv`."""
+    :func:`export_smoothed_track_json`, in the smoothed CSV
+    column order (see ``SMOOTHED_CSV_FIELDS``: the raw columns
+    plus the smoothed ellipse per step), so a dashboard can
+    take either format. ``device`` names the device the track
+    belongs to. The file loads back with
+    :func:`load_track_csv`."""
     data = smoothed_track_to_dict(positions, device=device,
                                   method=method, window=window)
     with open(path, "w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(CSV_FIELDS))
+        writer = csv.DictWriter(handle,
+                                fieldnames=list(SMOOTHED_CSV_FIELDS))
         writer.writeheader()
         for row in data["rows"]:
-            writer.writerow(_row_to_csv(row))
+            writer.writerow(_row_to_csv(row, smoothed=True))
 
 
 def export_smoothed_multi_track_csv(
@@ -643,17 +740,18 @@ def export_smoothed_multi_track_csv(
     """Write several devices' recorded tracks to ``path`` as one
     combined CSV file, with every device's positions smoothed —
     the same rows as
-    :func:`export_smoothed_multi_track_json`, in the fixed CSV
-    column order, so a dashboard can take either format and
+    :func:`export_smoothed_multi_track_json`, in the smoothed
+    CSV column order, so a dashboard can take either format and
     replay the whole shift's steadier paths from it. The file
     loads back with :func:`load_track_csv`."""
     data = smoothed_multi_track_to_dict(tracks, method=method,
                                         window=window)
     with open(path, "w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(CSV_FIELDS))
+        writer = csv.DictWriter(handle,
+                                fieldnames=list(SMOOTHED_CSV_FIELDS))
         writer.writeheader()
         for row in data["rows"]:
-            writer.writerow(_row_to_csv(row))
+            writer.writerow(_row_to_csv(row, smoothed=True))
 
 
 def load_track_json(path: str) -> list[dict]:
@@ -663,9 +761,16 @@ def load_track_json(path: str) -> list[dict]:
         return track_from_dict(json.load(handle))
 
 
-def _row_to_csv(row: dict) -> dict:
-    """One row dict as flat CSV strings, for writing."""
-    return {
+def _row_to_csv(row: dict, smoothed: bool = False) -> dict:
+    """One row dict as flat CSV strings, for writing.
+
+    The smoothed ellipse fields are read with ``.get`` and
+    only written when ``smoothed`` is true: a raw row has no
+    smoothed ellipse, so the raw writers keep the header they
+    always had, and the smoothed writers use the wider header
+    (see ``SMOOTHED_CSV_FIELDS``).
+    """
+    fields = {
         "t": repr(row["t"]),
         "x": repr(row["x"]),
         "y": repr(row["y"]),
@@ -695,6 +800,20 @@ def _row_to_csv(row: dict) -> dict:
         "device": ("" if row.get("device") is None
                    else str(row["device"])),
     }
+    if smoothed:
+        # The smoothed ellipse, written only for the smoothed
+        # writers' wider header — a raw row has no smoothed
+        # ellipse, so a raw file never carries these columns.
+        fields["smoothed_ellipse_semi_major_m"] = (
+            "" if row.get("smoothed_ellipse_semi_major_m") is None
+            else repr(row["smoothed_ellipse_semi_major_m"]))
+        fields["smoothed_ellipse_semi_minor_m"] = (
+            "" if row.get("smoothed_ellipse_semi_minor_m") is None
+            else repr(row["smoothed_ellipse_semi_minor_m"]))
+        fields["smoothed_ellipse_angle_deg"] = (
+            "" if row.get("smoothed_ellipse_angle_deg") is None
+            else repr(row["smoothed_ellipse_angle_deg"]))
+    return fields
 
 
 def _forecasts_from_csv(raw_forecasts) -> list[dict]:
@@ -747,9 +866,18 @@ def _drift_classifications_from_csv(raw) -> list[dict]:
     return _drift_classifications_from_dict(json.loads(raw))
 
 
-def _row_from_csv(raw: dict) -> dict:
-    """One CSV record back as a row dict, for reading."""
-    return {
+def _row_from_csv(raw: dict, has_smoothed_ellipse: bool = False
+                  ) -> dict:
+    """One CSV record back as a row dict, for reading.
+
+    ``has_smoothed_ellipse`` is true only when the file's
+    header carried the smoothed ellipse columns (see
+    ``SMOOTHED_CSV_FIELDS``): then the row loads with them,
+    None where the cell was empty, and a raw file — or a
+    smoothed file written before v0.53.0 — loads without the
+    keys, exactly as :func:`track_rows` produced it.
+    """
+    row = {
         "t": float(raw["t"]),
         "x": float(raw["x"]),
         "y": float(raw["y"]),
@@ -784,6 +912,20 @@ def _row_from_csv(raw: dict) -> dict:
             raw.get("drift_classifications")),
         "device": raw.get("device") or None,
     }
+    if has_smoothed_ellipse:
+        row["smoothed_ellipse_semi_major_m"] = (
+            None if raw.get("smoothed_ellipse_semi_major_m")
+            in (None, "")
+            else float(raw["smoothed_ellipse_semi_major_m"]))
+        row["smoothed_ellipse_semi_minor_m"] = (
+            None if raw.get("smoothed_ellipse_semi_minor_m")
+            in (None, "")
+            else float(raw["smoothed_ellipse_semi_minor_m"]))
+        row["smoothed_ellipse_angle_deg"] = (
+            None if raw.get("smoothed_ellipse_angle_deg")
+            in (None, "")
+            else float(raw["smoothed_ellipse_angle_deg"]))
+    return row
 
 
 def _battery_from_csv(raw_battery: str) -> dict:
@@ -848,10 +990,20 @@ def load_track_csv(path: str) -> list[dict]:
     files written before v0.32.0 have no forecasts columns
     either, and files written before v0.25.0 have no battery
     column either, and load with empty drift alarms, forecasts
-    and battery the same way.
+    and battery the same way. A smoothed CSV (see
+    ``SMOOTHED_CSV_FIELDS``) carries the three smoothed ellipse
+    columns after the device column, and loads with them; a
+    smoothed CSV written before v0.53.0 has the raw header and
+    loads with no smoothed ellipse, the same way a raw file
+    does.
     """
     with open(path, encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
+        if reader.fieldnames == list(SMOOTHED_CSV_FIELDS):
+            # A smoothed export: the rows carry the smoothed
+            # ellipse, so it loads back with them.
+            return [_row_from_csv(raw, has_smoothed_ellipse=True)
+                    for raw in reader]
         if reader.fieldnames == list(CSV_FIELDS):
             pass
         elif reader.fieldnames == list(CSV_FIELDS[:-1]):

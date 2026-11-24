@@ -204,7 +204,24 @@ class SmoothedExportTest(unittest.TestCase):
         positions, _ = _one_walk_track(seed=7)
         raw = track_rows(positions)[:1]
         smoothed = smooth_track_rows(raw)
-        self.assertEqual(smoothed, raw)
+        # The single point has nothing to smooth against, so its
+        # position and every recorded field are unchanged — only
+        # the smoothed ellipse is added: with one step the
+        # smoother's posterior is the filter's initial 1 m^2
+        # covariance, so the ellipse is a sqrt(5.991) m circle.
+        self.assertEqual(len(smoothed), 1)
+        self.assertEqual(smoothed[0]["x"], raw[0]["x"])
+        self.assertEqual(smoothed[0]["y"], raw[0]["y"])
+        for key in raw[0]:
+            self.assertEqual(smoothed[0][key], raw[0][key])
+        self.assertAlmostEqual(
+            smoothed[0]["smoothed_ellipse_semi_major_m"],
+            math.sqrt(5.991), places=6)
+        self.assertAlmostEqual(
+            smoothed[0]["smoothed_ellipse_semi_minor_m"],
+            math.sqrt(5.991), places=6)
+        self.assertAlmostEqual(
+            smoothed[0]["smoothed_ellipse_angle_deg"], 0.0, places=6)
 
     def test_empty_rows_raise(self):
         with self.assertRaises(ValueError):

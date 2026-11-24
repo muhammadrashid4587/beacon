@@ -28,8 +28,10 @@ of the larger eigenvalue.
 The ellipse describes one raw trilateration, not a filtered track:
 it is the uncertainty of the geometry and the RSSI noise at this
 step. A Kalman-filtered position has its own (smaller) covariance
-that shrinks as the filter accumulates steps; that is a separate
-feature.
+that shrinks as the filter accumulates steps; the
+Rauch-Tung-Striebel smoother's posterior covariance becomes its
+95% ellipse through :func:`ellipse_from_covariance`, so a
+smoothed track carries its own per-step ellipse too.
 """
 
 import math
@@ -67,6 +69,47 @@ class PositionUncertainty:
         v = -sin_t * dx + cos_t * dy
         return ((u / self.semi_major) ** 2
                 + (v / self.semi_minor) ** 2) <= 1.0
+
+
+def ellipse_from_covariance(
+        cov: list[list[float]]) -> PositionUncertainty:
+    """95% confidence ellipse for a 2x2 position covariance.
+
+    ``cov`` is the [[var_x, cov_xy], [cov_xy, var_y]] covariance
+    of a position estimate — the Kalman filter's or the
+    Rauch-Tung-Striebel smoother's posterior, for example. The
+    eigenvalues are the variances along the ellipse axes, scaled
+    by the 95% chi-square quantile for 2 degrees of freedom
+    (5.991), and the major axis points along the eigenvector of
+    the larger eigenvalue. Raises ValueError for a covariance
+    that is not a symmetric 2x2 matrix, or one whose smaller
+    eigenvalue is not positive — a degenerate covariance the
+    ellipse cannot be drawn from.
+    """
+    if (len(cov) != 2 or len(cov[0]) != 2 or len(cov[1]) != 2
+            or cov[0][1] != cov[1][0]):
+        raise ValueError(
+            "covariance must be a symmetric 2x2 matrix")
+    c_00, c_01, c_11 = cov[0][0], cov[0][1], cov[1][1]
+    if not all(math.isfinite(v) for v in (c_00, c_01, c_11)):
+        raise ValueError("covariance must be finite")
+    trace = c_00 + c_11
+    disc = math.sqrt(max(0.0, (c_00 - c_11) ** 2 / 4.0 + c_01 ** 2))
+    var_major = trace / 2.0 + disc
+    var_minor = trace / 2.0 - disc
+    if var_minor <= 0:
+        raise ValueError(
+            "covariance is degenerate; uncertainty is not determined")
+    scale = math.sqrt(_CHI2_95_2DOF)
+    semi_major = scale * math.sqrt(var_major)
+    semi_minor = scale * math.sqrt(var_minor)
+    # Orientation of the major axis: the eigenvector of the larger
+    # eigenvalue, from atan2(2*c_01, c_00 - c_11) / 2.
+    angle_deg = 0.5 * math.degrees(
+        math.atan2(2.0 * c_01, c_00 - c_11))
+    return PositionUncertainty(semi_major=semi_major,
+                               semi_minor=semi_minor,
+                               angle_deg=angle_deg)
 
 
 def estimate_uncertainty(beacons: list[tuple[float, float]],
@@ -127,25 +170,13 @@ def estimate_uncertainty(beacons: list[tuple[float, float]],
         raise ValueError(
             "beacon geometry is degenerate; uncertainty is not determined")
 
-    # Covariance C = (J^T W J)^-1, then its eigenvalues analytically
-    # (2x2 symmetric): the variances along the ellipse axes.
-    c_00 = jtwj_11 / det
-    c_01 = -jtwj_01 / det
-    c_11 = jtwj_00 / det
-    trace = c_00 + c_11
-    disc = math.sqrt(max(0.0, (c_00 - c_11) ** 2 / 4.0 + c_01 ** 2))
-    var_major = trace / 2.0 + disc
-    var_minor = trace / 2.0 - disc
-    if var_minor <= 0:
+    # Covariance C = (J^T W J)^-1, then the 95% ellipse from it
+    # — the same eigen-decomposition a filter covariance uses.
+    try:
+        return ellipse_from_covariance(
+            [[jtwj_11 / det, -jtwj_01 / det],
+             [-jtwj_01 / det, jtwj_00 / det]])
+    except ValueError:
         raise ValueError(
-            "beacon geometry is degenerate; uncertainty is not determined")
-    scale = math.sqrt(_CHI2_95_2DOF)
-    semi_major = scale * math.sqrt(var_major)
-    semi_minor = scale * math.sqrt(var_minor)
-    # Orientation of the major axis: the eigenvector of the larger
-    # eigenvalue, from atan2(2*c_01, c_00 - c_11) / 2.
-    angle_deg = 0.5 * math.degrees(
-        math.atan2(2.0 * c_01, c_00 - c_11))
-    return PositionUncertainty(semi_major=semi_major,
-                               semi_minor=semi_minor,
-                               angle_deg=angle_deg)
+            "beacon geometry is degenerate; uncertainty is not "
+            "determined") from None
