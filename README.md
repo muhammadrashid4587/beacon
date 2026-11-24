@@ -857,6 +857,72 @@ grey for 7–39, where it calls it uncertain, and C amber
 throughout, matching the per-frame badges exactly; seeds 1 and
 3 show A only.
 
+## Per-frame forecast check on the live-track replay
+
+The replay shows the drift alarms; it never showed whether
+the planner's forecast saw the drift coming. `render_track_replay(..., forecast=True)`
+marks each frame's beacons whose planner forecast is due
+inside the forecast window on that frame — an amber "F" badge
+with a label carrying the milestone, its hours remaining, and
+the check's outcome — and the legend carries one line per
+beacon with the same check, so the replay says whether the
+forecast predicted the drift that actually followed:
+
+- `confirmed` — the beacon alarmed at a later frame, at or
+  after the milestone's time: the drift arrived when the
+  forecast said it would. A beacon forecast to cross 3 dB loss
+  now that alarms later in the track is confirmed.
+- `contradicted` — the beacon alarmed before the milestone's
+  time: the drift came far earlier than the battery model said
+  it would, so the drift is not battery-driven — a power change
+  or a move, not a dying cell — and the fix is to check the
+  beacon, not to schedule a battery swap.
+- `not observed` — no later frame alarms on it: the forecast
+  has not been borne out within this track. A short track
+  cannot confirm a forecast hours away, and a due forecast the
+  monitor never catches is the self-referenced monitor's known
+  miss — a quiet beacon drags the estimate with it and alarms
+  on the wrong beacon, or never alarms at all.
+- `pending` — the forecast was only active on the last frame,
+  so there is no later frame to check against.
+
+The check reads the forecast flags and the drift alarms off
+the same per-frame rows the badges use, so it can never
+disagree with them: the forecast is judged from the first
+frame it was active, and the drift that followed is the
+beacon's first alarm after that frame. A track recorded
+without a plan marks nothing — the legend says no plan was
+recorded — and a plan with nothing due inside the window
+says no forecast was due. A track recorded without a monitor
+can only ever say "not observed", since no alarm was recorded
+to confirm or contradict the forecast.
+
+```sh
+python3 -m beacon.tracking --demo --forecast --battery-levels A=0.2,B=0.9,C=0.9,D=0.9 --drift --drift-beacon A:12 --export-json ward-a-track.json
+python3 -m beacon.cli --map-overlay ward-a-track.json --map-output ward-a-track-replay.svg --map-replay --map-drift --map-forecast
+```
+
+The same honest limits as the drift flags apply: the check
+compares the forecast's timing against the alarms the monitor
+recorded, not against a ground-truth diagnosis — a beacon
+alarming early for a power offset contradicts a battery
+forecast for the wrong reason in the same way it alarms on
+the right beacon for the wrong cause, and the monitor's
+reference is the track's own estimate, so a beacon reading
+too quiet can alarm on the wrong beacon and confirm or
+contradict the wrong beacon's forecast. The check says
+whether the drift arrived when the forecast said it would,
+not why it arrived.
+
+Measured behaviour (v0.42.0): on the default ward walk, seed
+7, with beacon A reading 12 dB too loud and the plan's levels
+A=0.2, B=0.9, C=0.9, D=0.9 — A due 3 dB loss now, the rest due
+2 dB noise in 11.3 h — the replay marks all four beacons on
+every frame and checks A `confirmed, alarm from frame 4`,
+C `contradicted, alarm from frame 25` (its 11.3 h forecast
+against an alarm 25 seconds in), and B and D `not observed in
+this track`.
+
 ## Planner forecast flags on the live track
 
 The planner-aware overlay shows when coverage will thin, but
@@ -2428,4 +2494,24 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   walk with beacon A reading 12 dB too loud: seed 7 shows A amber
   for frames 4–6 (moved) then grey for 7–39 (uncertain), and C amber
   throughout 25–33 (moved). The roadmap grows as new needs surface
-  — the verdict-coloured timeline strip is the latest addition.
+  — the forecast check is the latest addition.
+- Per-frame forecast check on the live-track replay — done:
+  `render_track_replay(..., forecast=True)` marks each frame's
+  beacons whose planner forecast is due inside the forecast window
+  on that frame — an amber "F" badge with a label carrying the
+  milestone, its hours remaining, and the check's outcome — and the
+  legend carries one line per beacon with the same check: whether
+  the forecast predicted the drift that actually followed —
+  `confirmed` (alarmed at or after the milestone's time),
+  `contradicted` (alarmed before it — the drift is not
+  battery-driven), `not observed` (no later alarm in this track),
+  or `pending` (only live on the last frame); the check reads the
+  forecast flags and the drift alarms off the same per-frame rows
+  the badges use, so it can never disagree with them; `python -m
+  beacon.cli --map-overlay track.json --map-replay --map-forecast`
+  renders it (v0.42.0); measured on the default ward walk, seed 7,
+  with beacon A reading 12 dB too loud and the plan's levels A=0.2,
+  B=0.9, C=0.9, D=0.9: A is confirmed from frame 4, C is
+  contradicted from frame 25 against an 11.3 h forecast, and B and D
+  are not observed. The roadmap grows as new needs surface — the
+  per-frame forecast check is the latest addition.

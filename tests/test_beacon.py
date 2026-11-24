@@ -4178,6 +4178,269 @@ class TestDriftTrackReplay(unittest.TestCase):
         self.assertGreaterEqual(height, max(ys) + 12)
 
 
+class TestForecastCheckTrackReplay(unittest.TestCase):
+    def _row(self, x, y, semi_major, floor=0, t=0.0, alarms=(),
+             classifications=(), forecasts=(), forecast_alerts=()):
+        return {
+            "t": t, "x": x, "y": y, "floor": floor,
+            "floor_confidence": 1.0,
+            "ellipse_semi_major_m": semi_major,
+            "ellipse_semi_minor_m": (semi_major or 1.0) / 2.0,
+            "ellipse_angle_deg": 30.0,
+            "beacons_used": ["A", "B", "C", "D"],
+            "beacons_excluded": [], "coverage": 1.0,
+            "forecasts": [dict(f) for f in forecasts],
+            "forecast_alerts": list(forecast_alerts),
+            "drift_alarms": [dict(alarm) for alarm in alarms],
+            "drift_classifications": [
+                dict(c) for c in classifications],
+        }
+
+    def _forecast(self, beacon_id, milestone, hours, status="ok"):
+        return {"beacon": beacon_id, "milestone": milestone,
+                "hours": hours, "status": status,
+                "hours_to_dark": hours,
+                "hours_to_rssi_loss_db": hours,
+                "hours_to_extra_noise_db": hours}
+
+    def _alarm(self, beacon_id, mean_db):
+        return {"id": beacon_id, "mean_residual_db": mean_db,
+                "samples": 20}
+
+    def test_forecast_check_outcomes_from_frame_data(self):
+        # The check itself, on the per-frame data: a due forecast
+        # confirmed by a later alarm, a hours-away forecast
+        # contradicted by an alarm within seconds, and a forecast
+        # with no later alarm not observed.
+        from beacon.replay import _forecast_check
+
+        checks = _forecast_check(
+            [{"A": ("3 dB loss", 0.0, "degrading"),
+              "B": ("2 dB noise", 11.3, "ok"),
+              "C": ("2 dB noise", 5.0, "ok")},
+             {"A": ("3 dB loss", 0.0, "degrading"),
+              "B": ("2 dB noise", 11.3, "ok"),
+              "C": ("2 dB noise", 5.0, "ok")},
+             {"A": ("3 dB loss", 0.0, "degrading"),
+              "B": ("2 dB noise", 11.3, "ok"),
+              "C": ("2 dB noise", 5.0, "ok")}],
+            [{}, {"A": (9.2, "moved")}, {"B": (8.5, "uncertain")}],
+            [0.0, 1.0, 2.0])
+        self.assertEqual(checks["A"].outcome, "confirmed")
+        self.assertEqual(checks["A"].first_alarm_frame, 1)
+        self.assertEqual(checks["A"].first_active_frame, 0)
+        self.assertEqual(checks["B"].outcome, "contradicted")
+        self.assertEqual(checks["B"].first_alarm_frame, 2)
+        self.assertEqual(checks["C"].outcome, "not observed")
+        self.assertIsNone(checks["C"].first_alarm_frame)
+
+    def test_forecast_live_only_on_last_frame_is_pending(self):
+        from beacon.replay import _forecast_check
+
+        checks = _forecast_check(
+            [{}, {"D": ("2 dB noise", 1.0, "ok")}],
+            [{}, {}], [0.0, 1.0])
+        self.assertEqual(checks["D"].outcome, "pending")
+        self.assertIsNone(checks["D"].first_alarm_frame)
+
+    def test_due_forecast_confirmed_by_later_alarm(self):
+        # A is forecast to cross 3 dB loss now and alarms from
+        # frame 1: one F badge per frame it is due, each carrying
+        # the forecast and the confirmed outcome.
+        rows = [
+            self._row(2.0, 2.0, 1.0, t=0.0,
+                      forecasts=[self._forecast(
+                          "A", "3 dB loss", 0.0, "degrading")],
+                      forecast_alerts=[
+                          "A: 3 dB loss now (degrading)"]),
+            self._row(5.0, 5.0, 1.0, t=1.0,
+                      alarms=[self._alarm("A", 9.2)],
+                      forecasts=[self._forecast(
+                          "A", "3 dB loss", 0.0, "degrading")],
+                      forecast_alerts=[
+                          "A: 3 dB loss now (degrading)"]),
+            self._row(8.0, 8.0, 1.0, t=2.0,
+                      alarms=[self._alarm("A", 8.5)],
+                      forecasts=[self._forecast(
+                          "A", "3 dB loss", 0.0, "degrading")],
+                      forecast_alerts=[
+                          "A: 3 dB loss now (degrading)"]),
+        ]
+        svg = render_track_replay(rows, BEACONS, forecast=True)
+        self.assertEqual(svg.count('data-forecast="A"'), 3)
+        self.assertEqual(
+            svg.count('data-forecast-outcome="confirmed"'), 3)
+        self.assertIn("F: 3 dB loss now \u00b7 confirmed", svg)
+        self.assertIn('data-forecast-alarm-frame="1"', svg)
+        self.assertIn("Forecast check \u2014 A: 3 dB loss now, "
+                      "confirmed, alarm from frame 1", svg)
+        self.assertIn("forecast due (amber F badge, per frame)", svg)
+        # The F badge sits top-left, opposite the drift badge:
+        # with drift off there is no drift badge at all.
+        self.assertNotIn("data-drift-alarm=", svg)
+
+    def test_hours_away_forecast_contradicted_by_early_alarm(self):
+        # B is forecast to lie in 11.3 hours but alarms on frame
+        # 2, seconds in: the drift came far earlier than the
+        # battery model said it would, so the forecast is
+        # contradicted, not confirmed.
+        rows = [
+            self._row(2.0, 2.0, 1.0, t=0.0,
+                      forecasts=[self._forecast("B", "2 dB noise", 11.3)],
+                      forecast_alerts=["B: 2 dB noise in 11.3h (ok)"]),
+            self._row(5.0, 5.0, 1.0, t=1.0,
+                      forecasts=[self._forecast("B", "2 dB noise", 11.3)],
+                      forecast_alerts=["B: 2 dB noise in 11.3h (ok)"]),
+            self._row(8.0, 8.0, 1.0, t=2.0,
+                      alarms=[self._alarm("B", 8.5)],
+                      forecasts=[self._forecast("B", "2 dB noise", 11.3)],
+                      forecast_alerts=["B: 2 dB noise in 11.3h (ok)"]),
+        ]
+        svg = render_track_replay(rows, BEACONS, forecast=True)
+        self.assertEqual(svg.count('data-forecast="B"'), 3)
+        self.assertEqual(
+            svg.count('data-forecast-outcome="contradicted"'), 3)
+        self.assertIn("F: 2 dB noise in 11.3h \u00b7 contradicted", svg)
+        self.assertIn("Forecast check \u2014 B: 2 dB noise in 11.3h, "
+                      "contradicted, alarm from frame 2", svg)
+
+    def test_forecast_with_no_later_alarm_is_not_observed(self):
+        rows = [
+            self._row(2.0, 2.0, 1.0, t=0.0,
+                      forecasts=[self._forecast("C", "2 dB noise", 5.0)],
+                      forecast_alerts=["C: 2 dB noise in 5.0h (ok)"]),
+            self._row(5.0, 5.0, 1.0, t=1.0,
+                      forecasts=[self._forecast("C", "2 dB noise", 5.0)],
+                      forecast_alerts=["C: 2 dB noise in 5.0h (ok)"]),
+        ]
+        svg = render_track_replay(rows, BEACONS, forecast=True)
+        self.assertEqual(svg.count('data-forecast="C"'), 2)
+        self.assertEqual(
+            svg.count('data-forecast-outcome="not observed"'), 2)
+        self.assertNotIn("data-forecast-alarm-frame=", svg)
+        self.assertIn("Forecast check \u2014 C: 2 dB noise in 5.0h, "
+                      "not observed in this track", svg)
+
+    def test_forecast_outside_the_window_gets_no_marker(self):
+        # A plan is recorded, but nothing is due inside the
+        # window: no F badge, and the legend says so instead of
+        # reporting no forecast at all.
+        rows = [
+            self._row(2.0, 2.0, 1.0, t=0.0,
+                      forecasts=[self._forecast("A", "2 dB noise", 99.0)]),
+            self._row(5.0, 5.0, 1.0, t=1.0,
+                      forecasts=[self._forecast("A", "2 dB noise", 99.0)]),
+        ]
+        svg = render_track_replay(rows, BEACONS, forecast=True)
+        self.assertNotIn("data-forecast=", svg)
+        self.assertIn("Forecast check: no forecast due in this track",
+                      svg)
+
+    def test_no_plan_records_no_forecast(self):
+        rows = [self._row(2.0, 2.0, 1.0, t=0.0),
+                self._row(5.0, 5.0, 1.0, t=1.0)]
+        bare = [{key: value for key, value in row.items()
+                 if not key.startswith("forecast")}
+                for row in rows]
+        svg = render_track_replay(bare, BEACONS, forecast=True)
+        self.assertNotIn("data-forecast=", svg)
+        self.assertIn("Forecast check: no plan recorded", svg)
+
+    def test_forecast_off_by_default(self):
+        rows = [
+            self._row(2.0, 2.0, 1.0, t=0.0,
+                      forecasts=[self._forecast(
+                          "A", "3 dB loss", 0.0, "degrading")],
+                      forecast_alerts=[
+                          "A: 3 dB loss now (degrading)"]),
+            self._row(5.0, 5.0, 1.0, t=1.0,
+                      forecasts=[self._forecast(
+                          "A", "3 dB loss", 0.0, "degrading")],
+                      forecast_alerts=[
+                          "A: 3 dB loss now (degrading)"]),
+        ]
+        svg = render_track_replay(rows, BEACONS)
+        self.assertNotIn("data-forecast=", svg)
+        self.assertNotIn("Forecast check", svg)
+
+    def test_forecast_check_matches_the_badges_on_a_seeded_walk(self):
+        # Seed 7, A 12 dB too loud, plan levels A=0.2 (due now)
+        # and the rest at 0.9 (2 dB noise in 11.3 h): the check
+        # reads the same per-frame rows as the drift badges, so
+        # it agrees with them frame for frame — A alarms 4–39
+        # and its due forecast is confirmed from frame 4, C
+        # flickers 25–33 against an 11.3 h forecast and is
+        # contradicted from frame 25, B and D never alarm.
+        from beacon import plan_deployment
+
+        plan = plan_deployment(
+            {b.id: BatteryModel(drain_rate_per_hour=0.05)
+             for b in BEACONS},
+            levels={"A": 0.2, "B": 0.9, "C": 0.9, "D": 0.9})
+        steps = simulate_walk(rectangular_walk(20.0, 12.0, 10),
+                              BEACONS, noise_db=2.0, seed=7)
+        for step in steps:
+            step["rssi"]["A"] += 12.0
+        tracker = LiveTracker(PositioningEngine(BEACONS), plan=plan,
+                              drift_monitor=DriftMonitor(BEACONS))
+        positions = [tracker.feed(step["rssi"], float(i))
+                     for i, step in enumerate(steps)]
+        rows = track_rows(positions)
+        svg = render_track_replay(rows, BEACONS,
+                                  drift=True, forecast=True)
+        for beacon_id in ("A", "B", "C", "D"):
+            self.assertEqual(
+                svg.count(f'data-forecast="{beacon_id}"'), 40)
+        self.assertEqual(
+            svg.count('data-forecast-outcome="confirmed"'), 40)
+        self.assertEqual(
+            svg.count('data-forecast-outcome="contradicted"'), 40)
+        self.assertEqual(
+            svg.count('data-forecast-outcome="not observed"'), 80)
+        self.assertEqual(svg.count('data-drift-alarm="A"'), 36)
+        self.assertEqual(svg.count('data-drift-alarm="C"'), 9)
+        self.assertIn("F: 3 dB loss now \u00b7 confirmed", svg)
+        self.assertIn("F: 2 dB noise in 11.3h \u00b7 contradicted", svg)
+        self.assertIn("F: 2 dB noise in 11.3h \u00b7 not observed", svg)
+        self.assertIn("Forecast check \u2014 A: 3 dB loss now, "
+                      "confirmed, alarm from frame 4", svg)
+        self.assertIn("Forecast check \u2014 B: 2 dB noise in 11.3h, "
+                      "not observed in this track", svg)
+        self.assertIn("Forecast check \u2014 C: 2 dB noise in 11.3h, "
+                      "contradicted, alarm from frame 25", svg)
+        self.assertIn("Forecast check \u2014 D: 2 dB noise in 11.3h, "
+                      "not observed in this track", svg)
+
+    def test_cli_map_replay_with_forecast_flag_writes_svg(self):
+        from beacon.cli import main
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        track = os.path.join(here, "..", "examples",
+                             "live-track-export.json")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "replay.svg")
+            self.assertEqual(main(argv=["--map-overlay", track,
+                                       "--map-output", out,
+                                       "--map-replay",
+                                       "--map-forecast"]), 0)
+            with open(out, encoding="utf-8") as handle:
+                svg = handle.read()
+            self.assertIn('data-dot="true"', svg)
+            # The example export was recorded without a plan, so
+            # nothing is marked — and the legend says so.
+            self.assertNotIn("data-forecast=", svg)
+            self.assertIn("Forecast check: no plan recorded", svg)
+
+    def test_cli_map_forecast_without_replay_is_rejected(self):
+        from beacon.cli import main
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        track = os.path.join(here, "..", "examples",
+                             "live-track-export.json")
+        self.assertEqual(main(argv=["--map-overlay", track,
+                                   "--map-forecast"]), 2)
+
+
 class TestMultiDeviceTracking(unittest.TestCase):
     def _walks(self):
         forward = simulate_walk(rectangular_walk(20.0, 12.0, 10),

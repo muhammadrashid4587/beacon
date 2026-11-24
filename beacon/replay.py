@@ -19,6 +19,19 @@ verdict on those frames, so the history — and what the monitor
 thought was wrong — reads at a glance without stepping
 through the frames.
 
+With ``forecast`` each replay frame also marks the beacons
+whose planner forecast is due inside the forecast window on
+that frame, and checks the forecast against the drift that
+actually followed: a beacon forecast to start lying now that
+alarms later in the track had its forecast confirmed; one
+forecast to lie in hours that alarms within seconds had it
+contradicted — the drift came far earlier than the battery
+model said it would, so the drift is not battery-driven; one
+that never alarms was not observed in this track. The check
+reads the forecast flags and the drift alarms off the same
+per-frame rows the badges use, so it can never disagree with
+them.
+
 The animation is SMIL, not JavaScript: the dot's ``cx`` / ``cy``
 animate through the projected positions on the track's key times,
 the trail is a polyline whose ``stroke-dashoffset`` animates from
@@ -37,6 +50,8 @@ default, or the floor named explicitly.
 Pure standard library, no dependencies.
 """
 
+import math
+from dataclasses import dataclass
 from xml.sax.saxutils import escape
 
 from .beacon import Beacon
@@ -63,6 +78,13 @@ from .map_overlay import (
 
 DOT_COLOUR = "#d81b60"
 
+# The forecast marker's amber is the planner's degrading amber: a
+# forecast active on a frame means that beacon's milestone is due
+# inside the forecast window, so it reads as "due soon" at a
+# glance — the same amber the planner-aware overlay uses for a
+# degrading beacon.
+FORECAST_COLOUR = "#e6a817"
+
 # One colour per drift classification verdict, for the timeline
 # strip's segments: a segment's colour is the verdict the monitor
 # gave on those frames, so the strip reads as a diagnosis at a
@@ -77,6 +99,37 @@ DRIFT_VERDICT_COLOURS = {
 }
 
 
+@dataclass(frozen=True)
+class ForecastCheck:
+    """Whether one beacon's drift forecast predicted the drift
+    that actually followed.
+
+    ``milestone`` and ``hours`` are the forecast as it stood on
+    the first frame it was active — the soonest milestone with
+    its hours remaining — and ``status`` the forecast's own
+    status. ``outcome`` is ``"confirmed"`` (the beacon alarmed
+    at a later frame, at or after the milestone's time — the
+    drift arrived when the forecast said it would), ``"contradicted"``
+    (it alarmed before the milestone's time — the drift came far
+    earlier than the battery model said it would, so the drift
+    is not battery-driven), ``"not observed"`` (no later frame
+    alarms on it — the forecast has not been borne out within
+    this track), or ``"pending"`` (the forecast was only active
+    on the last frame, so there is no later frame to check
+    against). ``first_alarm_frame`` is the first later frame
+    the beacon alarmed on, or ``None``; ``first_active_frame``
+    is the first frame the forecast was active on.
+    """
+
+    beacon: str
+    milestone: str
+    hours: float
+    status: str
+    outcome: str
+    first_alarm_frame: int | None
+    first_active_frame: int
+
+
 def drift_verdict_colour(verdict: str | None) -> str:
     """The timeline-strip colour for one drift verdict.
 
@@ -88,6 +141,96 @@ def drift_verdict_colour(verdict: str | None) -> str:
     if verdict is None:
         return DRIFT_ALARM_COLOUR
     return DRIFT_VERDICT_COLOURS.get(verdict, DRIFT_ALARM_COLOUR)
+
+
+def _forecast_state_at_row(row: dict
+                           ) -> dict[str, tuple[str, float, str]]:
+    """The planner forecasts due inside the window on one track row.
+
+    Returns beacon id -> (soonest milestone, hours remaining,
+    status) for the beacons whose forecast is active on this
+    frame — due inside the forecast window, as recorded in the
+    row's forecast alerts. A beacon whose milestone falls
+    outside the window is absent: its forecast is not active
+    here, so it gets no marker on this frame. Rows carry the
+    flags and alerts ``export_track_json`` / ``export_track_csv``
+    write; a track recorded without a plan carries empty lists,
+    so nothing is marked — an unmarked beacon means no forecast
+    was recorded, not that the beacon is stable.
+    """
+    flags = {flag["beacon"]: flag for flag in row.get("forecasts") or []}
+    alerts = row.get("forecast_alerts") or []
+    return {beacon_id: (flag["milestone"], flag["hours"], flag["status"])
+            for beacon_id, flag in flags.items()
+            if any(alert.startswith(beacon_id + ": ")
+                   for alert in alerts)}
+
+
+def _forecast_label(milestone: str, hours: float, outcome: str) -> str:
+    """One beacon's forecast on one frame, with what came of it.
+
+    The milestone with its hours remaining — ``now`` when it is
+    already past — and the check's outcome, so the marker shows
+    the forecast against the actual drift on the same line.
+    """
+    when = "now" if hours == 0.0 else (
+        "never" if math.isinf(hours) else f"in {hours:.1f}h")
+    return f"F: {milestone} {when} \u00b7 {outcome}"
+
+
+def _forecast_check(frame_forecasts: list[dict[str, tuple[str, float, str]]],
+                    frame_drift: list[dict[str, tuple[float, str | None]]],
+                    times: list[float]) -> dict[str, ForecastCheck]:
+    """Each beacon's forecast, checked against the drift that followed.
+
+    ``frame_forecasts`` and ``frame_drift`` are the per-frame
+    planner forecasts and drift alarms for the plotted floor, in
+    frame order — the same per-frame data the replay's badges
+    use, so the check can never disagree with them. ``times``
+    are the frames' timestamps in seconds.
+
+    Returns beacon id -> :class:`ForecastCheck`, one per beacon
+    whose forecast was active on at least one frame. The
+    forecast is judged from the first frame it was active: its
+    milestone time is that frame's elapsed time plus its hours
+    remaining, and the drift that followed is the beacon's
+    first alarm after that frame. An alarm at or after the
+    milestone's time confirms the forecast; an alarm before it
+    contradicts it — the drift arrived earlier than the battery
+    model said it would. No later alarm means the forecast was
+    not observed within this track (a short track cannot confirm
+    a forecast hours away, and a due forecast the monitor never
+    catches is the self-referenced monitor's known miss); a
+    forecast first active on the last frame is pending, since
+    there is no later frame to check against.
+    """
+    n = len(frame_forecasts)
+    alarm_frames: dict[str, list[int]] = {}
+    for i, state in enumerate(frame_drift):
+        for beacon_id in state:
+            alarm_frames.setdefault(beacon_id, []).append(i)
+    checks: dict[str, ForecastCheck] = {}
+    for i, state in enumerate(frame_forecasts):
+        for beacon_id, (milestone, hours, status) in state.items():
+            if beacon_id in checks:
+                continue
+            milestone_at_h = ((times[i] - times[0]) / 3600.0 + hours
+                              if not math.isinf(hours) else math.inf)
+            later = [j for j in alarm_frames.get(beacon_id, [])
+                     if j > i]
+            if not later:
+                outcome = "pending" if i == n - 1 else "not observed"
+                first_alarm = None
+            else:
+                first_alarm = later[0]
+                alarm_at_h = (times[first_alarm] - times[0]) / 3600.0
+                outcome = ("confirmed" if alarm_at_h >= milestone_at_h
+                           else "contradicted")
+            checks[beacon_id] = ForecastCheck(
+                beacon=beacon_id, milestone=milestone, hours=hours,
+                status=status, outcome=outcome,
+                first_alarm_frame=first_alarm, first_active_frame=i)
+    return checks
 
 
 def _frame_timing(rows: list[dict], seconds_per_step: float
@@ -254,7 +397,8 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
                         heatmap: bool = False,
                         heatmap_spacing: float = 2.0,
                         sigma_rssi_db: float = 2.0,
-                        drift: bool = False) -> str:
+                        drift: bool = False,
+                        forecast: bool = False) -> str:
     """Render an exported live track as an animated SVG string.
 
     ``rows`` are the row dicts ``load_track_json`` /
@@ -293,6 +437,22 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
     the strip is an empty labelled track. A track recorded
     without a monitor marks nothing.
 
+    With ``forecast`` each frame also marks the beacons whose
+    planner forecast is due inside the forecast window on that
+    frame — an amber "F" badge with a label carrying the
+    milestone, its hours remaining, and the check's outcome —
+    and the legend carries one line per beacon with the same
+    check: whether the forecast predicted the drift that
+    actually followed (see :func:`_forecast_check`). The
+    markers are per frame, like the drift badges, so a forecast
+    that only becomes due mid-track appears part-way through.
+    The forecast flags ride on the exported rows, so a track
+    recorded without a plan marks nothing, and the check needs
+    the drift alarms on the same rows to judge against — a
+    track recorded without a monitor can only ever say "not
+    observed", since no alarm was recorded to confirm or
+    contradict the forecast.
+
     Raises ValueError on an empty track, with no beacons, a
     non-positive ``seconds_per_step``, or when the chosen floor
     has no located points.
@@ -309,7 +469,12 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
     if not floor_rows:
         raise ValueError(f"no located points on floor {floor}")
     frame_drift = ([_drift_state_at_row(row) for row in floor_rows]
-                   if drift else [{} for _ in floor_rows])
+                   if drift or forecast else [{} for _ in floor_rows])
+    frame_forecast = ([_forecast_state_at_row(row) for row in floor_rows]
+                      if forecast else [{} for _ in floor_rows])
+    checks = (_forecast_check(frame_forecast, frame_drift,
+                              [row["t"] for row in floor_rows])
+              if forecast else {})
 
     scale = min((SVG_WIDTH - 2 * MARGIN) / width_m,
                 (SVG_HEIGHT - 2 * MARGIN) / height_m)
@@ -482,13 +647,21 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
     # that frame is current, so the marking animates with the
     # replay: a beacon that alarmed mid-track and cleared is
     # badged while it was alarming and unmarked once it cleared.
-    # A single-frame track has no animation, so its marking
-    # stays visible with no animation, like its ellipse.
+    # With forecast, each frame also marks the beacons whose
+    # planner forecast is due inside the window on that frame's
+    # row with an amber "F" badge (top left, opposite the drift
+    # badge) and a label under the beacon — below the drift
+    # label, so the two never print over each other — carrying
+    # the milestone, its hours remaining, and the check's
+    # outcome, so the marker shows the forecast against the
+    # drift that actually followed on the same line. A
+    # single-frame track has no animation, so its markings stay
+    # visible with no animation, like its ellipse.
     for beacon in beacons:
         bx, by = _project(beacon.x, beacon.y, scale, width_m, height_m)
         frame_marks = []
         for i, row_state in enumerate(frame_drift):
-            if beacon.id not in row_state:
+            if not drift or beacon.id not in row_state:
                 continue
             mean_db, verdict = row_state[beacon.id]
             hidden = "" if n == 1 else ' visibility="hidden"'
@@ -525,6 +698,45 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
                 f'<g{hidden} data-frame="{i}" '
                 f'data-drift-alarm-frame="{escape(str(beacon.id))}">'
                 f"{ring}{badge}{drift_annotation}{anim}</g>")
+        frame_forecast_marks = []
+        check = checks.get(beacon.id) if forecast else None
+        for i, row_state in enumerate(frame_forecast):
+            if beacon.id not in row_state:
+                continue
+            milestone, hours, _status = row_state[beacon.id]
+            outcome = check.outcome if check is not None else "pending"
+            hidden = "" if n == 1 else ' visibility="hidden"'
+            anim = ""
+            if n > 1:
+                anim = _visibility_animation(boundaries[i],
+                                             boundaries[i + 1],
+                                             duration, repeat)
+            alarm_attr = (
+                f' data-forecast-alarm-frame="{check.first_alarm_frame}"'
+                if check is not None
+                and check.first_alarm_frame is not None else "")
+            badge = (
+                f'<circle cx="{bx - 13:.1f}" cy="{by - 13:.1f}" r="7" '
+                f'fill="{FORECAST_COLOUR}" '
+                f'data-forecast="{escape(str(beacon.id))}"/>'
+                f'<text x="{bx - 13:.1f}" y="{by - 9:.1f}" '
+                f'font-family="sans-serif" font-size="11" '
+                f'font-weight="bold" fill="#ffffff" '
+                f'text-anchor="middle">F</text>')
+            annotation = (
+                f'<text x="{bx:.1f}" y="{by + 38:.1f}" '
+                f'font-family="sans-serif" font-size="10" '
+                f'font-weight="bold" fill="{FORECAST_COLOUR}" '
+                f'text-anchor="middle" '
+                f'data-forecast-label="{escape(str(beacon.id))}" '
+                f'data-forecast-outcome="{escape(outcome)}"'
+                f"{alarm_attr}>"
+                f'{escape(_forecast_label(milestone, hours, outcome))}'
+                f"</text>")
+            frame_forecast_marks.append(
+                f'<g{hidden} data-frame="{i}" '
+                f'data-forecast-frame="{escape(str(beacon.id))}">'
+                f"{badge}{annotation}{anim}</g>")
         parts.append(
             f'<g data-beacon="{escape(str(beacon.id))}">'
             f'<rect x="{bx - 6:.1f}" y="{by - 6:.1f}" width="12" '
@@ -535,6 +747,7 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
             f'font-weight="bold" fill="{BEACON_COLOUR}" '
             f'text-anchor="middle">{escape(str(beacon.id))}</text>'
             f"{''.join(frame_marks)}"
+            f"{''.join(frame_forecast_marks)}"
             f"</g>")
 
     # Legend, bottom left under the ward.
@@ -543,6 +756,11 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
         # A drift label sits under a bottom-row beacon's diamond —
         # below the ward, where the legend starts — so the legend
         # drops a line to clear it instead of printing over it.
+        legend_y += 14
+    if any(frame_forecast):
+        # A forecast label sits a line below the drift label under
+        # a bottom-row beacon's diamond, so the legend drops one
+        # more line to clear it.
         legend_y += 14
     if drift:
         # Drift-alarm timeline strip, under the ward and above
@@ -636,6 +854,10 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
                for _first, _last, v in runs):
             legend_items.append(
                 (DRIFT_ALARM_COLOUR, "timeline: alarm, no verdict"))
+    if forecast:
+        legend_items.append(
+            (FORECAST_COLOUR,
+             "forecast due (amber F badge, per frame)"))
     for _limit, colour, label in CONFIDENCE_BANDS:
         legend_items.append((colour, f"95% ellipse \u2014 {label}"))
     legend_items.append((NO_ELLIPSE_COLOUR, NO_ELLIPSE_LABEL))
@@ -700,7 +922,43 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
             f'<text x="{MARGIN}" y="{legend_y + 18}" '
             f'font-family="sans-serif" font-size="11" '
             f'fill="#757575">{escape(drift_text)}</text>')
-    # The legend grows with the options (heatmap, drift), so the
+    if forecast:
+        # The forecast check, one line per beacon whose forecast
+        # was active — the forecast as it stood when it first
+        # went live, against the drift that actually followed —
+        # so the legend says what the replay's F badges conclude
+        # even where the badges are small. One line per beacon
+        # keeps each line inside the canvas; a track recorded
+        # without a plan says so instead of reporting no
+        # forecast, and a plan with nothing due inside the window
+        # says that too.
+        if checks:
+            for check in checks.values():
+                legend_y += 24
+                when = ("now" if check.hours == 0.0 else
+                        f"in {check.hours:.1f}h")
+                line = (f"Forecast check \u2014 {check.beacon}: "
+                        f"{check.milestone} {when}, {check.outcome}")
+                if check.first_alarm_frame is not None:
+                    line += f", alarm from frame {check.first_alarm_frame}"
+                elif check.outcome == "not observed":
+                    line += " in this track"
+                parts.append(
+                    f'<text x="{MARGIN}" y="{legend_y + 18}" '
+                    f'font-family="sans-serif" font-size="11" '
+                    f'fill="#757575">{escape(line)}</text>')
+        else:
+            legend_y += 24
+            if any(row.get("forecasts") for row in floor_rows):
+                forecast_text = ("Forecast check: no forecast due "
+                                 "in this track")
+            else:
+                forecast_text = "Forecast check: no plan recorded"
+            parts.append(
+                f'<text x="{MARGIN}" y="{legend_y + 18}" '
+                f'font-family="sans-serif" font-size="11" '
+                f'fill="#757575">{escape(forecast_text)}</text>')
+    # The legend grows with the options (heatmap, drift, forecast), so the
     # canvas grows with it: the ward is drawn to the fixed
     # SVG_HEIGHT scale, and the height is the taller of that and
     # the legend's last line plus a margin, so no legend line is
@@ -726,11 +984,14 @@ def write_track_replay(track_path: str, beacons: list[Beacon],
                        heatmap: bool = False,
                        heatmap_spacing: float = 2.0,
                        sigma_rssi_db: float = 2.0,
-                       drift: bool = False) -> str:
+                       drift: bool = False,
+                       forecast: bool = False) -> str:
     """Render the replay for ``track_path`` and write it to
     ``output_path``. Returns the SVG string. ``drift`` marks the
     beacons alarming at each frame's row (see
-    :func:`render_track_replay`)."""
+    :func:`render_track_replay`); ``forecast`` marks the beacons
+    whose planner forecast is due on each frame's row and checks
+    it against the drift that followed."""
     svg = render_track_replay(load_track_for_overlay(track_path),
                               beacons, width_m=width_m,
                               height_m=height_m, floor=floor,
@@ -738,7 +999,7 @@ def write_track_replay(track_path: str, beacons: list[Beacon],
                               loop=loop, heatmap=heatmap,
                               heatmap_spacing=heatmap_spacing,
                               sigma_rssi_db=sigma_rssi_db,
-                              drift=drift)
+                              drift=drift, forecast=forecast)
     with open(output_path, "w", encoding="utf-8") as handle:
         handle.write(svg)
     return svg

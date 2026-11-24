@@ -277,6 +277,12 @@ def main(argv=None) -> int:
                         "red ! badge and the rolling mean residual "
                         "with the drift classification verdict — "
                         "needs --map-overlay")
+    parser.add_argument("--map-forecast", action="store_true",
+                        help="on the replay, mark the beacons whose "
+                        "planner forecast is due on each frame's row "
+                        "with an amber F badge, and check the "
+                        "forecast against the drift that actually "
+                        "followed — needs --map-overlay --map-replay")
     parser.add_argument("--map-replay", action="store_true",
                         help="render the track as an animated replay "
                         "SVG (SMIL, no JavaScript) instead of the "
@@ -374,6 +380,11 @@ def main(argv=None) -> int:
             print("--map-planner works with the static overlay, not "
                   "with --map-replay", file=sys.stderr)
             return 2
+        if args.map_forecast and not args.map_replay:
+            print("--map-forecast works with --map-replay, not the "
+                  "static overlay (the overlay carries the forecast "
+                  "with --map-planner)", file=sys.stderr)
+            return 2
         if args.map_planner and args.map_heatmap:
             print("--map-planner and --map-heatmap shade the same "
                   "cells in different colours; pick one",
@@ -393,7 +404,7 @@ def main(argv=None) -> int:
                 width_m=WARD_WIDTH_M, height_m=WARD_HEIGHT_M,
                 floor=args.map_floor, heatmap=args.map_heatmap,
                 seconds_per_step=args.replay_step_seconds,
-                drift=args.map_drift)
+                drift=args.map_drift, forecast=args.map_forecast)
         else:
             svg = render_map_overlay(rows, default_beacons(),
                                      width_m=WARD_WIDTH_M,
