@@ -49,7 +49,7 @@ from .validation import (DEFAULT_MAX_WORST_SEMI_MAJOR_M,
                          FloorLayoutVerdict, LayoutValidation,
                          validate_floor_layouts)
 
-__version__ = "0.34.0"
+__version__ = "0.35.0"
 
 __all__ = [
     "BatteryModel",

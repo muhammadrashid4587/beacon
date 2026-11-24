@@ -86,7 +86,10 @@ library, no dependencies, no BLE hardware needed.
   the beacons used, the beacons excluded, and the track's
   coverage — and the planner's forecast flags and alerts per row
   when the track was recorded with a plan, so an exported track
-  is self-describing about upcoming battery milestones.
+  is self-describing about upcoming battery milestones, and the
+  drift monitor's alarms and alerts per row when the track was
+  recorded with a monitor, so it is self-describing about a
+  beacon going bad mid-shift too.
 - A ward-map overlay: plot an exported live track on the ward
   plan as a self-contained SVG — ward outline, beacons at their
   known positions, the track path with start and end markers,
@@ -1353,7 +1356,19 @@ hours remaining — and the plain-language alerts for the beacons
 due inside the forecast window, so the exported track warns
 about a beacon about to start lying without the plan alongside
 it; a track recorded without a plan exports empty flags and
-alerts. Steps that produced no position are not rows, since
+alerts. When the track was recorded with a drift monitor
+(`--drift` on the CLI), each row also carries the drift alarms
+— the beacons alarming at that step, each with its rolling mean
+RSSI residual in dB and how many readings are in its window —
+and the plain-language alert per alarming beacon, so the
+exported track warns about a beacon going bad mid-shift without
+the monitor alongside it; a track recorded without a monitor
+exports empty alarms and alerts. The alarms say only what the
+monitor establishes: the monitor's reference is the track's own
+estimate, not ground truth, so a beacon 8 dB too quiet can
+alarm on the wrong beacon — the export carries the alarms as
+recorded, without claiming a ground-truth attribution. Steps
+that produced no position are not rows, since
 there is no position to write, but they are counted in the
 coverage, so a starved track never pretends it was complete;
 the JSON file's header carries the step counts and the coverage
@@ -2132,5 +2147,27 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   +8.5 dB while the other device stays quiet, and a beacon
   8 dB too quiet alarms on the wrong beacon for that device
   only — the same self-referenced limit as the single-device
-  track, per device. The roadmap grows as new needs surface
-  — the multi-device drift flags are the latest addition.
+  track, per device.
+- Drift alarms in exported track rows — done: `track_rows`
+  carries the same drift alarms and alerts the live track
+  already exposes — the beacons alarming at that step, each
+  with its rolling mean RSSI residual in dB and how many
+  readings are in its window, plus the plain-language alert
+  per alarming beacon — on every exported row, in both JSON
+  and CSV, so an exported track is self-describing about a
+  beacon going bad mid-shift without the monitor alongside it;
+  a track recorded without a monitor exports empty alarms and
+  alerts, and exports written before this change still load,
+  with the drift alarms defaulting to empty (v0.35.0);
+  measured on the default ward walk, seed 7, with beacon A
+  reading 12 dB too loud: the first exported row carrying an
+  alarm is row 4, `A: RSSI +9.2 dB off calibration` on 5
+  readings, and the last row still alarms on A only at
+  +8.5 dB on 20 readings — the same alarm the live track
+  carries, now on the file. The alarms say only what the
+  monitor establishes: the monitor's reference is the track's
+  own estimate, not ground truth, so a beacon 8 dB too quiet
+  can alarm on the wrong beacon — the export carries the
+  alarms as recorded, without claiming a ground-truth
+  attribution. The roadmap grows as new needs surface — the
+  exported drift alarms are the latest addition.

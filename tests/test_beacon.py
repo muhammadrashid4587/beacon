@@ -2482,7 +2482,8 @@ class TestLiveTrackExport(unittest.TestCase):
                                  "ellipse_semi_minor_m,"
                                  "ellipse_angle_deg,beacons_used,"
                                  "beacons_excluded,coverage,battery,"
-                                 "forecasts,forecast_alerts")
+                                 "forecasts,forecast_alerts,"
+                                 "drift_alarms,drift_alerts")
 
     def _planned_track(self):
         """Feed the default walk through a tracker with a
@@ -2536,6 +2537,133 @@ class TestLiveTrackExport(unittest.TestCase):
         rows = track_rows(self._track())
         self.assertEqual(rows[0]["forecasts"], [])
         self.assertEqual(rows[0]["forecast_alerts"], [])
+
+    def _drifted_track(self):
+        """Feed the default walk through a tracker with a drift
+        monitor, with beacon A reading 12 dB too loud the whole
+        walk, so A alarms from step 4 (once the monitor has its
+        5 readings) at a rolling mean near +8 dB — attenuated
+        from +12 dB because the estimate is pulled towards A."""
+        steps = simulate_walk(rectangular_walk(20.0, 12.0, 10),
+                              BEACONS, noise_db=2.0, seed=7)
+        tracker = LiveTracker(PositioningEngine(BEACONS),
+                              drift_monitor=DriftMonitor(BEACONS))
+        positions = []
+        for i, step in enumerate(steps):
+            rssi = dict(step["rssi"])
+            rssi["A"] = rssi["A"] + 12.0
+            positions.append(tracker.feed(rssi, float(i)))
+        return positions
+
+    def test_drift_alarms_ride_on_export_rows_and_round_trip(self):
+        positions = self._drifted_track()
+        rows = track_rows(positions)
+        self.assertEqual(len(rows), 40)
+        # The monitor needs 5 readings before it can alarm, so
+        # the first rows carry no alarms.
+        self.assertEqual(rows[0]["drift_alarms"], [])
+        self.assertEqual(rows[0]["drift_alerts"], [])
+        self.assertEqual(rows[3]["drift_alarms"], [])
+        # From step 4 A alarms, on the right beacon, at a mean
+        # attenuated from +12 dB by the pull on the estimate.
+        alarm = next(a for a in rows[5]["drift_alarms"]
+                     if a["id"] == "A")
+        self.assertGreaterEqual(alarm["mean_residual_db"], 7.0)
+        self.assertLessEqual(alarm["mean_residual_db"], 9.5)
+        self.assertGreaterEqual(alarm["samples"], 5)
+        self.assertTrue(any(a.startswith("A: RSSI +")
+                            and a.endswith("dB off calibration")
+                            for a in rows[5]["drift_alerts"]))
+        # The alarm is still on A at the end of the walk, and
+        # only on A.
+        last = rows[-1]["drift_alarms"]
+        self.assertEqual([a["id"] for a in last], ["A"])
+        self.assertGreaterEqual(last[0]["mean_residual_db"], 7.0)
+        self.assertLessEqual(last[0]["mean_residual_db"], 9.5)
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "track.json")
+            csv_path = os.path.join(tmp, "track.csv")
+            export_track_json(positions, json_path)
+            export_track_csv(positions, csv_path)
+            self.assertEqual(load_track_json(json_path), rows)
+            self.assertEqual(load_track_csv(csv_path), rows)
+
+    def test_track_without_monitor_exports_empty_drift_alarms(self):
+        rows = track_rows(self._track())
+        self.assertEqual(rows[0]["drift_alarms"], [])
+        self.assertEqual(rows[0]["drift_alerts"], [])
+        self.assertEqual(rows[-1]["drift_alarms"], [])
+        self.assertEqual(rows[-1]["drift_alerts"], [])
+
+    def test_old_csv_without_drift_columns_still_loads(self):
+        # A fourteen-column export (forecasts, no drift alarms)
+        # loads with empty drift alarms and alerts, like the
+        # pre-forecast example file loads with empty forecasts.
+        import csv
+
+        rows = track_rows(self._drifted_track())
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = os.path.join(tmp, "old.csv")
+            with open(csv_path, "w", encoding="utf-8",
+                      newline="") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=["t", "x", "y", "floor",
+                                "floor_confidence",
+                                "ellipse_semi_major_m",
+                                "ellipse_semi_minor_m",
+                                "ellipse_angle_deg", "beacons_used",
+                                "beacons_excluded", "coverage",
+                                "battery", "forecasts",
+                                "forecast_alerts"])
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow({
+                        "t": repr(row["t"]), "x": repr(row["x"]),
+                        "y": repr(row["y"]),
+                        "floor": str(row["floor"]),
+                        "floor_confidence":
+                            repr(row["floor_confidence"]),
+                        "ellipse_semi_major_m":
+                            repr(row["ellipse_semi_major_m"]),
+                        "ellipse_semi_minor_m":
+                            repr(row["ellipse_semi_minor_m"]),
+                        "ellipse_angle_deg":
+                            repr(row["ellipse_angle_deg"]),
+                        "beacons_used": ";".join(row["beacons_used"]),
+                        "beacons_excluded":
+                            json.dumps(row["beacons_excluded"]),
+                        "coverage": repr(row["coverage"]),
+                        "battery": ";".join(
+                            f"{k}={v!r}" for k, v in
+                            sorted(row["battery"].items())),
+                        "forecasts": json.dumps(row["forecasts"]),
+                        "forecast_alerts":
+                            ";".join(row["forecast_alerts"]),
+                    })
+            loaded = load_track_csv(csv_path)
+        self.assertEqual(len(loaded), 40)
+        self.assertEqual(loaded[0]["drift_alarms"], [])
+        self.assertEqual(loaded[0]["drift_alerts"], [])
+        # The alarm itself is gone with the columns, but the
+        # forecasts column still parses — empty here, since the
+        # drifted track was recorded without a plan.
+        self.assertEqual(loaded[0]["forecasts"], [])
+        self.assertEqual(loaded[0]["forecast_alerts"], [])
+
+    def test_old_json_without_drift_keys_still_loads(self):
+        from beacon.export import track_from_dict, track_to_dict
+
+        data = track_to_dict(self._drifted_track())
+        for row in data["rows"]:
+            del row["drift_alarms"]
+            del row["drift_alerts"]
+        rows = track_from_dict(data)
+        self.assertEqual(len(rows), 40)
+        self.assertEqual(rows[0]["drift_alarms"], [])
+        self.assertEqual(rows[0]["drift_alerts"], [])
+        self.assertEqual(rows[-1]["drift_alarms"], [])
+        self.assertEqual(rows[-1]["drift_alerts"], [])
 
     def test_never_draining_forecast_round_trips_through_inf(self):
         # A beacon that never drains writes null horizons and
