@@ -3073,3 +3073,43 @@ of one step scores 39 of 40 located on that device, coverage
 denominator.
 The roadmap grows as new needs surface — scoring a smoothed
 track file is the latest addition.
+
+## Smoothed-track accuracy in the demo summary
+
+The multi-device demo prints its smoothed report, but the
+single-device demo summary scored only the raw walk — the
+smoothed track the overlay and the replay draw had no number
+next to it. The demo now prints both: the raw summary as
+before, then the smoothed summary under a
+"Smoothed track (Rauch-Tung-Striebel):" heading, in the same
+fields as the multi-device smoothed report — steps, located
+steps, coverage, mean, median, 90th percentile and worst
+error — so the single-device and multi-device views read the
+same way. `evaluate_smoothed_live_track` scores one track
+the same way `evaluate_smoothed_multi_device_track` scores
+several: each device's located steps re-run through the same
+`smooth_track_rows` the smoothed export uses, then scored by
+the shared `evaluate_live_track`, so the raw and smoothed
+summaries cannot disagree about what counts as an error, and
+the demo's smoothed line is printed with the shared
+`format_report_line`, so it cannot disagree with the library
+report either. A step too thin to locate stays unlocated, so
+the coverage is the raw walk's.
+
+```sh
+python3 -m beacon.cli --steps 10 --noise 2.0 --seed 7
+```
+
+Measured behaviour (v0.52.0): on the default demo walk the
+smoothed summary cuts the mean error from 2.16 m to 1.45 m
+(median 1.20 m, p90 3.10 m, worst 3.90 m) over the 40 located
+steps — the same numbers tag-1 scores in the multi-device
+smoothed report, since it is the same forward walk, seed 7 —
+and smoothing helps on every seed (1, 2, 3, 7, 11: raw 1.83–
+2.63 m, smoothed 1.19–2.15 m). The moving-average opt-out
+smoothed over a Kalman track measures 2.93 m against the raw
+2.16 m — worse than doing nothing, which is why it stays the
+opt-out — and smoothing a moving-average walk helps a little
+(2.73 m to 2.60 m) but stays worse than the Kalman default.
+The roadmap grows as new needs surface — the smoothed-track
+accuracy in the demo summary is the latest addition.

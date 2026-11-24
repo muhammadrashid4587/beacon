@@ -52,16 +52,17 @@ from .tracking import (DEFAULT_FORECAST_WINDOW_HOURS, ExcludedBeacon,
                        ForecastFlag, LivePosition, LiveTracker,
                        MultiDeviceTrackReport, TrackReport, drift_alerts,
                        evaluate_live_track, evaluate_multi_device_track,
+                       evaluate_smoothed_live_track,
                        evaluate_smoothed_multi_device_track,
                        forecast_alerts, forecast_flags,
-                       format_multi_device_report)
+                       format_multi_device_report, format_report_line)
 from .trilateration import trilaterate
 from .uncertainty import PositionUncertainty, estimate_uncertainty
 from .validation import (DEFAULT_MAX_WORST_SEMI_MAJOR_M,
                          FloorLayoutVerdict, LayoutValidation,
                          validate_floor_layouts)
 
-__version__ = "0.51.0"
+__version__ = "0.52.0"
 
 __all__ = [
     "BatteryModel",
@@ -119,8 +120,10 @@ __all__ = [
     "TrackReport",
     "evaluate_live_track",
     "evaluate_multi_device_track",
+    "evaluate_smoothed_live_track",
     "evaluate_smoothed_multi_device_track",
     "format_multi_device_report",
+    "format_report_line",
     "drift_alerts",
     "forecast_alerts",
     "forecast_flags",

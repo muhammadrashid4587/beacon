@@ -954,7 +954,59 @@ def evaluate_smoothed_multi_device_track(
     return evaluate_multi_device_track(smoothed_tracks, truths)
 
 
-def _format_report_line(label: str, report: TrackReport) -> str:
+def evaluate_smoothed_live_track(
+        positions: list[LivePosition | None],
+        truth: list[tuple[float, float] | tuple[float, float, int]],
+        method: str = "rts", window: int = 5
+        ) -> TrackReport:
+    """Score one live track against ground truth, after smoothing.
+
+    The single-device form of
+    :func:`evaluate_smoothed_multi_device_track` — the same
+    report shape as :func:`evaluate_live_track`, but over the
+    smoothed positions, so the demo summary can show what the
+    smoothed track the overlay and the replay draw is actually
+    worth against the raw track's numbers. The located steps
+    are re-run through the smoother (Rauch-Tung-Striebel by
+    default, ``"moving_average"`` as the same opt-out the engine
+    offers) and scored against the ground truth; a step too thin
+    to locate stays unlocated, so the coverage is the raw
+    track's and the smoothed report never claims a step the
+    tracker never located.
+
+    The smoothing is the same :func:`beacon.export.smooth_track_rows`
+    the smoothed export uses, and the scoring is the shared
+    :func:`evaluate_live_track` itself, so the raw and smoothed
+    reports cannot disagree about what counts as an error. The
+    import is local because ``beacon.export`` imports this module
+    for ``LivePosition``; a top-level import would be circular.
+
+    Raises ValueError on the same inputs the raw scorer rejects
+    — an empty walk, mismatched lengths, mixed truth shapes, or
+    nothing located — and on an unknown smoothing method, from
+    the smoother.
+    """
+    from .export import smooth_track_rows, track_rows
+    rows = track_rows(positions)
+    if not rows:
+        # Nothing located: no rows to smooth, and the shared
+        # scorer raises on it exactly as it would for the raw
+        # track, instead of reporting zeroes.
+        return evaluate_live_track(positions, truth)
+    smoothed_rows = iter(
+        smooth_track_rows(rows, method=method, window=window))
+    smoothed_positions: list[LivePosition | None] = []
+    for position in positions:
+        if position is None:
+            smoothed_positions.append(None)
+            continue
+        smoothed = next(smoothed_rows)
+        smoothed_positions.append(
+            replace(position, x=smoothed["x"], y=smoothed["y"]))
+    return evaluate_live_track(smoothed_positions, truth)
+
+
+def format_report_line(label: str, report: TrackReport) -> str:
     """One summary line for one ``TrackReport``.
 
     The same fields as the single-device demo summary in
@@ -984,9 +1036,9 @@ def format_multi_device_report(report: MultiDeviceTrackReport) -> str:
     way and a ward can compare a tag against the ward at a
     glance.
     """
-    lines = [_format_report_line(device_id, device_report)
+    lines = [format_report_line(device_id, device_report)
              for device_id, device_report in report.by_device.items()]
-    lines.append(_format_report_line("overall", report.overall))
+    lines.append(format_report_line("overall", report.overall))
     return "\n".join(lines)
 
 

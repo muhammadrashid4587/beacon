@@ -41,6 +41,8 @@ from .map_overlay import load_track_for_overlay, render_map_overlay
 from .replay import render_track_replay
 from .schedule import replacement_schedule
 from .simulate import rectangular_walk, simulate_walk
+from .tracking import (LivePosition, evaluate_smoothed_live_track,
+                       format_report_line)
 from .validation import validate_floor_layouts
 
 WARD_WIDTH_M = 20.0
@@ -442,9 +444,11 @@ def main(argv=None) -> int:
 
     print(f"{'step':>4} {'true':>14} {'estimated':>14} {'error m':>7}")
     errors = []
+    estimates = []
     for i, step in enumerate(steps):
         true = step["true"]
         est = engine.estimate(step["rssi"])
+        estimates.append(est)
         err = math.hypot(est[0] - true[0], est[1] - true[1])
         errors.append(err)
         print(f"{i:>4} ({true[0]:5.1f},{true[1]:5.1f}) "
@@ -454,6 +458,23 @@ def main(argv=None) -> int:
     p95 = errors[int(0.95 * (len(errors) - 1))]
     print(f"\nsteps: {len(errors)}  mean error: {statistics.mean(errors):.2f} m  "
           f"p95: {p95:.2f} m  max: {errors[-1]:.2f} m")
+    # The same walk scored after smoothing, so the summary shows
+    # what the smoothed track the overlay and the replay draw is
+    # worth against the raw numbers above — the shared scorer and
+    # formatter, so this line cannot disagree with the
+    # multi-device smoothed report. The walk is single-floor by
+    # construction, so every position is on floor 0; the engine
+    # gives no ellipse here, so the positions carry none.
+    positions = [
+        LivePosition(t=float(i), x=est[0], y=est[1], floor=0,
+                     floor_confidence=1.0, uncertainty=None,
+                     heard=tuple(sorted(step["rssi"])))
+        for i, (est, step) in enumerate(zip(estimates, steps))
+    ]
+    smoothed_report = evaluate_smoothed_live_track(
+        positions, [step["true"] for step in steps])
+    print("\nSmoothed track (Rauch-Tung-Striebel):")
+    print(format_report_line("smoothed", smoothed_report))
     return 0
 
 
