@@ -11,6 +11,8 @@ Usage:
     python -m beacon.cli --map-overlay track.json --map-planner
         [--map-output map.svg] [--battery-levels A=0.9,B=0.6]
         [--drain-rate 0.05]
+    python -m beacon.cli --map-overlay track.json --map-drift
+        [--map-output map.svg]
     python -m beacon.cli --drift-classify [--seed 7]
         [--battery-degrade D] [--move-beacon D:5,-5]
     python -m beacon.cli --deployment-plan
@@ -268,6 +270,12 @@ def main(argv=None) -> int:
                         "--map-overlay, conflicts with --map-heatmap "
                         "and --map-replay; the plan uses "
                         "--battery-levels and --drain-rate")
+    parser.add_argument("--map-drift", action="store_true",
+                        help="mark the beacons alarming at the end of "
+                        "the track on the overlay: a red ! badge and "
+                        "the rolling mean residual with the drift "
+                        "classification verdict — needs --map-overlay, "
+                        "conflicts with --map-replay")
     parser.add_argument("--map-replay", action="store_true",
                         help="render the track as an animated replay "
                         "SVG (SMIL, no JavaScript) instead of the "
@@ -365,6 +373,10 @@ def main(argv=None) -> int:
             print("--map-planner works with the static overlay, not "
                   "with --map-replay", file=sys.stderr)
             return 2
+        if args.map_drift and args.map_replay:
+            print("--map-drift works with the static overlay, not "
+                  "with --map-replay", file=sys.stderr)
+            return 2
         if args.map_planner and args.map_heatmap:
             print("--map-planner and --map-heatmap shade the same "
                   "cells in different colours; pick one",
@@ -391,7 +403,8 @@ def main(argv=None) -> int:
                                      floor=args.map_floor,
                                      heatmap=args.map_heatmap,
                                      plan=plan,
-                                     planner=args.map_planner)
+                                     planner=args.map_planner,
+                                     drift=args.map_drift)
         if args.map_output is not None:
             with open(args.map_output, "w", encoding="utf-8") as handle:
                 handle.write(svg)

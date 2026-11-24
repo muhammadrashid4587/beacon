@@ -99,7 +99,10 @@ library, no dependencies, no BLE hardware needed.
   known positions, the track path with start and end markers,
   and one 95% confidence ellipse per point, coloured by how wide
   it is, with a legend — so a dashboard can show where the
-  device went and how much to trust each point.
+  device went and how much to trust each point. With
+  `--map-drift` a beacon alarming at the end of the track is
+  badged on the map with its drift classification, so the bad
+  beacon reads as bad at a glance.
 - A per-beacon coverage heatmap on the ward-map overlay: shade
   the ward grid by the positioning quality the beacon layout
   gives at each cell, so a dashboard can see where the ward is
@@ -720,6 +723,51 @@ with its legend, so the plan and planner summary lines are never
 clipped below the SVG — the plain overlay's legend already
 overflowed its 560 px canvas before this change, and now renders
 at 594 px.
+
+## Drift alarms on the ward-map overlay
+
+The overlay shows where the device went; with `--map-drift`
+it also shows which beacon was going bad when the walk ended.
+`render_map_overlay(..., drift=True)` reads the drift alarms
+and classifications off the track's last plotted row — the
+alarm state at the end of the track — and marks every beacon
+still alarming with a red ring and a red "!" badge, plus a
+label with its rolling mean residual in dB and the drift
+classification verdict when the monitor gave one, e.g. `ALARM
++8.5 dB · uncertain`. The legend carries the same state in one
+line, `Drift alarms at end of track: A +8.5 dB (uncertain)`,
+or `none` when nothing alarms. The marking composes with the
+planner-aware overlay: a beacon carries its forecast horizon
+on one line and its drift alarm on the next, and the legend
+drops a line so the alarm label under a bottom-row beacon
+never prints over it.
+
+```sh
+python3 -m beacon.cli --map-overlay ward-a-track.json --map-output ward-a-track.svg --map-drift
+python3 -m beacon.cli --map-overlay ward-a-track.json --map-output ward-a-track.svg --map-drift --map-planner
+```
+
+A beacon that alarmed mid-track and cleared is not marked:
+the overlay shows the end state, not the history, so a badge
+means the beacon was still alarming when the walk ended. A
+track recorded without a drift monitor carries empty alarms,
+so nothing is marked — an unmarked beacon means no alarm was
+recorded, not that the beacon is healthy. And the badge marks
+what the monitor recorded, not a ground-truth diagnosis: the
+monitor's reference is the track's own estimate, so a beacon
+8 dB too quiet can alarm on the wrong beacon, and the verdict
+on the label is the same hint the classifier gives, not a
+verdict on the hardware.
+
+Measured behaviour: on the default ward walk, seed 7, with
+beacon A reading 12 dB too loud, the overlay badges A only —
+`ALARM +8.5 dB · uncertain`, summary `A +8.5 dB (uncertain)`
+— the same alarm and verdict the export carries on the last
+row. Seeds 1 and 3 badge A only too, at +8.4 dB and +8.0 dB;
+the verdict differs by seed (`moved` on seed 1, `uncertain`
+on seeds 3 and 7), because the classifier's verdict is a
+hint from the same self-referenced monitor, and the overlay
+carries it as recorded.
 
 ## Planner forecast flags on the live track
 
@@ -2202,5 +2250,26 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   monitor's verdicts: with A 12 dB too loud on tag-1's walk
   only, tag-1's last row classifies A `uncertain` at +8.5 dB
   while tag-2's last row classifies every beacon `healthy`.
-  The roadmap grows as new needs surface — the exported drift
-  classifications are the latest addition.
+- Drift alarms on the ward-map overlay — done:
+  `render_map_overlay(..., drift=True)` marks every beacon
+  alarming on the track's last plotted row with a red ring
+  and a red "!" badge, plus a label with its rolling mean
+  residual in dB and the drift classification verdict, e.g.
+  `ALARM +8.5 dB · uncertain`, and a legend line carrying the
+  alarm state at the end of the track; the marking composes
+  with the planner-aware overlay, and the legend drops a line
+  so the alarm label under a bottom-row beacon never prints
+  over it; `python -m beacon.cli --map-overlay track.json
+  --map-drift` renders it, and it conflicts with
+  `--map-replay` (v0.37.0); measured on the default ward walk
+  with beacon A reading 12 dB too loud: the overlay badges A
+  only, at +8.5 dB on seed 7 (+8.4 dB seed 1, +8.0 dB seed 3),
+  with the verdict the monitor gave (`moved` on seed 1,
+  `uncertain` on seeds 3 and 7). The badge marks what the
+  monitor recorded, not a ground-truth diagnosis: a beacon
+  8 dB too quiet can alarm on the wrong beacon, a beacon that
+  alarmed and cleared is not marked, and a track recorded
+  without a monitor marks nothing — an unmarked beacon means
+  no alarm was recorded, not that it is healthy. The roadmap
+  grows as new needs surface — the drift alarms on the overlay
+  are the latest addition.

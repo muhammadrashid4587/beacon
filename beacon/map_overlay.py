@@ -60,6 +60,12 @@ FORECAST_STATUS_COLOURS = {
     "dark": "#c0392b",
 }
 
+# A beacon alarming at the end of the track gets a red ring and a
+# red "!" badge on the overlay, so a dashboard sees the bad beacon
+# at a glance. The same red as the very-loose ellipse band — red
+# already means "do not trust this" on this map.
+DRIFT_ALARM_COLOUR = "#c0392b"
+
 HEATMAP_FILL_OPACITY = "0.22"
 
 # Planner colour by hours until a cell's coverage first degrades:
@@ -342,6 +348,41 @@ def planner_heatmap_summary(cells: list[PlannerCell]
         n_cells=len(cells))
 
 
+def _drift_state(floor_rows: list[dict]
+                 ) -> dict[str, tuple[float, str | None]]:
+    """The drift alarms on the track's last plotted row.
+
+    The overlay shows the alarm state at the end of the track, not
+    every alarm that fired mid-track: a beacon that alarmed and
+    cleared is not marked. Returns beacon id -> (rolling mean
+    residual in dB, classification verdict or None). Rows carry
+    the alarms and classifications ``export_track_json`` /
+    ``export_track_csv`` write; a track recorded without a monitor
+    carries empty lists, so nothing is marked — an unmarked beacon
+    means no alarm was recorded, not that the beacon is healthy.
+    """
+    last = floor_rows[-1]
+    verdicts = {c["id"]: c["verdict"]
+                for c in last.get("drift_classifications") or []}
+    return {alarm["id"]: (alarm["mean_residual_db"],
+                          verdicts.get(alarm["id"]))
+            for alarm in last.get("drift_alarms") or []}
+
+
+def _drift_label(mean_residual_db: float, verdict: str | None) -> str:
+    """One alarming beacon as a short label for the overlay.
+
+    The rolling mean residual, with the classification verdict
+    when the monitor gave one — ``healthy`` never rides along,
+    since a beacon alarming past the 5 dB threshold cannot be
+    healthy, and a label saying both would contradict itself.
+    """
+    label = f"ALARM {mean_residual_db:+.1f} dB"
+    if verdict is not None and verdict != "healthy":
+        label += f" \u00b7 {verdict}"
+    return label
+
+
 def confidence_colour(semi_major: float | None) -> str:
     """The confidence colour for one point's 95% ellipse.
 
@@ -378,7 +419,8 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
                        heatmap_spacing: float = 2.0,
                        sigma_rssi_db: float = 2.0,
                        plan: DeploymentPlan | None = None,
-                       planner: bool = False) -> str:
+                       planner: bool = False,
+                       drift: bool = False) -> str:
     """Render an exported live track as a ward-map SVG string.
 
     ``rows`` are the row dicts ``load_track_json`` /
@@ -403,7 +445,18 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
     :func:`planner_heatmap`), so the map shows not just the
     coverage now but when it will thin — that needs a plan, and
     it cannot be combined with ``heatmap``, since the two would
-    paint the same cells in different colours.
+    paint the same cells in different colours. With ``drift`` a
+    beacon alarming on the track's last plotted row is marked
+    with a red ring and a red "!" badge, plus a label with its
+    rolling mean residual in dB and the drift classification
+    verdict when the monitor gave one, and the legend carries
+    the alarm state at the end of the track — so a dashboard
+    sees the beacon going bad without opening the export. The
+    alarms are the monitor's own, self-referenced ones (see
+    :class:`beacon.drift.DriftMonitor`): a beacon reading too
+    quiet can alarm on the wrong beacon, so the badge marks what
+    the monitor recorded, not a ground-truth diagnosis, and a
+    track recorded without a monitor marks nothing.
 
     Raises ValueError on an empty track, with no beacons, when
     the chosen floor has no located points, when ``planner`` is
@@ -434,6 +487,7 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
     floor_rows = [row for row in rows if row["floor"] == floor]
     if not floor_rows:
         raise ValueError(f"no located points on floor {floor}")
+    drift_state = _drift_state(floor_rows) if drift else {}
 
     scale = min((SVG_WIDTH - 2 * MARGIN) / width_m,
                 (SVG_HEIGHT - 2 * MARGIN) / height_m)
@@ -575,7 +629,12 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
     # diamond is coloured by the beacon's forecast status and a
     # second line under it carries the forecast horizon, so the
     # map shows not just where the beacons are but when each one
-    # starts lying or goes dark.
+    # starts lying or goes dark. With drift, a beacon alarming
+    # on the last plotted row gets a red ring and a red "!"
+    # badge, plus a line under it with its rolling mean residual
+    # and the drift classification verdict — below the forecast
+    # line when both are on, so the two annotations never
+    # overwrite each other.
     for beacon in beacons:
         bx, by = _project(beacon.x, beacon.y, scale, width_m, height_m)
         diamond = BEACON_COLOUR
@@ -589,20 +648,58 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
                 f'fill="{diamond}" text-anchor="middle" '
                 f'data-forecast="{escape(str(beacon.id))}">'
                 f'{escape(_forecast_annotation(forecast))}</text>')
+        ring = ""
+        badge = ""
+        drift_annotation = ""
+        if beacon.id in drift_state:
+            mean_db, verdict = drift_state[beacon.id]
+            ring = (
+                f'<rect x="{bx - 9:.1f}" y="{by - 9:.1f}" width="18" '
+                f'height="18" fill="none" stroke="{DRIFT_ALARM_COLOUR}" '
+                f'stroke-width="2" '
+                f'transform="rotate(45 {bx:.1f} {by:.1f})"/>')
+            badge = (
+                f'<circle cx="{bx + 13:.1f}" cy="{by - 13:.1f}" r="7" '
+                f'fill="{DRIFT_ALARM_COLOUR}" '
+                f'data-drift-alarm="{escape(str(beacon.id))}"/>'
+                f'<text x="{bx + 13:.1f}" y="{by - 9:.1f}" '
+                f'font-family="sans-serif" font-size="11" '
+                f'font-weight="bold" fill="#ffffff" '
+                f'text-anchor="middle">!</text>')
+            drift_y = by + 38 if forecasts is not None else by + 24
+            verdict_attr = (
+                f' data-drift-verdict="{escape(verdict)}"'
+                if verdict is not None else "")
+            drift_annotation = (
+                f'<text x="{bx:.1f}" y="{drift_y:.1f}" '
+                f'font-family="sans-serif" font-size="10" '
+                f'font-weight="bold" fill="{DRIFT_ALARM_COLOUR}" '
+                f'text-anchor="middle" '
+                f'data-drift-alarm-label="{escape(str(beacon.id))}"'
+                f"{verdict_attr}>"
+                f'{escape(_drift_label(mean_db, verdict))}</text>')
         parts.append(
             f'<g data-beacon="{escape(str(beacon.id))}">'
             f'<rect x="{bx - 6:.1f}" y="{by - 6:.1f}" width="12" '
             f'height="12" fill="{diamond}" '
             f'transform="rotate(45 {bx:.1f} {by:.1f})"/>'
+            f"{ring}"
             f'<text x="{bx:.1f}" y="{by - 12:.1f}" '
             f'font-family="sans-serif" font-size="12" '
             f'font-weight="bold" fill="{diamond}" '
             f'text-anchor="middle">{escape(str(beacon.id))}</text>'
             f"{annotation}"
+            f"{drift_annotation}"
+            f"{badge}"
             f"</g>")
 
     # Legend, bottom left under the ward.
     legend_y = MARGIN + ward_h + 34
+    if drift_state:
+        # A drift label sits under a bottom-row beacon's diamond —
+        # below the ward, where the legend starts — so the legend
+        # drops a line to clear it instead of printing over it.
+        legend_y += 14
     parts.append(
         f'<text x="{MARGIN}" y="{legend_y}" font-family="sans-serif" '
         f'font-size="12" font-weight="bold">Legend</text>')
@@ -615,6 +712,10 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
             (FORECAST_STATUS_COLOURS["degrading"], "beacon degrading"))
         legend_items.append(
             (FORECAST_STATUS_COLOURS["dark"], "beacon dark"))
+    if drift:
+        legend_items.append(
+            (DRIFT_ALARM_COLOUR,
+             "drift alarm (red ! badge, end of track)"))
     for _limit, colour, label in CONFIDENCE_BANDS:
         legend_items.append((colour, f"95% ellipse \u2014 {label}"))
     legend_items.append((NO_ELLIPSE_COLOUR, NO_ELLIPSE_LABEL))
@@ -687,6 +788,27 @@ def render_map_overlay(rows: list[dict], beacons: list[Beacon],
             f'<text x="{MARGIN}" y="{legend_y + 18}" '
             f'font-family="sans-serif" font-size="11" '
             f'fill="#757575">{escape(planner_text)}</text>')
+    if drift:
+        # The alarm state at the end of the track, in one line —
+        # the same labels the badges carry, so the legend says
+        # what the map marks even where the badges are small.
+        legend_y += 24
+        if drift_state:
+            alarm_text = ", ".join(
+                f"{beacon_id} {mean_db:+.1f} dB"
+                + (f" ({verdict})"
+                   if verdict is not None and verdict != "healthy"
+                   else "")
+                for beacon_id, (mean_db, verdict)
+                in drift_state.items())
+            drift_text = ("Drift alarms at end of track: "
+                          + alarm_text)
+        else:
+            drift_text = "Drift alarms at end of track: none"
+        parts.append(
+            f'<text x="{MARGIN}" y="{legend_y + 18}" '
+            f'font-family="sans-serif" font-size="11" '
+            f'fill="#757575">{escape(drift_text)}</text>')
     # The legend grows with the options (heatmap, planner), so the
     # canvas grows with it: the ward is drawn to the fixed
     # SVG_HEIGHT scale, and the height is the taller of that and
@@ -727,19 +849,22 @@ def write_map_overlay(track_path: str, beacons: list[Beacon],
                       heatmap_spacing: float = 2.0,
                       sigma_rssi_db: float = 2.0,
                       plan: DeploymentPlan | None = None,
-                      planner: bool = False) -> str:
+                      planner: bool = False,
+                      drift: bool = False) -> str:
     """Render the overlay for ``track_path`` and write it to
     ``output_path``. Returns the SVG string. With ``plan`` the
     overlay is planner-aware (see :func:`render_map_overlay`);
     ``planner`` shades the cells by when their coverage first
-    degrades."""
+    degrades; ``drift`` marks the beacons alarming at the end of
+    the track."""
     svg = render_map_overlay(load_track_for_overlay(track_path),
                              beacons, width_m=width_m,
                              height_m=height_m, floor=floor,
                              heatmap=heatmap,
                              heatmap_spacing=heatmap_spacing,
                              sigma_rssi_db=sigma_rssi_db,
-                             plan=plan, planner=planner)
+                             plan=plan, planner=planner,
+                             drift=drift)
     with open(output_path, "w", encoding="utf-8") as handle:
         handle.write(svg)
     return svg

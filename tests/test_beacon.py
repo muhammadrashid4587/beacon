@@ -3388,6 +3388,168 @@ class TestPlannerMapOverlay(unittest.TestCase):
                                        "--map-replay"]), 2)
 
 
+class TestDriftMapOverlay(unittest.TestCase):
+    def _row(self, x, y, semi_major, floor=0, t=0.0, alarms=(),
+             classifications=()):
+        return {
+            "t": t, "x": x, "y": y, "floor": floor,
+            "floor_confidence": 1.0,
+            "ellipse_semi_major_m": semi_major,
+            "ellipse_semi_minor_m": (semi_major or 1.0) / 2.0,
+            "ellipse_angle_deg": 30.0,
+            "beacons_used": ["A", "B", "C", "D"],
+            "beacons_excluded": [], "coverage": 1.0,
+            "drift_alarms": [dict(alarm) for alarm in alarms],
+            "drift_classifications": [
+                dict(c) for c in classifications],
+        }
+
+    def _classification(self, beacon_id, verdict, mean_db):
+        return {"id": beacon_id, "verdict": verdict,
+                "mean_residual_db": mean_db, "residual_std_db": 1.0,
+                "time_slope_db_per_step": 0.0, "time_correlation": 0.0,
+                "revisit_delta_db": None, "revisit_pairs": 0,
+                "samples": 20, "reason": "test fixture"}
+
+    def _alarming_rows(self):
+        # A alarms on the last row only; B and C stay quiet.
+        return [
+            self._row(2.0, 2.0, 1.0, t=0.0),
+            self._row(5.0, 5.0, 1.0, t=1.0,
+                      alarms=[{"id": "A", "mean_residual_db": 8.53,
+                               "samples": 20}],
+                      classifications=[
+                          self._classification("A", "uncertain", 8.53),
+                          self._classification("B", "healthy", 0.1),
+                          self._classification("C", "moved", 2.9),
+                          self._classification("D", "healthy", 1.6)]),
+        ]
+
+    def test_alarming_beacon_gets_badge_ring_and_label(self):
+        svg = render_map_overlay(self._alarming_rows(), BEACONS,
+                                 drift=True)
+        # Only A is badged; the other three beacons stay plain.
+        self.assertEqual(svg.count('data-drift-alarm="'), 1)
+        self.assertIn('data-drift-alarm="A"', svg)
+        self.assertIn(">!</text>", svg)
+        self.assertIn('data-drift-verdict="uncertain"', svg)
+        self.assertIn("ALARM +8.5 dB \u00b7 uncertain", svg)
+        # The summary line names the alarm state at the end.
+        self.assertIn("Drift alarms at end of track: "
+                      "A +8.5 dB (uncertain)", svg)
+        self.assertIn("drift alarm (red ! badge, end of track)", svg)
+        # The track still renders.
+        self.assertEqual(svg.count('data-index="'), 2)
+
+    def test_only_the_last_rows_alarms_are_marked(self):
+        # A alarmed mid-track and cleared: the overlay shows the
+        # end state, so nothing is marked.
+        rows = [
+            self._row(2.0, 2.0, 1.0, t=0.0,
+                      alarms=[{"id": "A", "mean_residual_db": 8.5,
+                               "samples": 20}],
+                      classifications=[
+                          self._classification("A", "uncertain", 8.5)]),
+            self._row(5.0, 5.0, 1.0, t=1.0),
+        ]
+        svg = render_map_overlay(rows, BEACONS, drift=True)
+        self.assertNotIn("data-drift-alarm=", svg)
+        self.assertNotIn("ALARM", svg)
+        self.assertIn("Drift alarms at end of track: none", svg)
+
+    def test_no_alarms_marks_nothing(self):
+        rows = [self._row(2.0, 2.0, 1.0, t=0.0),
+                self._row(5.0, 5.0, 1.0, t=1.0)]
+        svg = render_map_overlay(rows, BEACONS, drift=True)
+        self.assertNotIn("data-drift-alarm=", svg)
+        self.assertIn("Drift alarms at end of track: none", svg)
+        # A track recorded without a monitor carries no drift
+        # keys at all; that renders the same as no alarms.
+        bare = [{key: value for key, value in row.items()
+                 if not key.startswith("drift_")}
+                for row in rows]
+        self.assertEqual(
+            render_map_overlay(bare, BEACONS, drift=True), svg)
+
+    def test_drift_off_by_default(self):
+        svg = render_map_overlay(self._alarming_rows(), BEACONS)
+        self.assertNotIn("data-drift-alarm=", svg)
+        self.assertNotIn("ALARM", svg)
+        self.assertNotIn("Drift alarms at end of track:", svg)
+
+    def test_alarm_without_classification_has_no_verdict(self):
+        rows = [self._row(2.0, 2.0, 1.0, t=0.0),
+                self._row(5.0, 5.0, 1.0, t=1.0,
+                          alarms=[{"id": "A",
+                                   "mean_residual_db": -6.9,
+                                   "samples": 20}])]
+        svg = render_map_overlay(rows, BEACONS, drift=True)
+        self.assertIn("ALARM -6.9 dB", svg)
+        self.assertNotIn("data-drift-verdict=", svg)
+        self.assertIn("Drift alarms at end of track: A -6.9 dB", svg)
+
+    def test_drift_marks_the_real_alarm_end_to_end(self):
+        # A reads 12 dB too loud on a real walk, streamed through
+        # a tracker with a monitor and exported: the overlay
+        # badges the beacon the monitor alarmed on.
+        steps = simulate_walk(rectangular_walk(20.0, 12.0, 10),
+                              BEACONS, noise_db=2.0, seed=7)
+        for step in steps:
+            step["rssi"]["A"] += 12.0
+        tracker = LiveTracker(PositioningEngine(BEACONS),
+                              drift_monitor=DriftMonitor(BEACONS))
+        positions = [tracker.feed(step["rssi"], float(i))
+                     for i, step in enumerate(steps)]
+        rows = track_rows(positions)
+        svg = render_map_overlay(rows, BEACONS, drift=True)
+        self.assertEqual(svg.count('data-drift-alarm="'), 1)
+        self.assertIn('data-drift-alarm="A"', svg)
+        # Seed 7: A alarms at +8.5 dB on 20 readings and the
+        # monitor calls it uncertain — the same alarm and verdict
+        # the export carries, now on the map.
+        self.assertIn("ALARM +8.5 dB \u00b7 uncertain", svg)
+        self.assertIn("Drift alarms at end of track: "
+                      "A +8.5 dB (uncertain)", svg)
+
+    def test_drift_composes_with_plan(self):
+        from beacon import plan_deployment
+
+        plan = plan_deployment(
+            {b.id: BatteryModel(drain_rate_per_hour=0.05)
+             for b in BEACONS})
+        svg = render_map_overlay(self._alarming_rows(), BEACONS,
+                                 plan=plan, drift=True)
+        # Both annotations ride on the same beacon: the forecast
+        # horizon and the drift alarm, on separate lines.
+        self.assertEqual(svg.count('data-forecast="'), 4)
+        self.assertIn('data-drift-alarm="A"', svg)
+        self.assertIn("ALARM +8.5 dB \u00b7 uncertain", svg)
+        self.assertIn("2 dB noise in 13.3h", svg)
+
+    def test_cli_map_drift_flag_writes_svg(self):
+        from beacon.cli import main
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        track = os.path.join(here, "..", "examples",
+                             "live-track-export.json")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "map.svg")
+            self.assertEqual(main(argv=["--map-overlay", track,
+                                       "--map-output", out,
+                                       "--map-drift"]), 0)
+            with open(out, encoding="utf-8") as handle:
+                svg = handle.read()
+            self.assertIn("<svg", svg)
+            # The example export was recorded without a monitor,
+            # so nothing is marked — and the legend says so.
+            self.assertNotIn("data-drift-alarm=", svg)
+            self.assertIn("Drift alarms at end of track: none", svg)
+            self.assertEqual(main(argv=["--map-overlay", track,
+                                       "--map-output", out,
+                                       "--map-drift",
+                                       "--map-replay"]), 2)
+
+
 class TestLiveTrackReplay(unittest.TestCase):
     def _example_rows(self):
         here = os.path.dirname(os.path.abspath(__file__))
