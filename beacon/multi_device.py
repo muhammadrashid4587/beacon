@@ -96,12 +96,15 @@ class MultiDeviceTracker:
     device's tracker gets its own fresh monitor with the same
     tuning — ``DriftMonitor.fresh()`` — so every device's live
     position carries the beacons currently alarming on its own
-    track, with a plain-language alert per alarming beacon. One
-    monitor per device, not one shared across them: a shared
-    window would mix two devices' readings, so one tag's healthy
-    readings would dilute another tag's alarm, and resetting one
-    device would clear the monitor for every device. The alarms
-    are the same consistency check as on a single-device track —
+    track, with a plain-language alert per alarming beacon, and
+    every beacon's drift classification from its own monitor —
+    so one tag's verdict never comes from another tag's
+    readings. One monitor per device, not one shared across
+    them: a shared window would mix two devices' readings, so
+    one tag's healthy readings would dilute another tag's alarm,
+    and resetting one device would clear the monitor for every
+    device. The alarms are the same consistency check as on a
+    single-device track —
     each beacon checked against the position the consensus of
     the beacons produced — with the same honest limit: a beacon
     reading too quiet can drag the estimate with it and alarm on

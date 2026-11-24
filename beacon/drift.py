@@ -236,6 +236,24 @@ class DriftClassification:
     samples: int
     reason: str
 
+    def to_dict(self) -> dict:
+        """JSON-friendly form, for the stream output, the exported
+        track rows, and dashboards. ``revisit_delta_db`` is null
+        when the device never revisited a spot, so no delta was
+        measured."""
+        return {
+            "id": self.id,
+            "verdict": self.verdict,
+            "mean_residual_db": self.mean_residual_db,
+            "residual_std_db": self.residual_std_db,
+            "time_slope_db_per_step": self.time_slope_db_per_step,
+            "time_correlation": self.time_correlation,
+            "revisit_delta_db": self.revisit_delta_db,
+            "revisit_pairs": self.revisit_pairs,
+            "samples": self.samples,
+            "reason": self.reason,
+        }
+
 
 class DriftMonitor:
     """Watch a stream of observations for beacons drifting off calibration.

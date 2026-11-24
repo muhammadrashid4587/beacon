@@ -33,11 +33,19 @@ residual in dB and how many readings are in its window — with
 the plain-language alert per alarming beacon, so an exported
 track is self-describing about a beacon going bad mid-shift
 too; a track recorded without a monitor exports empty alarms
-and alerts. The alarms say only what the monitor establishes —
+and alerts. The drift classifications are every beacon's
+classification from that monitor at that step — the verdict
+(healthy, battery-sag, moved, noisy, uncertain) with the
+numbers it rests on — so the export also says what the monitor
+thinks is wrong with each beacon, not just which ones are
+alarming; a track recorded without a monitor exports empty
+classifications. The alarms say only what the monitor establishes —
 the monitor's reference is the track's own estimate, not ground
 truth, so a beacon 8 dB too quiet can alarm on the wrong beacon
 — and the export carries them as recorded, without claiming a
-ground-truth attribution.
+ground-truth attribution; the same holds for the
+classifications, which are a hint from the same self-referenced
+monitor, not a diagnosis.
 
 Both formats round-trip: ``load_track_json`` / ``load_track_csv``
 read back exactly the rows ``track_rows`` produced, so an export
@@ -63,12 +71,12 @@ FORMAT_VERSION = 1
 # CSV column order — fixed, so a dashboard can rely on it.
 # ``battery`` was added in v0.25.0; ``forecasts`` and
 # ``forecast_alerts`` in v0.32.0; ``drift_alarms`` and
-# ``drift_alerts`` in v0.35.0. Files written before that
-# (fourteen columns, no drift alarms) still load — see
-# ``load_track_csv`` — with the drift alarms defaulting to
-# empty, and files before v0.32.0 (twelve columns, no
-# forecasts) and before v0.25.0 (eleven columns, no battery
-# either) still load the same way.
+# ``drift_alerts`` in v0.35.0; ``drift_classifications`` in
+# v0.36.0. Files written before that (sixteen columns, no drift
+# classifications) still load — see ``load_track_csv`` — with
+# the classifications defaulting to empty, and files before
+# v0.35.0 (fourteen columns, no drift alarms) still load the
+# same way.
 CSV_FIELDS = (
     "t",
     "x",
@@ -86,6 +94,7 @@ CSV_FIELDS = (
     "forecast_alerts",
     "drift_alarms",
     "drift_alerts",
+    "drift_classifications",
 )
 
 
@@ -108,9 +117,12 @@ def track_rows(positions: list[LivePosition | None]) -> list[dict]:
     the drift monitor was alarming on, each with its rolling mean
     RSSI residual in dB and how many readings are in its window
     (an empty list when the track was recorded without a monitor)
-    — and the plain-language alert per alarming beacon, and the
-    track's overall coverage — the located share of the walk, the
-    same on every row.
+    — and the plain-language alert per alarming beacon, the drift
+    classifications for that step — every beacon's verdict from
+    that monitor with the numbers it rests on (an empty list when
+    the track was recorded without a monitor) — and the track's
+    overall coverage — the located share of the walk, the same on
+    every row.
 
     Raises ValueError on an empty track: with no steps there is
     no coverage to report. A track with steps but nothing located
@@ -148,6 +160,8 @@ def track_rows(positions: list[LivePosition | None]) -> list[dict]:
             "drift_alarms": [alarm.to_dict()
                              for alarm in position.drift_alarms],
             "drift_alerts": list(position.drift_alerts),
+            "drift_classifications": [c.to_dict() for c in
+                                      position.drift_classifications],
         })
     return rows
 
@@ -216,6 +230,37 @@ def _drift_alarms_from_dict(raw) -> list[dict]:
     ]
 
 
+def _drift_classifications_from_dict(raw) -> list[dict]:
+    """The row's drift classifications back from their JSON form.
+
+    Missing (a file written before v0.36.0) means the track was
+    recorded without a drift monitor, so the classifications
+    default to empty rather than failing a file that predates
+    them. ``revisit_delta_db`` is null when the device never
+    revisited a spot, so no delta was measured.
+    """
+    if raw is None:
+        return []
+    return [
+        {
+            "id": str(c["id"]),
+            "verdict": str(c["verdict"]),
+            "mean_residual_db": float(c["mean_residual_db"]),
+            "residual_std_db": float(c["residual_std_db"]),
+            "time_slope_db_per_step": float(
+                c["time_slope_db_per_step"]),
+            "time_correlation": float(c["time_correlation"]),
+            "revisit_delta_db": (
+                None if c.get("revisit_delta_db") is None
+                else float(c["revisit_delta_db"])),
+            "revisit_pairs": int(c["revisit_pairs"]),
+            "samples": int(c["samples"]),
+            "reason": str(c["reason"]),
+        }
+        for c in raw
+    ]
+
+
 def track_from_dict(data: dict) -> list[dict]:
     """Rebuild the rows from ``track_to_dict`` output. Lossless.
 
@@ -265,6 +310,9 @@ def track_from_dict(data: dict) -> list[dict]:
                 row.get("drift_alarms")),
             "drift_alerts": [str(alert) for alert in
                              row.get("drift_alerts", [])],
+            "drift_classifications":
+                _drift_classifications_from_dict(
+                    row.get("drift_classifications")),
         }
         for row in rows
     ]
@@ -312,6 +360,8 @@ def _row_to_csv(row: dict) -> dict:
         "forecast_alerts": ";".join(row["forecast_alerts"]),
         "drift_alarms": json.dumps(row["drift_alarms"]),
         "drift_alerts": ";".join(row["drift_alerts"]),
+        "drift_classifications": json.dumps(
+            row["drift_classifications"]),
     }
 
 
@@ -355,6 +405,16 @@ def _drift_alerts_from_csv(raw_alerts) -> list[str]:
     return raw_alerts.split(";")
 
 
+def _drift_classifications_from_csv(raw) -> list[dict]:
+    """Parse the CSV drift-classifications column (a JSON list of
+    classification dicts) back to row form. Empty when the column
+    is empty — or when the file predates the column entirely, so
+    old exports still load."""
+    if not raw:
+        return []
+    return _drift_classifications_from_dict(json.loads(raw))
+
+
 def _row_from_csv(raw: dict) -> dict:
     """One CSV record back as a row dict, for reading."""
     return {
@@ -388,6 +448,8 @@ def _row_from_csv(raw: dict) -> dict:
             raw.get("drift_alarms")),
         "drift_alerts": _drift_alerts_from_csv(
             raw.get("drift_alerts")),
+        "drift_classifications": _drift_classifications_from_csv(
+            raw.get("drift_classifications")),
     }
 
 
@@ -421,29 +483,36 @@ def load_track_csv(path: str) -> list[dict]:
     """Read back the rows from a file written by
     ``export_track_csv``.
 
-    Files written before v0.35.0 have no drift-alarms columns —
-    their fourteen-column header is accepted too, and those rows
-    load with empty drift alarms and alerts, so old exports keep
-    working; files written before v0.32.0 have no forecasts
-    columns either, and files written before v0.25.0 have no
-    battery column either, and load with empty forecasts and
-    battery the same way.
+    Files written before v0.36.0 have no drift-classifications
+    column — their sixteen-column header is accepted too, and
+    those rows load with empty drift classifications, so old
+    exports keep working; files written before v0.35.0 have no
+    drift-alarms columns either, and files written before
+    v0.32.0 have no forecasts columns either, and files written
+    before v0.25.0 have no battery column either, and load with
+    empty drift alarms, forecasts and battery the same way.
     """
     with open(path, encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         if reader.fieldnames == list(CSV_FIELDS):
             pass
-        elif reader.fieldnames == list(CSV_FIELDS[:-2]):
+        elif reader.fieldnames == list(CSV_FIELDS[:-1]):
+            # Pre-classifications export: no drift_classifications
+            # column. DictReader fills the missing field with
+            # None, which ``_row_from_csv`` treats as no drift
+            # classifications.
+            pass
+        elif reader.fieldnames == list(CSV_FIELDS[:-3]):
             # Pre-drift export: no drift_alarms or drift_alerts
             # column. DictReader fills the missing fields with
             # None, which ``_row_from_csv`` treats as no drift
             # state.
             pass
-        elif reader.fieldnames == list(CSV_FIELDS[:-4]):
+        elif reader.fieldnames == list(CSV_FIELDS[:-5]):
             # Pre-forecast export: no forecasts or forecast_alerts
             # column either.
             pass
-        elif reader.fieldnames == list(CSV_FIELDS[:-5]):
+        elif reader.fieldnames == list(CSV_FIELDS[:-6]):
             # Pre-battery export: no battery column either.
             pass
         else:

@@ -89,7 +89,11 @@ library, no dependencies, no BLE hardware needed.
   is self-describing about upcoming battery milestones, and the
   drift monitor's alarms and alerts per row when the track was
   recorded with a monitor, so it is self-describing about a
-  beacon going bad mid-shift too.
+  beacon going bad mid-shift too, and the monitor's drift
+  classification per beacon per row — the verdict with the
+  numbers it rests on — so the export also says what the monitor
+  thinks is wrong with each beacon, not just which ones are
+  alarming.
 - A ward-map overlay: plot an exported live track on the ward
   plan as a self-contained SVG — ward outline, beacons at their
   known positions, the track path with start and end markers,
@@ -2171,3 +2175,32 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   alarms as recorded, without claiming a ground-truth
   attribution. The roadmap grows as new needs surface — the
   exported drift alarms are the latest addition.
+- Drift classifications in exported track rows — done:
+  `track_rows` carries the same per-beacon drift
+  classifications the live track already exposes — one
+  classification per beacon per row, the verdict (healthy,
+  battery-sag, moved, noisy, uncertain) with the numbers it
+  rests on — on every exported row, in both JSON and CSV, so an
+  exported track says what the monitor thinks is wrong with
+  each beacon, not just which ones are alarming, without the
+  monitor alongside it; a track recorded without a monitor
+  exports empty classifications, and exports written before
+  this change still load, with the classifications defaulting
+  to empty (v0.36.0); measured on the default ward walk, seed
+  7, with beacon A reading 12 dB too loud: the first rows
+  classify every beacon `uncertain` — one reading is not
+  enough to classify — from row 4 A classifies `moved` at
+  +9.2 dB on 5 readings while the other three stay `healthy`,
+  and on the last row A is `uncertain` at +8.5 dB on 20
+  readings with a null revisit delta (too few revisits to
+  measure one), while C inherits a false `moved` verdict at
+  +2.9 dB — the estimate dragged towards loud A spreads C's
+  residuals around a shifted mean. The verdicts are a hint
+  from the same self-referenced monitor as the alarms, not a
+  diagnosis, and the export carries them as recorded. On a
+  multi-device track each device's rows carry only its own
+  monitor's verdicts: with A 12 dB too loud on tag-1's walk
+  only, tag-1's last row classifies A `uncertain` at +8.5 dB
+  while tag-2's last row classifies every beacon `healthy`.
+  The roadmap grows as new needs surface — the exported drift
+  classifications are the latest addition.

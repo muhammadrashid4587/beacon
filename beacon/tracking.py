@@ -281,6 +281,15 @@ class LivePosition:
     ``drift_alerts`` the plain-language warning per alarming
     beacon; both are empty when the tracker has no monitor, so a
     track without drift monitoring is unaffected.
+    ``drift_classifications`` is every beacon's drift
+    classification from that monitor at this step — the verdict
+    (healthy, battery-sag, moved, noisy, uncertain) with the
+    numbers it rests on — so a dashboard can see not just that a
+    beacon is alarming but what the monitor thinks is wrong with
+    it; empty when the tracker has no monitor. The verdict is a
+    hint, not a diagnosis — the monitor's reference is the
+    track's own estimate, not ground truth — so it rides on the
+    position for inspection, never inside the alert text.
     """
 
     t: float
@@ -296,6 +305,7 @@ class LivePosition:
     forecast_alerts: tuple[str, ...] = ()
     drift_alarms: tuple[DriftAlarm, ...] = ()
     drift_alerts: tuple[str, ...] = ()
+    drift_classifications: tuple[DriftClassification, ...] = ()
 
     def to_dict(self) -> dict:
         """JSON-friendly form, for the stream output and dashboards."""
@@ -320,6 +330,8 @@ class LivePosition:
             "drift_alarms": [alarm.to_dict()
                              for alarm in self.drift_alarms],
             "drift_alerts": list(self.drift_alerts),
+            "drift_classifications": [c.to_dict() for c in
+                                      self.drift_classifications],
         }
 
 
@@ -356,7 +368,10 @@ class LiveTracker:
     located step feeds it the step's fresh readings together with
     the live position just computed, and the position carries the
     beacons currently alarming plus a plain-language alert per
-    alarming beacon. The reference is the track's own estimate,
+    alarming beacon — and every beacon's drift classification at
+    that step, so the position also says what the monitor thinks
+    is wrong with each beacon, not just which ones are alarming.
+    The reference is the track's own estimate,
     not ground truth — each beacon is checked against the position
     the consensus of the beacons produced — so a beacon reading
     too loud alarms on the right beacon, while a beacon reading
@@ -666,7 +681,8 @@ class LiveTracker:
             forecast_alerts=forecast_alerts(
                 forecasts, self._forecast_window_hours),
             drift_alarms=alarms,
-            drift_alerts=drift_alerts(alarms))
+            drift_alerts=drift_alerts(alarms),
+            drift_classifications=self.drift_classifications())
         self._last = live
         return live
 

@@ -2483,7 +2483,8 @@ class TestLiveTrackExport(unittest.TestCase):
                                  "ellipse_angle_deg,beacons_used,"
                                  "beacons_excluded,coverage,battery,"
                                  "forecasts,forecast_alerts,"
-                                 "drift_alarms,drift_alerts")
+                                 "drift_alarms,drift_alerts,"
+                                 "drift_classifications")
 
     def _planned_track(self):
         """Feed the default walk through a tracker with a
@@ -2538,11 +2539,11 @@ class TestLiveTrackExport(unittest.TestCase):
         self.assertEqual(rows[0]["forecasts"], [])
         self.assertEqual(rows[0]["forecast_alerts"], [])
 
-    def _drifted_track(self):
+    def _drifted_track(self, offset=12.0):
         """Feed the default walk through a tracker with a drift
-        monitor, with beacon A reading 12 dB too loud the whole
-        walk, so A alarms from step 4 (once the monitor has its
-        5 readings) at a rolling mean near +8 dB — attenuated
+        monitor, with beacon A reading ``offset`` dB too loud the
+        whole walk, so A alarms from step 4 (once the monitor has
+        its 5 readings) at a rolling mean near +8 dB — attenuated
         from +12 dB because the estimate is pulled towards A."""
         steps = simulate_walk(rectangular_walk(20.0, 12.0, 10),
                               BEACONS, noise_db=2.0, seed=7)
@@ -2551,7 +2552,7 @@ class TestLiveTrackExport(unittest.TestCase):
         positions = []
         for i, step in enumerate(steps):
             rssi = dict(step["rssi"])
-            rssi["A"] = rssi["A"] + 12.0
+            rssi["A"] = rssi["A"] + offset
             positions.append(tracker.feed(rssi, float(i)))
         return positions
 
@@ -2594,6 +2595,182 @@ class TestLiveTrackExport(unittest.TestCase):
         self.assertEqual(rows[0]["drift_alerts"], [])
         self.assertEqual(rows[-1]["drift_alarms"], [])
         self.assertEqual(rows[-1]["drift_alerts"], [])
+
+    def test_drift_classifications_ride_on_export_rows_and_round_trip(self):
+        positions = self._drifted_track()
+        rows = track_rows(positions)
+        self.assertEqual(len(rows), 40)
+        # Every row carries one classification per beacon, in
+        # beacon order, even before the monitor has enough
+        # readings — those early verdicts are "uncertain", not
+        # missing.
+        self.assertEqual([c["id"] for c in
+                          rows[0]["drift_classifications"]],
+                         ["A", "B", "C", "D"])
+        self.assertEqual({c["verdict"] for c in
+                          rows[0]["drift_classifications"]},
+                         {"uncertain"})
+        # From step 4 the monitor has its 5 readings: A
+        # classifies "moved" at a mean near +9 dB — attenuated
+        # from +12 dB by the pull on the estimate — while the
+        # other three stay healthy.
+        by_id = {c["id"]: c
+                 for c in rows[4]["drift_classifications"]}
+        self.assertEqual(by_id["A"]["verdict"], "moved")
+        self.assertGreaterEqual(by_id["A"]["mean_residual_db"], 8.0)
+        self.assertLessEqual(by_id["A"]["mean_residual_db"], 10.0)
+        self.assertEqual(by_id["A"]["samples"], 5)
+        self.assertEqual(by_id["B"]["verdict"], "healthy")
+        self.assertEqual(by_id["C"]["verdict"], "healthy")
+        self.assertEqual(by_id["D"]["verdict"], "healthy")
+        # The last row still carries all four, and the revisit
+        # delta is null — this walk revisits too few spots to
+        # measure one — so the null round-trips through both
+        # formats.
+        last = {c["id"]: c
+                for c in rows[-1]["drift_classifications"]}
+        self.assertEqual(last["A"]["verdict"], "uncertain")
+        self.assertGreaterEqual(last["A"]["mean_residual_db"], 7.0)
+        self.assertLessEqual(last["A"]["mean_residual_db"], 9.5)
+        self.assertIsNone(last["A"]["revisit_delta_db"])
+        self.assertLess(last["A"]["revisit_pairs"], 5)
+        # C inherits a false "moved" verdict on the last row:
+        # the estimate dragged towards loud A makes C's
+        # residuals spread around a shifted mean — the
+        # self-referenced monitor's verdict is a hint, not a
+        # diagnosis.
+        self.assertEqual(last["C"]["verdict"], "moved")
+        # The live position's own dict carries them too, for the
+        # stream.
+        self.assertEqual(
+            positions[-1].to_dict()["drift_classifications"],
+            rows[-1]["drift_classifications"])
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "track.json")
+            csv_path = os.path.join(tmp, "track.csv")
+            export_track_json(positions, json_path)
+            export_track_csv(positions, csv_path)
+            self.assertEqual(load_track_json(json_path), rows)
+            self.assertEqual(load_track_csv(csv_path), rows)
+
+    def test_track_without_monitor_exports_empty_drift_classifications(self):
+        rows = track_rows(self._track())
+        self.assertEqual(rows[0]["drift_classifications"], [])
+        self.assertEqual(rows[-1]["drift_classifications"], [])
+        # A healthy monitored track classifies every beacon
+        # healthy by the end of the walk, not uncertain.
+        healthy = track_rows(self._drifted_track(offset=0.0))
+        self.assertEqual({c["verdict"] for c in
+                          healthy[-1]["drift_classifications"]},
+                         {"healthy"})
+
+    def test_old_csv_without_drift_classification_column_still_loads(self):
+        # A sixteen-column export (drift alarms, no
+        # classifications) loads with empty drift
+        # classifications, like the pre-drift example file loads
+        # with empty drift alarms.
+        import csv
+
+        rows = track_rows(self._drifted_track())
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = os.path.join(tmp, "old.csv")
+            with open(csv_path, "w", encoding="utf-8",
+                      newline="") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=["t", "x", "y", "floor",
+                                "floor_confidence",
+                                "ellipse_semi_major_m",
+                                "ellipse_semi_minor_m",
+                                "ellipse_angle_deg", "beacons_used",
+                                "beacons_excluded", "coverage",
+                                "battery", "forecasts",
+                                "forecast_alerts", "drift_alarms",
+                                "drift_alerts"])
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow({
+                        "t": repr(row["t"]), "x": repr(row["x"]),
+                        "y": repr(row["y"]),
+                        "floor": str(row["floor"]),
+                        "floor_confidence":
+                            repr(row["floor_confidence"]),
+                        "ellipse_semi_major_m":
+                            repr(row["ellipse_semi_major_m"]),
+                        "ellipse_semi_minor_m":
+                            repr(row["ellipse_semi_minor_m"]),
+                        "ellipse_angle_deg":
+                            repr(row["ellipse_angle_deg"]),
+                        "beacons_used": ";".join(row["beacons_used"]),
+                        "beacons_excluded":
+                            json.dumps(row["beacons_excluded"]),
+                        "coverage": repr(row["coverage"]),
+                        "battery": ";".join(
+                            f"{k}={v!r}" for k, v in
+                            sorted(row["battery"].items())),
+                        "forecasts": json.dumps(row["forecasts"]),
+                        "forecast_alerts":
+                            ";".join(row["forecast_alerts"]),
+                        "drift_alarms":
+                            json.dumps(row["drift_alarms"]),
+                        "drift_alerts":
+                            ";".join(row["drift_alerts"]),
+                    })
+            loaded = load_track_csv(csv_path)
+        self.assertEqual(len(loaded), 40)
+        self.assertEqual(loaded[0]["drift_classifications"], [])
+        self.assertEqual(loaded[-1]["drift_classifications"], [])
+        # The alarms column still parses — A alarms on the last
+        # row.
+        self.assertEqual([a["id"] for a in
+                          loaded[-1]["drift_alarms"]], ["A"])
+
+    def test_old_json_without_drift_classification_key_still_loads(self):
+        from beacon.export import track_from_dict, track_to_dict
+
+        data = track_to_dict(self._drifted_track())
+        for row in data["rows"]:
+            del row["drift_classifications"]
+        rows = track_from_dict(data)
+        self.assertEqual(len(rows), 40)
+        self.assertEqual(rows[0]["drift_classifications"], [])
+        self.assertEqual(rows[-1]["drift_classifications"], [])
+        self.assertEqual([a["id"] for a in
+                          rows[-1]["drift_alarms"]], ["A"])
+
+    def test_multi_device_classifications_are_per_device(self):
+        # tag-1's walk has A reading 12 dB too loud; tag-2's is
+        # healthy. Each device's rows carry only its own
+        # monitor's verdicts — tag-2 never inherits tag-1's
+        # drift.
+        steps = simulate_walk(rectangular_walk(20.0, 12.0, 10),
+                              BEACONS, noise_db=2.0, seed=7)
+        tracker = MultiDeviceTracker(
+            BEACONS, drift_monitor=DriftMonitor(BEACONS))
+        per_device = {"tag-1": [], "tag-2": []}
+        for i, step in enumerate(steps):
+            for device_id in ("tag-1", "tag-2"):
+                rssi = dict(step["rssi"])
+                if device_id == "tag-1":
+                    rssi["A"] = rssi["A"] + 12.0
+                per_device[device_id].append(
+                    tracker.feed(device_id, rssi, float(i)))
+        rows_1 = track_rows(per_device["tag-1"])
+        rows_2 = track_rows(per_device["tag-2"])
+        self.assertEqual(len(rows_1), 40)
+        self.assertEqual(len(rows_2), 40)
+        last_1 = {c["id"]: c for c in
+                  rows_1[-1]["drift_classifications"]}
+        self.assertEqual(last_1["A"]["verdict"], "uncertain")
+        self.assertGreaterEqual(last_1["A"]["mean_residual_db"], 7.0)
+        self.assertEqual({c["verdict"] for c in
+                          rows_2[-1]["drift_classifications"]},
+                         {"healthy"})
+        # tag-2's accessor agrees with its rows.
+        self.assertEqual(
+            [c.verdict for c in
+             tracker.drift_classifications("tag-2")],
+            ["healthy"] * 4)
 
     def test_old_csv_without_drift_columns_still_loads(self):
         # A fourteen-column export (forecasts, no drift alarms)
