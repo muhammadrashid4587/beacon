@@ -65,8 +65,9 @@ from .simulate import rectangular_walk, simulate_walk
 from .tracking import (DEFAULT_DARK_AFTER_S, DEFAULT_FORECAST_WINDOW_HOURS,
                        DEFAULT_READMIT_AFTER, DEFAULT_SIGMA_RSSI_DB,
                        DEFAULT_STALE_AFTER_S, ExcludedBeacon, LivePosition,
-                       LiveTracker, _deployment_plan, format_output,
-                       parse_line)
+                       LiveTracker, _deployment_plan,
+                       evaluate_multi_device_track, format_multi_device_report,
+                       format_output, parse_line)
 
 # The default ward walk, walked in reverse, so the demo's second
 # device follows a different path from the first.
@@ -374,8 +375,11 @@ def run_demo(stale_after: float, dark_after: float,
              forecast_window_hours: float
              = DEFAULT_FORECAST_WINDOW_HOURS,
              drift_monitor: DriftMonitor | None = None,
-             drift_beacon: tuple[str, float] | None = None
-             ) -> MultiDeviceTracker:
+             drift_beacon: tuple[str, float] | None = None,
+             return_truths: bool = False
+             ) -> MultiDeviceTracker | tuple[
+                 MultiDeviceTracker,
+                 dict[str, list[tuple[float, float]]]]:
     """Feed two simulated ward walks through the tracker at 1 Hz —
     one forward, one in reverse — and print one JSON line per
     reading. With ``plan`` given, each device's live position
@@ -387,7 +391,11 @@ def run_demo(stale_after: float, dark_after: float,
     pair that offsets one beacon's RSSI by that many dB on
     tag-1's walk only, so the demo shows one device alarming
     while the other stays quiet. Returns the tracker, so the
-    caller can inspect the finished tracks."""
+    caller can inspect the finished tracks. With
+    ``return_truths`` given, returns ``(tracker, truths)`` —
+    the ground truth per device, one ``(x, y)`` per step, in
+    feed order — so the caller can score the demo tracks with
+    ``evaluate_multi_device_track``."""
     beacons = default_beacons()
     forward = simulate_walk(rectangular_walk(20.0, 12.0, 10), beacons,
                             noise_db=2.0, seed=7)
@@ -418,6 +426,12 @@ def run_demo(stale_after: float, dark_after: float,
                 device_tracker.forecast_alerts,
                 device_tracker.drift_alarms,
                 device_tracker.drift_alerts)), file=output_stream)
+    if return_truths:
+        truths = {
+            "tag-1": [step["true"] for step in forward],
+            "tag-2": [step["true"] for step in reverse],
+        }
+        return tracker, truths
     return tracker
 
 
@@ -446,6 +460,14 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
     (demo or stream), so a ward dashboard can replay the whole
     shift from it — with no devices tracked the flags are
     quietly skipped, like an empty stream.
+    ``--evaluate`` (demo only) scores the two demo walks
+    against their ground truth and prints the multi-device
+    track accuracy report — one line per device plus the
+    overall line over every device's located steps pooled
+    together, in the same fields as the single-device demo
+    summary — and ``--evaluate-json PATH`` writes the same
+    report as JSON. A stream has no ground truth to score
+    against, so both flags need ``--demo``.
     ``input_stream`` / ``output_stream`` exist so tests can drive
     the stream without touching sys.stdin / sys.stdout.
     """
@@ -511,6 +533,14 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                         help="save every device's recorded track as one "
                         "combined CSV file to PATH at the end of the "
                         "run (demo or stream)")
+    parser.add_argument("--evaluate", action="store_true",
+                        help="demo only: score the two demo walks "
+                        "against their ground truth and print the "
+                        "multi-device track accuracy report — one "
+                        "line per device plus the overall line")
+    parser.add_argument("--evaluate-json", default=None, metavar="PATH",
+                        help="demo only: write the multi-device track "
+                        "accuracy report as JSON to PATH")
     args = parser.parse_args(argv)
     if args.stale_after <= 0:
         parser.error("--stale-after must be positive")
@@ -526,6 +556,12 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
         parser.error("--forecast-window-hours must be positive")
     if args.drain_rate < 0:
         parser.error("--drain-rate must not be negative")
+    if args.evaluate and not args.demo:
+        parser.error("--evaluate needs --demo: a stream has no "
+                     "ground truth to score against")
+    if args.evaluate_json is not None and not args.demo:
+        parser.error("--evaluate-json needs --demo: a stream has "
+                     "no ground truth to score against")
     plan = None
     if args.forecast:
         try:
@@ -560,12 +596,34 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                                  drift_monitor=drift_monitor)
     sink = output_stream if output_stream is not None else sys.stdout
     if args.demo:
-        tracker = run_demo(args.stale_after, args.dark_after,
-                           args.readmit_after, args.sigma_rssi, sink,
-                           plan=plan,
-                           forecast_window_hours=args.forecast_window_hours,
-                           drift_monitor=drift_monitor,
-                           drift_beacon=drift_beacon)
+        want_report = args.evaluate or args.evaluate_json is not None
+        if want_report:
+            tracker, truths = run_demo(
+                args.stale_after, args.dark_after,
+                args.readmit_after, args.sigma_rssi, sink,
+                plan=plan,
+                forecast_window_hours=args.forecast_window_hours,
+                drift_monitor=drift_monitor,
+                drift_beacon=drift_beacon,
+                return_truths=True)
+            report = evaluate_multi_device_track(tracker.tracks(),
+                                                 truths)
+            if args.evaluate:
+                print(file=sink)
+                print(format_multi_device_report(report), file=sink)
+            if args.evaluate_json is not None:
+                with open(args.evaluate_json, "w",
+                          encoding="utf-8") as handle:
+                    json.dump(report.to_dict(), handle, indent=2)
+                    handle.write("\n")
+        else:
+            tracker = run_demo(args.stale_after, args.dark_after,
+                               args.readmit_after, args.sigma_rssi, sink,
+                               plan=plan,
+                               forecast_window_hours
+                               =args.forecast_window_hours,
+                               drift_monitor=drift_monitor,
+                               drift_beacon=drift_beacon)
     else:
         source = input_stream if input_stream is not None else sys.stdin
         for line in source:

@@ -892,6 +892,42 @@ def evaluate_multi_device_track(
     return MultiDeviceTrackReport(by_device=by_device, overall=overall)
 
 
+def _format_report_line(label: str, report: TrackReport) -> str:
+    """One summary line for one ``TrackReport``.
+
+    The same fields as the single-device demo summary in
+    ``beacon.cli`` — steps, located steps, coverage, mean,
+    median, 90th percentile and worst error — with the floor
+    accuracy appended when the truth carried floors.
+    """
+    line = (f"{label}: steps: {report.steps}  "
+            f"located: {report.located}  "
+            f"coverage: {report.coverage:.2f}  "
+            f"mean error: {report.mean_error_m:.2f} m  "
+            f"median: {report.median_error_m:.2f} m  "
+            f"p90: {report.p90_error_m:.2f} m  "
+            f"worst: {report.max_error_m:.2f} m")
+    if report.floor_accuracy is not None:
+        line += f"  floor accuracy: {report.floor_accuracy:.2f}"
+    return line
+
+
+def format_multi_device_report(report: MultiDeviceTrackReport) -> str:
+    """The multi-device track report as printable text.
+
+    One line per device, in first-seen order, plus the overall
+    line over every device's located steps pooled together —
+    the same fields per line as the single-device demo summary,
+    so the per-device lines and the overall line read the same
+    way and a ward can compare a tag against the ward at a
+    glance.
+    """
+    lines = [_format_report_line(device_id, device_report)
+             for device_id, device_report in report.by_device.items()]
+    lines.append(_format_report_line("overall", report.overall))
+    return "\n".join(lines)
+
+
 def evaluate_live_track(
         positions: list[LivePosition | None],
         truth: list[tuple[float, float] | tuple[float, float, int]]

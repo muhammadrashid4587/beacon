@@ -198,6 +198,14 @@ library, no dependencies, no BLE hardware needed.
   device's located steps pooled together — so a ward can see
   which tag's walk went wrong instead of one blended number
   hiding it.
+- A CLI for the multi-device track accuracy report:
+  `python -m beacon.multi_device --demo --evaluate` scores the
+  two demo walks against their ground truth and prints the
+  report — one line per device plus the overall line, in the
+  same fields as the single-device demo summary — and
+  `--evaluate-json PATH` writes the same report as JSON, so
+  the demo's verdict is available from the command line
+  instead of only in code.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -2751,3 +2759,51 @@ mean 1.94 m, median 1.91 m, 90th percentile 3.10 m, worst step
 multi-device tracking section measured by hand, now in code.
 The roadmap grows as new needs surface — the multi-device
 accuracy report is the latest addition.
+
+## CLI wiring for the multi-device track accuracy report
+
+The report lived in code only: a ward that wanted the demo's
+verdict had to write the scoring call itself. `python -m
+beacon.multi_device --demo --evaluate` prints it at the end
+of the demo run — after the 80 JSON stream lines, one line
+per device plus the overall line, in the same fields as the
+single-device demo summary (steps, located, coverage, mean,
+median, 90th percentile, worst error, and floor accuracy when
+the truth carries floors):
+
+```sh
+python3 -m beacon.multi_device --demo --evaluate
+python3 -m beacon.multi_device --demo --evaluate-json ward-report.json
+```
+
+`--evaluate-json PATH` writes the same report as JSON —
+`MultiDeviceTrackReport.to_dict()`, one `TrackReport` per
+device plus the overall report — for dashboards and regression
+logs, and composes with `--export-json` / `--export-csv`, so
+one run produces the combined track file and its verdict
+together. `format_multi_device_report(report)` is the same
+text for library use, and `run_demo(..., return_truths=True)`
+returns the demo's ground truth alongside the tracker, so the
+report can be scored without re-running the walks. Both flags
+are demo-only: a stream has no ground truth to score against,
+so `--evaluate` or `--evaluate-json` without `--demo` is
+rejected instead of reporting zeroes. The evaluation scores
+the tracks the tracker actually recorded — including any
+`--drift-beacon` offset on tag-1's walk, so the report shows
+the drifted device's error growing while the other tag stays
+put.
+
+Measured behaviour (v0.47.0): the healthy demo prints tag-1
+at mean 2.16 m, median 2.08 m, 90th percentile 4.14 m, worst
+step 6.70 m, tag-2 at mean 1.72 m, median 1.69 m, 90th
+percentile 2.94 m, worst step 3.25 m, and the overall line at
+80 steps, 80 located, mean 1.94 m, median 1.91 m, 90th
+percentile 3.10 m, worst step 6.70 m, coverage 1.0 — the same
+numbers the library report gives. With beacon A reading 12 dB
+too loud on tag-1's walk only (`--drift --drift-beacon A:12`),
+tag-1's mean rises to 4.14 m (median 4.50 m, worst step
+7.51 m) while tag-2 stays at 1.72 m, and the overall mean
+rises to 2.93 m — the per-device lines show which tag went
+wrong instead of one blended number hiding it.
+The roadmap grows as new needs surface — the CLI wiring for
+the multi-device accuracy report is the latest addition.
