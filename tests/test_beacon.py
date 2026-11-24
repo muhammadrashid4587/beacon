@@ -3544,10 +3544,20 @@ class TestDriftMapOverlay(unittest.TestCase):
             # so nothing is marked — and the legend says so.
             self.assertNotIn("data-drift-alarm=", svg)
             self.assertIn("Drift alarms at end of track: none", svg)
+            # Drift now composes with the replay too: the same
+            # flags render the animated replay, still with
+            # nothing marked on a track recorded without a
+            # monitor.
+            out2 = os.path.join(tmp, "replay.svg")
             self.assertEqual(main(argv=["--map-overlay", track,
-                                       "--map-output", out,
+                                       "--map-output", out2,
                                        "--map-drift",
-                                       "--map-replay"]), 2)
+                                       "--map-replay"]), 0)
+            with open(out2, encoding="utf-8") as handle:
+                replay = handle.read()
+            self.assertIn('data-dot="true"', replay)
+            self.assertNotIn("data-drift-alarm=", replay)
+            self.assertIn("Drift alarms at end of track: none", replay)
 
 
 class TestLiveTrackReplay(unittest.TestCase):
@@ -3717,6 +3727,194 @@ class TestLiveTrackReplay(unittest.TestCase):
                                        "--replay-step-seconds", "0.5"]), 0)
             with open(out2, encoding="utf-8") as handle:
                 self.assertIn('dur="19.5s"', handle.read())
+
+
+class TestDriftTrackReplay(unittest.TestCase):
+    def _row(self, x, y, semi_major, floor=0, t=0.0, alarms=(),
+             classifications=()):
+        return {
+            "t": t, "x": x, "y": y, "floor": floor,
+            "floor_confidence": 1.0,
+            "ellipse_semi_major_m": semi_major,
+            "ellipse_semi_minor_m": (semi_major or 1.0) / 2.0,
+            "ellipse_angle_deg": 30.0,
+            "beacons_used": ["A", "B", "C", "D"],
+            "beacons_excluded": [], "coverage": 1.0,
+            "drift_alarms": [dict(alarm) for alarm in alarms],
+            "drift_classifications": [
+                dict(c) for c in classifications],
+        }
+
+    def _classification(self, beacon_id, verdict, mean_db):
+        return {"id": beacon_id, "verdict": verdict,
+                "mean_residual_db": mean_db, "residual_std_db": 1.0,
+                "time_slope_db_per_step": 0.0, "time_correlation": 0.0,
+                "revisit_delta_db": None, "revisit_pairs": 0,
+                "samples": 20, "reason": "test fixture"}
+
+    def _alarming_rows(self):
+        # A alarms on the last row only; B and C stay quiet.
+        return [
+            self._row(2.0, 2.0, 1.0, t=0.0),
+            self._row(5.0, 5.0, 1.0, t=1.0,
+                      alarms=[{"id": "A", "mean_residual_db": 8.53,
+                               "samples": 20}],
+                      classifications=[
+                          self._classification("A", "uncertain", 8.53),
+                          self._classification("B", "healthy", 0.1),
+                          self._classification("C", "moved", 2.9),
+                          self._classification("D", "healthy", 1.6)]),
+        ]
+
+    def test_alarming_beacon_gets_badge_ring_and_label(self):
+        svg = render_track_replay(self._alarming_rows(), BEACONS,
+                                  drift=True)
+        # Only A is badged; the other three beacons stay plain.
+        self.assertEqual(svg.count('data-drift-alarm="'), 1)
+        self.assertIn('data-drift-alarm="A"', svg)
+        self.assertIn(">!</text>", svg)
+        self.assertIn('data-drift-verdict="uncertain"', svg)
+        self.assertIn("ALARM +8.5 dB \u00b7 uncertain", svg)
+        # The summary line names the alarm state at the end.
+        self.assertIn("Drift alarms at end of track: "
+                      "A +8.5 dB (uncertain)", svg)
+        self.assertIn("drift alarm (red ! badge, end of track)", svg)
+        # The replay still animates: the dot, the trail, both
+        # frames' ellipses and timestamp labels.
+        self.assertEqual(svg.count('data-dot="true"'), 1)
+        self.assertEqual(svg.count('data-trail="true"'), 1)
+        self.assertEqual(svg.count("<ellipse"), 2)
+        self.assertEqual(svg.count("data-timestamp="), 2)
+
+    def test_only_the_last_rows_alarms_are_marked(self):
+        # A alarmed mid-track and cleared: the replay shows the
+        # end state, so nothing is marked.
+        rows = [
+            self._row(2.0, 2.0, 1.0, t=0.0,
+                      alarms=[{"id": "A", "mean_residual_db": 8.5,
+                               "samples": 20}],
+                      classifications=[
+                          self._classification("A", "uncertain", 8.5)]),
+            self._row(5.0, 5.0, 1.0, t=1.0),
+        ]
+        svg = render_track_replay(rows, BEACONS, drift=True)
+        self.assertNotIn("data-drift-alarm=", svg)
+        self.assertNotIn("ALARM", svg)
+        self.assertIn("Drift alarms at end of track: none", svg)
+
+    def test_no_alarms_marks_nothing(self):
+        rows = [self._row(2.0, 2.0, 1.0, t=0.0),
+                self._row(5.0, 5.0, 1.0, t=1.0)]
+        svg = render_track_replay(rows, BEACONS, drift=True)
+        self.assertNotIn("data-drift-alarm=", svg)
+        self.assertIn("Drift alarms at end of track: none", svg)
+        # A track recorded without a monitor carries no drift
+        # keys at all; that renders the same as no alarms.
+        bare = [{key: value for key, value in row.items()
+                 if not key.startswith("drift_")}
+                for row in rows]
+        self.assertEqual(
+            render_track_replay(bare, BEACONS, drift=True), svg)
+
+    def test_drift_off_by_default(self):
+        svg = render_track_replay(self._alarming_rows(), BEACONS)
+        self.assertNotIn("data-drift-alarm=", svg)
+        self.assertNotIn("ALARM", svg)
+        self.assertNotIn("Drift alarms at end of track:", svg)
+
+    def test_alarm_without_classification_has_no_verdict(self):
+        rows = [self._row(2.0, 2.0, 1.0, t=0.0),
+                self._row(5.0, 5.0, 1.0, t=1.0,
+                          alarms=[{"id": "A",
+                                   "mean_residual_db": -6.9,
+                                   "samples": 20}])]
+        svg = render_track_replay(rows, BEACONS, drift=True)
+        self.assertIn("ALARM -6.9 dB", svg)
+        self.assertNotIn("data-drift-verdict=", svg)
+        self.assertIn("Drift alarms at end of track: A -6.9 dB", svg)
+
+    def test_drift_marks_the_real_alarm_end_to_end(self):
+        # A reads 12 dB too loud on a real walk, streamed through
+        # a tracker with a monitor and exported: the replay
+        # badges the beacon the monitor alarmed on.
+        steps = simulate_walk(rectangular_walk(20.0, 12.0, 10),
+                              BEACONS, noise_db=2.0, seed=7)
+        for step in steps:
+            step["rssi"]["A"] += 12.0
+        tracker = LiveTracker(PositioningEngine(BEACONS),
+                              drift_monitor=DriftMonitor(BEACONS))
+        positions = [tracker.feed(step["rssi"], float(i))
+                     for i, step in enumerate(steps)]
+        rows = track_rows(positions)
+        svg = render_track_replay(rows, BEACONS, drift=True)
+        self.assertEqual(svg.count('data-drift-alarm="'), 1)
+        self.assertIn('data-drift-alarm="A"', svg)
+        # Seed 7: A alarms at +8.5 dB on 20 readings and the
+        # monitor calls it uncertain — the same alarm and verdict
+        # the export carries, now on the replay.
+        self.assertIn("ALARM +8.5 dB \u00b7 uncertain", svg)
+        self.assertIn("Drift alarms at end of track: "
+                      "A +8.5 dB (uncertain)", svg)
+
+    def test_drift_composes_with_heatmap(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        rows = load_track_json(
+            os.path.join(here, "..", "examples",
+                         "live-track-export.json"))
+        # The example export was recorded without a monitor, so
+        # the heatmap shades and the legend still says none.
+        svg = render_track_replay(rows, BEACONS, heatmap=True,
+                                  drift=True)
+        self.assertEqual(svg.count("data-heatmap-cell="), 60)
+        self.assertIn("Coverage heatmap:", svg)
+        self.assertIn("Drift alarms at end of track: none", svg)
+        # And with a real alarm the badge rides on top of the
+        # heatmap: both overlays compose.
+        svg = render_track_replay(self._alarming_rows(), BEACONS,
+                                  heatmap=True, drift=True)
+        self.assertEqual(svg.count("data-heatmap-cell="), 60)
+        self.assertIn('data-drift-alarm="A"', svg)
+        self.assertIn("ALARM +8.5 dB \u00b7 uncertain", svg)
+
+    def test_cli_map_replay_with_drift_flag_writes_svg(self):
+        from beacon.cli import main
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        track = os.path.join(here, "..", "examples",
+                             "live-track-export.json")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "replay.svg")
+            self.assertEqual(main(argv=["--map-overlay", track,
+                                       "--map-output", out,
+                                       "--map-replay",
+                                       "--map-drift"]), 0)
+            with open(out, encoding="utf-8") as handle:
+                svg = handle.read()
+            self.assertIn('data-dot="true"', svg)
+            self.assertEqual(svg.count("data-timestamp="), 40)
+            # The example export was recorded without a monitor,
+            # so nothing is marked — and the legend says so.
+            self.assertNotIn("data-drift-alarm=", svg)
+            self.assertIn("Drift alarms at end of track: none", svg)
+
+    def test_replay_canvas_grows_with_the_legend(self):
+        # The plain replay's "Replay:" line used to run past the
+        # 560 px canvas; the canvas now grows with the legend,
+        # so no legend line is ever clipped below it.
+        import re
+
+        rows = load_track_json(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "..", "examples", "live-track-export.json"))
+        svg = render_track_replay(rows, BEACONS)
+        height = int(re.search(r'height="(\d+)"', svg).group(1))
+        ys = [float(y) for y in re.findall(r' y="([\d.]+)"', svg)]
+        self.assertGreaterEqual(height, max(ys) + 12)
+        svg = render_track_replay(self._alarming_rows(), BEACONS,
+                                  heatmap=True, drift=True)
+        height = int(re.search(r'height="(\d+)"', svg).group(1))
+        ys = [float(y) for y in re.findall(r' y="([\d.]+)"', svg)]
+        self.assertGreaterEqual(height, max(ys) + 12)
 
 
 class TestMultiDeviceTracking(unittest.TestCase):

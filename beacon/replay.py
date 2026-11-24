@@ -7,6 +7,10 @@ along the track, the path draws itself behind it, the 95%
 confidence ellipse for the current step appears with the dot, and a
 timestamp label steps through the track's own timestamps — so a ward
 dashboard can watch a shift play back instead of reading a table.
+With ``drift`` the replay also marks the beacons alarming at the
+end of the track, the same red ring and "!" badge the static
+overlay carries, so the bad beacon reads as bad while the shift
+plays back too.
 
 The animation is SMIL, not JavaScript: the dot's ``cx`` / ``cy``
 animate through the projected positions on the track's key times,
@@ -32,6 +36,7 @@ from .beacon import Beacon
 from .map_overlay import (
     BEACON_COLOUR,
     CONFIDENCE_BANDS,
+    DRIFT_ALARM_COLOUR,
     HEATMAP_FILL_OPACITY,
     MARGIN,
     NO_ELLIPSE_COLOUR,
@@ -39,6 +44,8 @@ from .map_overlay import (
     SVG_HEIGHT,
     SVG_WIDTH,
     TRACK_COLOUR,
+    _drift_label,
+    _drift_state,
     _most_common_floor,
     _project,
     confidence_colour,
@@ -137,7 +144,8 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
                         loop: bool = True,
                         heatmap: bool = False,
                         heatmap_spacing: float = 2.0,
-                        sigma_rssi_db: float = 2.0) -> str:
+                        sigma_rssi_db: float = 2.0,
+                        drift: bool = False) -> str:
     """Render an exported live track as an animated SVG string.
 
     ``rows`` are the row dicts ``load_track_json`` /
@@ -148,7 +156,18 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
     indefinitely, otherwise it plays once. With ``heatmap`` the
     replay also shades the ward grid by the positioning quality
     the beacon layout gives at each cell (see
-    :func:`beacon.map_overlay.coverage_heatmap`).
+    :func:`beacon.map_overlay.coverage_heatmap`). With ``drift``
+    a beacon alarming on the track's last plotted row is marked
+    with a red ring and a red "!" badge, plus a label with its
+    rolling mean residual in dB and the drift classification
+    verdict when the monitor gave one — the same marking the
+    static overlay carries (see
+    :func:`beacon.map_overlay.render_map_overlay`), so the bad
+    beacon reads as bad while the shift plays back too. The
+    marking is static: it shows the alarm state at the end of
+    the track, not the alarm history, so a beacon that alarmed
+    and cleared is not marked, and a track recorded without a
+    monitor marks nothing.
 
     Raises ValueError on an empty track, with no beacons, a
     non-positive ``seconds_per_step``, or when the chosen floor
@@ -165,6 +184,7 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
     floor_rows = [row for row in rows if row["floor"] == floor]
     if not floor_rows:
         raise ValueError(f"no located points on floor {floor}")
+    drift_state = _drift_state(floor_rows) if drift else {}
 
     scale = min((SVG_WIDTH - 2 * MARGIN) / width_m,
                 (SVG_HEIGHT - 2 * MARGIN) / height_m)
@@ -179,9 +199,6 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
                         f"coverage {coverage:.0%})")
 
     parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" '
-        f'width="{SVG_WIDTH}" height="{SVG_HEIGHT}" '
-        f'viewBox="0 0 {SVG_WIDTH} {SVG_HEIGHT}" role="img">',
         f"<title>{escape(heading)}</title>",
         f'<text x="{MARGIN}" y="28" font-family="sans-serif" '
         f'font-size="16" font-weight="bold">{escape(heading)}</text>',
@@ -333,22 +350,63 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
             f'{label}</text>')
 
     # Beacons: a diamond marker plus its id, so the replay can be
-    # read against the hardware that located it.
+    # read against the hardware that located it. With drift, a
+    # beacon alarming on the last plotted row gets the same red
+    # ring, red "!" badge and label as on the static overlay —
+    # the badge is static, since it marks the alarm state at the
+    # end of the track, not the alarm history.
     for beacon in beacons:
         bx, by = _project(beacon.x, beacon.y, scale, width_m, height_m)
+        ring = ""
+        badge = ""
+        drift_annotation = ""
+        if beacon.id in drift_state:
+            mean_db, verdict = drift_state[beacon.id]
+            ring = (
+                f'<rect x="{bx - 9:.1f}" y="{by - 9:.1f}" width="18" '
+                f'height="18" fill="none" stroke="{DRIFT_ALARM_COLOUR}" '
+                f'stroke-width="2" '
+                f'transform="rotate(45 {bx:.1f} {by:.1f})"/>')
+            badge = (
+                f'<circle cx="{bx + 13:.1f}" cy="{by - 13:.1f}" r="7" '
+                f'fill="{DRIFT_ALARM_COLOUR}" '
+                f'data-drift-alarm="{escape(str(beacon.id))}"/>'
+                f'<text x="{bx + 13:.1f}" y="{by - 9:.1f}" '
+                f'font-family="sans-serif" font-size="11" '
+                f'font-weight="bold" fill="#ffffff" '
+                f'text-anchor="middle">!</text>')
+            verdict_attr = (
+                f' data-drift-verdict="{escape(verdict)}"'
+                if verdict is not None else "")
+            drift_annotation = (
+                f'<text x="{bx:.1f}" y="{by + 24:.1f}" '
+                f'font-family="sans-serif" font-size="10" '
+                f'font-weight="bold" fill="{DRIFT_ALARM_COLOUR}" '
+                f'text-anchor="middle" '
+                f'data-drift-alarm-label="{escape(str(beacon.id))}"'
+                f"{verdict_attr}>"
+                f'{escape(_drift_label(mean_db, verdict))}</text>')
         parts.append(
             f'<g data-beacon="{escape(str(beacon.id))}">'
             f'<rect x="{bx - 6:.1f}" y="{by - 6:.1f}" width="12" '
             f'height="12" fill="{BEACON_COLOUR}" '
             f'transform="rotate(45 {bx:.1f} {by:.1f})"/>'
+            f"{ring}"
             f'<text x="{bx:.1f}" y="{by - 12:.1f}" '
             f'font-family="sans-serif" font-size="12" '
             f'font-weight="bold" fill="{BEACON_COLOUR}" '
             f'text-anchor="middle">{escape(str(beacon.id))}</text>'
+            f"{drift_annotation}"
+            f"{badge}"
             f"</g>")
 
     # Legend, bottom left under the ward.
     legend_y = MARGIN + ward_h + 34
+    if drift_state:
+        # A drift label sits under a bottom-row beacon's diamond —
+        # below the ward, where the legend starts — so the legend
+        # drops a line to clear it instead of printing over it.
+        legend_y += 14
     parts.append(
         f'<text x="{MARGIN}" y="{legend_y}" font-family="sans-serif" '
         f'font-size="12" font-weight="bold">Legend</text>')
@@ -357,6 +415,10 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
         (TRACK_COLOUR, "track path (S start, E end)"),
         (DOT_COLOUR, "live position"),
     ]
+    if drift:
+        legend_items.append(
+            (DRIFT_ALARM_COLOUR,
+             "drift alarm (red ! badge, end of track)"))
     for _limit, colour, label in CONFIDENCE_BANDS:
         legend_items.append((colour, f"95% ellipse \u2014 {label}"))
     legend_items.append((NO_ELLIPSE_COLOUR, NO_ELLIPSE_LABEL))
@@ -394,6 +456,40 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
             + (f", {summary.degenerate_cells} degenerate"
                if summary.degenerate_cells else "")
             + "</text>")
+    if drift:
+        # The alarm state at the end of the track, in one line —
+        # the same labels the badges carry, so the legend says
+        # what the replay marks even where the badges are small.
+        legend_y += 24
+        if drift_state:
+            alarm_text = ", ".join(
+                f"{beacon_id} {mean_db:+.1f} dB"
+                + (f" ({verdict})"
+                   if verdict is not None and verdict != "healthy"
+                   else "")
+                for beacon_id, (mean_db, verdict)
+                in drift_state.items())
+            drift_text = ("Drift alarms at end of track: "
+                          + alarm_text)
+        else:
+            drift_text = "Drift alarms at end of track: none"
+        parts.append(
+            f'<text x="{MARGIN}" y="{legend_y + 18}" '
+            f'font-family="sans-serif" font-size="11" '
+            f'fill="#757575">{escape(drift_text)}</text>')
+    # The legend grows with the options (heatmap, drift), so the
+    # canvas grows with it: the ward is drawn to the fixed
+    # SVG_HEIGHT scale, and the height is the taller of that and
+    # the legend's last line plus a margin, so no legend line is
+    # ever clipped below the canvas — the plain replay's own
+    # "Replay:" line already ran past the 560 px canvas before
+    # this change.
+    height = int(max(SVG_HEIGHT, legend_y + 18 + 12))
+    parts.insert(
+        0,
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'width="{SVG_WIDTH}" height="{height}" '
+        f'viewBox="0 0 {SVG_WIDTH} {height}" role="img">')
     parts.append("</svg>")
     return "\n".join(parts) + "\n"
 
@@ -406,16 +502,20 @@ def write_track_replay(track_path: str, beacons: list[Beacon],
                        loop: bool = True,
                        heatmap: bool = False,
                        heatmap_spacing: float = 2.0,
-                       sigma_rssi_db: float = 2.0) -> str:
+                       sigma_rssi_db: float = 2.0,
+                       drift: bool = False) -> str:
     """Render the replay for ``track_path`` and write it to
-    ``output_path``. Returns the SVG string."""
+    ``output_path``. Returns the SVG string. ``drift`` marks the
+    beacons alarming at the end of the track (see
+    :func:`render_track_replay`)."""
     svg = render_track_replay(load_track_for_overlay(track_path),
                               beacons, width_m=width_m,
                               height_m=height_m, floor=floor,
                               seconds_per_step=seconds_per_step,
                               loop=loop, heatmap=heatmap,
                               heatmap_spacing=heatmap_spacing,
-                              sigma_rssi_db=sigma_rssi_db)
+                              sigma_rssi_db=sigma_rssi_db,
+                              drift=drift)
     with open(output_path, "w", encoding="utf-8") as handle:
         handle.write(svg)
     return svg

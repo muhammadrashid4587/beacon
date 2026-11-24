@@ -272,10 +272,10 @@ def main(argv=None) -> int:
                         "--battery-levels and --drain-rate")
     parser.add_argument("--map-drift", action="store_true",
                         help="mark the beacons alarming at the end of "
-                        "the track on the overlay: a red ! badge and "
-                        "the rolling mean residual with the drift "
-                        "classification verdict — needs --map-overlay, "
-                        "conflicts with --map-replay")
+                        "the track on the overlay or the replay: a "
+                        "red ! badge and the rolling mean residual "
+                        "with the drift classification verdict — "
+                        "needs --map-overlay")
     parser.add_argument("--map-replay", action="store_true",
                         help="render the track as an animated replay "
                         "SVG (SMIL, no JavaScript) instead of the "
@@ -373,10 +373,6 @@ def main(argv=None) -> int:
             print("--map-planner works with the static overlay, not "
                   "with --map-replay", file=sys.stderr)
             return 2
-        if args.map_drift and args.map_replay:
-            print("--map-drift works with the static overlay, not "
-                  "with --map-replay", file=sys.stderr)
-            return 2
         if args.map_planner and args.map_heatmap:
             print("--map-planner and --map-heatmap shade the same "
                   "cells in different colours; pick one",
@@ -395,7 +391,8 @@ def main(argv=None) -> int:
                 rows, default_beacons(),
                 width_m=WARD_WIDTH_M, height_m=WARD_HEIGHT_M,
                 floor=args.map_floor, heatmap=args.map_heatmap,
-                seconds_per_step=args.replay_step_seconds)
+                seconds_per_step=args.replay_step_seconds,
+                drift=args.map_drift)
         else:
             svg = render_map_overlay(rows, default_beacons(),
                                      width_m=WARD_WIDTH_M,

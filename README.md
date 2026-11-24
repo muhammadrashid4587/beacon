@@ -769,6 +769,50 @@ on seeds 3 and 7), because the classifier's verdict is a
 hint from the same self-referenced monitor, and the overlay
 carries it as recorded.
 
+## Drift alarms on the live-track replay
+
+The static overlay shows which beacon was going bad when the
+walk ended; the replay shows it too, while the shift plays
+back. `render_track_replay(..., drift=True)` reads the same
+drift alarms and classifications off the track's last plotted
+row and marks every beacon still alarming with the same red
+ring and red "!" badge, plus the same label — its rolling mean
+residual in dB and the drift classification verdict when the
+monitor gave one, e.g. `ALARM +8.5 dB · uncertain` — and the
+legend carries the same summary line, `Drift alarms at end of
+track: A +8.5 dB (uncertain)`, or `none` when nothing alarms.
+The badge is static: it marks the alarm state at the end of
+the track, not the alarm history, so it stays put while the
+dot glides. The marking composes with the replay's coverage
+heatmap, and the legend drops a line so the alarm label under
+a bottom-row beacon never prints over it — and the replay's
+canvas now grows with its legend, so no legend line is ever
+clipped below it (the plain replay's own "Replay:" line
+already ran past the 560 px canvas before this change).
+
+```sh
+python3 -m beacon.cli --map-overlay ward-a-track.json --map-output ward-a-track-replay.svg --map-replay --map-drift
+python3 -m beacon.cli --map-overlay ward-a-track.json --map-replay --map-drift --map-heatmap
+```
+
+The same limits as the overlay apply: a beacon that alarmed
+mid-track and cleared is not marked, a track recorded
+without a drift monitor marks nothing — an unmarked beacon
+means no alarm was recorded, not that the beacon is healthy —
+and the badge marks what the monitor recorded, not a
+ground-truth diagnosis: the monitor's reference is the
+track's own estimate, so a beacon 8 dB too quiet can alarm
+on the wrong beacon, and the verdict on the label is the same
+hint the classifier gives, not a verdict on the hardware.
+
+Measured behaviour: on the default ward walk with beacon A
+reading 12 dB too loud, the replay badges A only — `ALARM
++8.5 dB · uncertain`, summary `A +8.5 dB (uncertain)` on seed
+7 — the same alarm and verdict the overlay carries, since
+both read the same last row. Seeds 1 and 3 badge A only too,
+at +8.4 dB and +8.0 dB, with the verdict the monitor gave
+(`moved` on seed 1, `uncertain` on seeds 3 and 7).
+
 ## Planner forecast flags on the live track
 
 The planner-aware overlay shows when coverage will thin, but
@@ -1543,11 +1587,15 @@ replay loops by default (`loop=False` plays it once), at
 `seconds_per_step` per step (1 s by default), and it plots one
 floor only — the most common floor by default, or the floor
 named with `floor=` — with the same optional coverage heatmap
-as the static overlay. The CLI renders it directly:
+as the static overlay, and with `--map-drift` the same drift
+alarm marking as the static overlay: a red ring and a red "!"
+badge on every beacon still alarming at the end of the track.
+The CLI renders it directly:
 
 ```sh
 python3 -m beacon.cli --map-overlay ward-a-track.json --map-output ward-a-track-replay.svg --map-replay
 python3 -m beacon.cli --map-overlay ward-a-track.json --map-replay --replay-step-seconds 0.5
+python3 -m beacon.cli --map-overlay ward-a-track.json --map-replay --map-drift
 ```
 
 Measured behaviour: the default demo export
@@ -2260,8 +2308,7 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   with the planner-aware overlay, and the legend drops a line
   so the alarm label under a bottom-row beacon never prints
   over it; `python -m beacon.cli --map-overlay track.json
-  --map-drift` renders it, and it conflicts with
-  `--map-replay` (v0.37.0); measured on the default ward walk
+  --map-drift` renders it (v0.37.0); measured on the default ward walk
   with beacon A reading 12 dB too loud: the overlay badges A
   only, at +8.5 dB on seed 7 (+8.4 dB seed 1, +8.0 dB seed 3),
   with the verdict the monitor gave (`moved` on seed 1,
@@ -2270,6 +2317,24 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   8 dB too quiet can alarm on the wrong beacon, a beacon that
   alarmed and cleared is not marked, and a track recorded
   without a monitor marks nothing — an unmarked beacon means
-  no alarm was recorded, not that it is healthy. The roadmap
-  grows as new needs surface — the drift alarms on the overlay
-  are the latest addition.
+  no alarm was recorded, not that it is healthy.
+- Drift alarms on the live-track replay — done:
+  `render_track_replay(..., drift=True)` marks every beacon
+  alarming on the track's last plotted row with the same red
+  ring, red "!" badge and label as the static overlay, and the
+  legend carries the same summary line; the badge is static —
+  it marks the end state, not the alarm history — and the
+  marking composes with the replay's coverage heatmap, while
+  the replay's canvas now grows with its legend so no legend
+  line is ever clipped (the plain replay's own "Replay:" line
+  already ran past the 560 px canvas); `python -m beacon.cli
+  --map-overlay track.json --map-replay --map-drift` renders
+  it (v0.38.0); measured on the default ward walk with beacon
+  A reading 12 dB too loud: the replay badges A only, at
+  +8.5 dB on seed 7 (+8.4 dB seed 1, +8.0 dB seed 3), with the
+  same verdicts as the overlay. The same limits as the overlay
+  apply: cleared alarms unmarked, no-monitor tracks mark
+  nothing, and the badge marks what the monitor recorded, not
+  a ground-truth diagnosis. The roadmap grows as new needs
+  surface — the drift alarms on the replay are the latest
+  addition.
