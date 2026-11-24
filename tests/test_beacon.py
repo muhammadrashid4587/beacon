@@ -3931,6 +3931,99 @@ class TestDriftTrackReplay(unittest.TestCase):
                       "A +8.5 dB (uncertain), frames 4–39, "
                       "C +5.1 dB (moved), frames 25–33", svg)
 
+    def test_timeline_strip_matches_per_frame_alarm_data(self):
+        # Seed 7, A 12 dB too loud: the strip shows exactly the
+        # frames the per-frame badges mark — A 4–39, C 25–33 —
+        # and the strip's ranges match the per-frame alarm data
+        # exactly, not just the first-to-last span in the legend.
+        import re
+
+        from beacon.map_overlay import _drift_state_at_row
+        from beacon.replay import _alarm_ranges
+
+        steps = simulate_walk(rectangular_walk(20.0, 12.0, 10),
+                              BEACONS, noise_db=2.0, seed=7)
+        for step in steps:
+            step["rssi"]["A"] += 12.0
+        tracker = LiveTracker(PositioningEngine(BEACONS),
+                              drift_monitor=DriftMonitor(BEACONS))
+        positions = [tracker.feed(step["rssi"], float(i))
+                     for i, step in enumerate(steps)]
+        rows = track_rows(positions)
+        svg = render_track_replay(rows, BEACONS, drift=True)
+        frame_drift = [_drift_state_at_row(row) for row in rows]
+        expected = _alarm_ranges(frame_drift)
+        self.assertEqual(expected, {"A": [(4, 39)], "C": [(25, 33)]})
+        found: dict[str, list[tuple[int, int]]] = {}
+        for beacon_id, group in re.findall(
+                r'<g data-drift-timeline="([^"]+)">(.*?)</g>',
+                svg, re.DOTALL):
+            found[beacon_id] = [
+                (int(first), int(last))
+                for first, last in re.findall(
+                    r'data-drift-timeline-range="(\d+)-(\d+)"', group)]
+        self.assertEqual(found, expected)
+        self.assertIn("Drift alarm timeline", svg)
+        self.assertIn("A \u00b7 frames 4\u201339", svg)
+        self.assertIn("C \u00b7 frames 25\u201333", svg)
+        # The ranges cover exactly the alarming frames: 36 for
+        # A, 9 for C, the same counts the badges carry.
+        self.assertEqual(svg.count('data-drift-alarm="A"'), 36)
+        self.assertEqual(svg.count('data-drift-alarm="C"'), 9)
+
+    def test_timeline_strip_splits_disjoint_alarms(self):
+        # A alarms on frames 0 and 2 but not 1: the strip draws
+        # two segments, not one run covering the gap — and B's
+        # single-frame alarm is one segment.
+        rows = [
+            self._row(2.0, 2.0, 1.0, t=0.0,
+                      alarms=[{"id": "A", "mean_residual_db": 8.5,
+                               "samples": 20}],
+                      classifications=[
+                          self._classification("A", "uncertain", 8.5)]),
+            self._row(5.0, 5.0, 1.0, t=1.0,
+                      alarms=[{"id": "B", "mean_residual_db": -6.9,
+                               "samples": 20}],
+                      classifications=[
+                          self._classification("B", "uncertain", -6.9)]),
+            self._row(8.0, 8.0, 1.0, t=2.0,
+                      alarms=[{"id": "A", "mean_residual_db": 9.0,
+                               "samples": 20}],
+                      classifications=[
+                          self._classification("A", "moved", 9.0)]),
+        ]
+        svg = render_track_replay(rows, BEACONS, drift=True)
+        self.assertEqual(svg.count('data-drift-timeline-range="0-0"'), 1)
+        self.assertEqual(svg.count('data-drift-timeline-range="2-2"'), 1)
+        self.assertEqual(svg.count('data-drift-timeline-range="1-1"'), 1)
+        self.assertEqual(svg.count("data-drift-timeline-range="), 3)
+        self.assertIn("A \u00b7 frames 0, 2", svg)
+        self.assertIn("B \u00b7 frame 1", svg)
+
+    def test_timeline_strip_empty_when_no_beacon_alarms(self):
+        rows = [self._row(2.0, 2.0, 1.0, t=0.0),
+                self._row(5.0, 5.0, 1.0, t=1.0)]
+        svg = render_track_replay(rows, BEACONS, drift=True)
+        # The strip is still there, labelled and empty — the
+        # absence of segments reads as no alarm recorded, not
+        # a missing strip.
+        self.assertIn("Drift alarm timeline", svg)
+        self.assertIn(">none</text>", svg)
+        self.assertNotIn("data-drift-timeline-range=", svg)
+        self.assertNotIn('data-drift-timeline="', svg)
+        # A track recorded without a monitor carries no drift
+        # keys at all; that renders the same empty strip.
+        bare = [{key: value for key, value in row.items()
+                 if not key.startswith("drift_")}
+                for row in rows]
+        self.assertEqual(
+            render_track_replay(bare, BEACONS, drift=True), svg)
+
+    def test_timeline_strip_absent_without_drift(self):
+        svg = render_track_replay(self._alarming_rows(), BEACONS)
+        self.assertNotIn("Drift alarm timeline", svg)
+        self.assertNotIn("data-drift-timeline", svg)
+
     def test_drift_composes_with_heatmap(self):
         here = os.path.dirname(os.path.abspath(__file__))
         rows = load_track_json(

@@ -829,6 +829,24 @@ clears on its own") — which the end-of-track badge never
 showed, since C is quiet again by the last row. Seeds 1 and 3
 badge A only.
 
+Under the replay, a drift-alarm timeline strip shows the same
+history as coloured segments — one row per beacon that alarmed,
+one segment per contiguous run of alarming frames, labelled with
+the beacon and its frame ranges — so a viewer can see at a glance
+when each alarm started and ended without stepping through the
+frames. The strip reuses the same per-frame alarm data the badges
+use, so it can never disagree with them: a beacon that alarmed,
+cleared and alarmed again gets one segment per alarm, not one run
+covering the gap. With no alarms the strip is an empty labelled
+track, so the absence of segments reads as no alarm recorded
+rather than a missing strip. `python3 -m beacon.cli
+--map-overlay ward-a-track.json --map-output
+ward-a-track-replay.svg --map-replay --map-drift` renders it
+(v0.40.0). Measured behaviour: on the default ward walk with
+beacon A reading 12 dB too loud, the strip shows A 4–39 and C
+25–33 on seed 7, matching the per-frame badges exactly; seeds 1
+and 3 show A only.
+
 ## Planner forecast flags on the live track
 
 The planner-aware overlay shows when coverage will thin, but
@@ -2373,6 +2391,19 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   since C is quiet again by the last row; seeds 1 and 3 badge
   A only. The same limits as the overlay apply: no-monitor
   tracks mark nothing, and the badge marks what the monitor
-  recorded, not a ground-truth diagnosis. The roadmap grows as
-  new needs surface — the per-frame drift alarms on the replay
-  are the latest addition.
+  recorded, not a ground-truth diagnosis.
+- Drift-alarm timeline strip under the live-track replay — done:
+  `render_track_replay(..., drift=True)` draws a horizontal timeline
+  strip under the replay canvas — one row per beacon that alarmed,
+  with a coloured segment per contiguous run of alarming frames,
+  labelled with the beacon and its frame ranges, so a viewer can see
+  at a glance when each alarm started and ended without stepping
+  through the frames; the strip reuses the same per-frame alarm data
+  the badges use, so a beacon that alarmed, cleared and alarmed again
+  gets one segment per alarm, and with no alarms the strip is an empty
+  labelled track; `python -m beacon.cli --map-overlay track.json
+  --map-replay --map-drift` renders it (v0.40.0); measured on the
+  default ward walk with beacon A reading 12 dB too loud: seed 7 shows
+  A 4–39 and C 25–33, matching the per-frame badges exactly, and seeds
+  1 and 3 show A only. The roadmap grows as new needs surface — the
+  drift-alarm timeline strip is the latest addition.

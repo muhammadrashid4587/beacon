@@ -12,7 +12,10 @@ that frame's row, with the same red ring and "!" badge the
 static overlay carries, so a beacon reads as bad while it is
 alarming and clears when it recovers — including a beacon that
 alarmed mid-track and cleared before the walk ended, which the
-end-of-track marking never showed.
+end-of-track marking never showed — and a timeline strip under
+the replay shows, per beacon, when each alarm started and
+ended, so the history reads at a glance without stepping
+through the frames.
 
 The animation is SMIL, not JavaScript: the dot's ``cx`` / ``cy``
 animate through the projected positions on the track's key times,
@@ -156,6 +159,40 @@ def _alarm_history(frame_drift: list[dict[str, tuple[float, str | None]]]
     return history
 
 
+def _alarm_ranges(frame_drift: list[dict[str, tuple[float, str | None]]]
+                    ) -> dict[str, list[tuple[int, int]]]:
+    """Each beacon's alarming frames as contiguous runs.
+
+    Returns beacon id -> [(first frame, last frame), ...] in frame
+    order, so a beacon that alarmed, cleared and alarmed again
+    gets one run per alarm, and a beacon that never alarms is
+    absent. Built from the same per-frame alarm data the replay's
+    badges use, so the timeline strip can never disagree with
+    them.
+    """
+    runs: dict[str, list[tuple[int, int]]] = {}
+    for i, state in enumerate(frame_drift):
+        for beacon_id in state:
+            beacon_runs = runs.setdefault(beacon_id, [])
+            if beacon_runs and beacon_runs[-1][1] == i - 1:
+                beacon_runs[-1] = (beacon_runs[-1][0], i)
+            else:
+                beacon_runs.append((i, i))
+    return runs
+
+
+def _format_frame_ranges(ranges: list[tuple[int, int]]) -> str:
+    """Contiguous frame runs as a short label, e.g. "frames 4–39"
+    for one run, "frame 4" for a single frame, "frames 0, 2" for
+    two disjoint single frames."""
+    parts = [f"{first}–{last}" if first != last else f"{first}"
+             for first, last in ranges]
+    if len(parts) == 1:
+        singular = ranges[0][0] == ranges[0][1]
+        return f"frame {parts[0]}" if singular else f"frames {parts[0]}"
+    return "frames " + ", ".join(parts)
+
+
 def render_track_replay(rows: list[dict], beacons: list[Beacon],
                         width_m: float = 20.0, height_m: float = 12.0,
                         floor: int | None = None,
@@ -192,7 +229,14 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
     beacons alarmed, on which frames, and the residual and
     verdict at their last alarming frame — so the replay says
     what the monitor recorded over the whole walk, not just at
-    its end. A track recorded without a monitor marks nothing.
+    its end. Under the replay a timeline strip shows the same
+    history as coloured segments — one row per beacon that
+    alarmed, one segment per contiguous run of alarming frames,
+    labelled with the beacon and its frame ranges — so a viewer
+    can see at a glance when each alarm started and ended
+    without stepping through the frames; with no alarms the
+    strip is an empty labelled track. A track recorded without a
+    monitor marks nothing.
 
     Raises ValueError on an empty track, with no beacons, a
     non-positive ``seconds_per_step``, or when the chosen floor
@@ -445,6 +489,59 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
         # below the ward, where the legend starts — so the legend
         # drops a line to clear it instead of printing over it.
         legend_y += 14
+    if drift:
+        # Drift-alarm timeline strip, under the ward and above
+        # the legend: one row per beacon that alarmed, with a
+        # coloured segment per contiguous run of alarming frames,
+        # labelled with the beacon and its frame ranges, so a
+        # viewer can see at a glance when each alarm started and
+        # ended without stepping through the frames. The strip
+        # reuses the same per-frame alarm data the badges use, so
+        # it can never disagree with them; with no alarms it is
+        # an empty labelled track, so the absence of segments
+        # reads as no alarm recorded rather than a missing strip.
+        ranges = _alarm_ranges(frame_drift)
+        strip_y = legend_y
+        parts.append(
+            f'<text x="{MARGIN}" y="{strip_y}" '
+            f'font-family="sans-serif" font-size="12" '
+            f'font-weight="bold">Drift alarm timeline</text>')
+        track_x0 = MARGIN + 140
+        track_x1 = MARGIN + ward_w - 8
+        span_px = track_x1 - track_x0
+        strip_rows = list(ranges.items()) or [(None, [])]
+        for i, (beacon_id, beacon_ranges) in enumerate(strip_rows):
+            row_y = strip_y + 18 + i * 16
+            if beacon_id is None:
+                label = "none"
+            else:
+                label = (f"{beacon_id} \u00b7 "
+                         f"{_format_frame_ranges(beacon_ranges)}")
+            parts.append(
+                f'<line x1="{track_x0:.1f}" y1="{row_y:.1f}" '
+                f'x2="{track_x1:.1f}" y2="{row_y:.1f}" '
+                f'stroke="#e0e0e0" stroke-width="1"/>')
+            parts.append(
+                f'<text x="{MARGIN}" y="{row_y + 4:.1f}" '
+                f'font-family="sans-serif" font-size="11">'
+                f'{escape(label)}</text>')
+            if beacon_id is None:
+                continue
+            row_parts = [
+                f'<g data-drift-timeline="{escape(str(beacon_id))}">']
+            for first, last in beacon_ranges:
+                seg_x0 = track_x0 + (first / max(n - 1, 1)) * span_px
+                seg_x1 = track_x0 + (last / max(n - 1, 1)) * span_px
+                row_parts.append(
+                    f'<rect x="{seg_x0:.1f}" y="{row_y - 4:.1f}" '
+                    f'width="{max(seg_x1 - seg_x0, 3.0):.1f}" '
+                    f'height="8" fill="{DRIFT_ALARM_COLOUR}" '
+                    f'data-drift-timeline-range="{first}-{last}"/>')
+            row_parts.append("</g>")
+            parts.append("".join(row_parts))
+        # The legend sits below the strip, so the canvas grows
+        # with it the same way it already grows with the legend.
+        legend_y = strip_y + 18 + (len(strip_rows) - 1) * 16 + 18
     parts.append(
         f'<text x="{MARGIN}" y="{legend_y}" font-family="sans-serif" '
         f'font-size="12" font-weight="bold">Legend</text>')
