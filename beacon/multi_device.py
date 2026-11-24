@@ -60,6 +60,7 @@ from .beacon import Beacon
 from .deployment import DeploymentPlan
 from .drift import DriftAlarm, DriftClassification, DriftMonitor
 from .engine import PositioningEngine
+from .export import export_multi_track_csv, export_multi_track_json
 from .simulate import rectangular_walk, simulate_walk
 from .tracking import (DEFAULT_DARK_AFTER_S, DEFAULT_FORECAST_WINDOW_HOURS,
                        DEFAULT_READMIT_AFTER, DEFAULT_SIGMA_RSSI_DB,
@@ -108,7 +109,15 @@ class MultiDeviceTracker:
     each beacon checked against the position the consensus of
     the beacons produced — with the same honest limit: a beacon
     reading too quiet can drag the estimate with it and alarm on
-    the wrong beacon.
+    the wrong beacon. The tracker records every device's track
+    as it runs — one position (or None, for a reading too thin
+    to locate) per reading — and ``export_track_json`` /
+    ``export_track_csv`` write all of them as one combined file,
+    the per-device exports with their rows concatenated and each
+    row carrying its device, so a ward dashboard can replay the
+    whole shift from one file; the rows are the same
+    ``multi_track_rows`` rows the overlay and the replay group
+    by device, so the file cannot disagree with them.
     """
 
     def __init__(self, beacons: list[Beacon],
@@ -138,6 +147,12 @@ class MultiDeviceTracker:
         self._drift_monitor = drift_monitor
         # Device id -> its own tracker (and engine, inside it).
         self._trackers: dict[str, LiveTracker] = {}
+        # Device id -> its recorded track: one LivePosition (or
+        # None, for a reading too thin to locate) per reading fed
+        # for that device, in feed order — the track the combined
+        # export writes. A device keeps its recorded track until
+        # it is reset or removed.
+        self._tracks: dict[str, list[LivePosition | None]] = {}
 
     @property
     def devices(self) -> tuple[str, ...]:
@@ -186,7 +201,12 @@ class MultiDeviceTracker:
         """
         if not isinstance(device_id, str) or not device_id:
             raise ValueError("device_id must be a non-empty string")
-        return self._tracker_for(device_id).feed(rssi, t)
+        position = self._tracker_for(device_id).feed(rssi, t)
+        # Recorded even when None: a step too thin to locate is
+        # still a step, and the export counts it in the device's
+        # coverage instead of pretending the track was complete.
+        self._tracks.setdefault(device_id, []).append(position)
+        return position
 
     def last_position(self, device_id: str) -> LivePosition | None:
         """The most recent live position for one device, or None
@@ -203,6 +223,37 @@ class MultiDeviceTracker:
         return {device_id: tracker.last_position
                 for device_id, tracker in self._trackers.items()
                 if tracker.last_position is not None}
+
+    def tracks(self) -> dict[str, list[LivePosition | None]]:
+        """Every device's recorded track — one ``LivePosition``
+        (or None, for a reading too thin to locate) per reading,
+        in feed order — keyed by device id, in first-seen order.
+        A device whose track was reset has no entry until its
+        next reading. The lists are copies, so a caller cannot
+        rewrite the track the tracker is still recording."""
+        return {device_id: list(positions)
+                for device_id, positions in self._tracks.items()}
+
+    def export_track_json(self, path: str) -> None:
+        """Write every device's recorded track to ``path`` as one
+        combined JSON file — the per-device exports with their
+        rows concatenated, each row carrying its device, so a
+        dashboard can replay the whole shift from one file. The
+        rows are the same :func:`beacon.export.multi_track_rows`
+        rows the overlay and the replay group by device, so the
+        exported file cannot disagree with them about which rows
+        belong to which device. Raises ValueError when no device
+        has a track yet."""
+        export_multi_track_json(self._tracks, path)
+
+    def export_track_csv(self, path: str) -> None:
+        """Write every device's recorded track to ``path`` as one
+        combined CSV file — the same rows as
+        :meth:`export_track_json`, in the fixed CSV column order,
+        so a dashboard can take either format and replay the
+        whole shift from it. Raises ValueError when no device
+        has a track yet."""
+        export_multi_track_csv(self._tracks, path)
 
     def drift_alarms(self, device_id: str) -> tuple[DriftAlarm, ...]:
         """The beacons currently alarming on one device's drift
@@ -233,19 +284,26 @@ class MultiDeviceTracker:
     def reset(self, device_id: str | None = None) -> None:
         """Forget one device's track (``reset("tag-1")`` — a tag
         handed to a new patient starts fresh), or every device's
-        track when no id is given."""
+        track when no id is given. The recorded track goes with
+        the live state, so a reset device exports nothing until
+        its next reading."""
         if device_id is None:
             for tracker in self._trackers.values():
                 tracker.reset()
+            self._tracks.clear()
             return
         tracker = self._trackers.get(device_id)
         if tracker is not None:
             tracker.reset()
+            self._tracks.pop(device_id, None)
 
     def remove(self, device_id: str) -> bool:
         """Drop a device entirely, so it stops appearing in
         ``devices`` and ``positions``. Returns True when the
-        device was being tracked, False when it was never seen."""
+        device was being tracked, False when it was never seen.
+        Its recorded track goes with it, so it stops appearing
+        in the combined export too."""
+        self._tracks.pop(device_id, None)
         return self._trackers.pop(device_id, None) is not None
 
 
@@ -383,6 +441,11 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
     an alert per alarming beacon; ``--drift-beacon`` (demo only)
     offsets one beacon's RSSI on tag-1's walk so the demo shows
     one device alarming while the other stays quiet.
+    ``--export-json`` / ``--export-csv`` save every device's
+    recorded track as one combined file at the end of the run
+    (demo or stream), so a ward dashboard can replay the whole
+    shift from it — with no devices tracked the flags are
+    quietly skipped, like an empty stream.
     ``input_stream`` / ``output_stream`` exist so tests can drive
     the stream without touching sys.stdin / sys.stdout.
     """
@@ -440,6 +503,14 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                         help="with --forecast: measured charges, "
                         "e.g. A=0.9,B=0.6,C=0.4,D=0.2 "
                         "(default: all fresh)")
+    parser.add_argument("--export-json", default=None, metavar="PATH",
+                        help="save every device's recorded track as one "
+                        "combined JSON file to PATH at the end of the "
+                        "run (demo or stream)")
+    parser.add_argument("--export-csv", default=None, metavar="PATH",
+                        help="save every device's recorded track as one "
+                        "combined CSV file to PATH at the end of the "
+                        "run (demo or stream)")
     args = parser.parse_args(argv)
     if args.stale_after <= 0:
         parser.error("--stale-after must be positive")
@@ -489,27 +560,34 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                                  drift_monitor=drift_monitor)
     sink = output_stream if output_stream is not None else sys.stdout
     if args.demo:
-        run_demo(args.stale_after, args.dark_after,
-                 args.readmit_after, args.sigma_rssi, sink,
-                 plan=plan,
-                 forecast_window_hours=args.forecast_window_hours,
-                 drift_monitor=drift_monitor,
-                 drift_beacon=drift_beacon)
-        return 0
-
-    source = input_stream if input_stream is not None else sys.stdin
-    for line in source:
-        if not line.strip():
-            continue
-        device_id, t, rssi = parse_device_line(line)
-        position = tracker.feed(device_id, rssi, t)
-        device_tracker = tracker.tracker(device_id)
-        print(json.dumps(format_device_output(
-            device_id, t, position, device_tracker.heard,
-            device_tracker.excluded, device_tracker.forecasts,
-            device_tracker.forecast_alerts,
-            device_tracker.drift_alarms,
-            device_tracker.drift_alerts)), file=sink)
+        tracker = run_demo(args.stale_after, args.dark_after,
+                           args.readmit_after, args.sigma_rssi, sink,
+                           plan=plan,
+                           forecast_window_hours=args.forecast_window_hours,
+                           drift_monitor=drift_monitor,
+                           drift_beacon=drift_beacon)
+    else:
+        source = input_stream if input_stream is not None else sys.stdin
+        for line in source:
+            if not line.strip():
+                continue
+            device_id, t, rssi = parse_device_line(line)
+            position = tracker.feed(device_id, rssi, t)
+            device_tracker = tracker.tracker(device_id)
+            print(json.dumps(format_device_output(
+                device_id, t, position, device_tracker.heard,
+                device_tracker.excluded, device_tracker.forecasts,
+                device_tracker.forecast_alerts,
+                device_tracker.drift_alarms,
+                device_tracker.drift_alerts)), file=sink)
+    # A run that tracked nothing has no combined file to write,
+    # so the flags are quietly skipped rather than failing a run
+    # that streamed nothing.
+    if tracker.devices:
+        if args.export_json is not None:
+            tracker.export_track_json(args.export_json)
+        if args.export_csv is not None:
+            tracker.export_track_csv(args.export_csv)
     return 0
 
 

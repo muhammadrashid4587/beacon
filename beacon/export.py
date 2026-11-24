@@ -202,6 +202,40 @@ def multi_track_rows(
     return rows
 
 
+def multi_track_to_dict(
+        tracks: dict[str, list[LivePosition | None]]) -> dict:
+    """Serialise several devices' recorded tracks to one combined
+    JSON-ready dict.
+
+    ``tracks`` maps each device id to its recorded track, as
+    :func:`multi_track_rows` takes. The header aggregates the
+    devices — ``steps`` is the total steps across devices
+    (including steps too thin to locate), ``located`` the total
+    located rows, ``coverage`` the located share overall — while
+    each row keeps its own device's coverage, so a starved tag
+    still shows up as low coverage on its own rows. The dict
+    loads back with :func:`track_from_dict` exactly like a
+    single-device export, so the overlay and the replay render
+    it the same way they render rows combined by hand.
+
+    Raises ValueError when no device has a track: with no steps
+    there is no coverage to report.
+    """
+    if not tracks:
+        raise ValueError("cannot export an empty track")
+    rows = multi_track_rows(tracks)
+    steps = sum(len(positions) for positions in tracks.values())
+    located = len(rows)
+    return {
+        "format": FORMAT,
+        "version": FORMAT_VERSION,
+        "steps": steps,
+        "located": located,
+        "coverage": located / steps if steps else 0.0,
+        "rows": rows,
+    }
+
+
 def track_to_dict(positions: list[LivePosition | None],
                   device: str | None = None) -> dict:
     """Serialise a recorded track to plain JSON-ready data."""
@@ -370,6 +404,21 @@ def export_track_json(positions: list[LivePosition | None],
         handle.write("\n")
 
 
+def export_multi_track_json(
+        tracks: dict[str, list[LivePosition | None]], path: str) -> None:
+    """Write several devices' recorded tracks to ``path`` as one
+    combined JSON file, with the header from
+    :func:`multi_track_to_dict`. The file loads back with
+    :func:`load_track_json`, so a combined export can be
+    verified by loading it again — and the overlay and the
+    replay read it exactly like the per-device exports it was
+    combined from, because the rows are the same
+    :func:`multi_track_rows` rows they group by device."""
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(multi_track_to_dict(tracks), handle, indent=2)
+        handle.write("\n")
+
+
 def load_track_json(path: str) -> list[dict]:
     """Read back the rows from a file written by
     ``export_track_json``."""
@@ -526,6 +575,24 @@ def export_track_csv(positions: list[LivePosition | None],
         writer = csv.DictWriter(handle, fieldnames=list(CSV_FIELDS))
         writer.writeheader()
         for row in track_rows(positions, device=device):
+            writer.writerow(_row_to_csv(row))
+
+
+def export_multi_track_csv(
+        tracks: dict[str, list[LivePosition | None]], path: str) -> None:
+    """Write several devices' recorded tracks to ``path`` as one
+    combined CSV file, one row per located position, with the
+    fixed column order in ``CSV_FIELDS`` and the device in the
+    last column. The file loads back with
+    :func:`load_track_csv` to the same rows the JSON export
+    carries, so a dashboard can take either format and replay
+    the whole shift from it."""
+    if not tracks:
+        raise ValueError("cannot export an empty track")
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(CSV_FIELDS))
+        writer.writeheader()
+        for row in multi_track_rows(tracks):
             writer.writerow(_row_to_csv(row))
 
 

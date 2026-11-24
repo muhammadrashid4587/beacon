@@ -180,6 +180,18 @@ library, no dependencies, no BLE hardware needed.
   as the replay, so the overlay and the replay cannot disagree
   about which rows belong to which device, and a single-device
   track renders exactly as before.
+- A combined multi-device track export: the tracker records
+  every device's track as it runs and writes all of them as
+  one file — `MultiDeviceTracker.export_track_json` /
+  `export_track_csv`, or `--export-json` / `--export-csv` on
+  `python -m beacon.multi_device` — the per-device exports
+  with their rows concatenated, each row carrying its device,
+  so a ward dashboard can replay the whole shift from one
+  file; the rows are the same `multi_track_rows` rows the
+  overlay and the replay group by device, so the file cannot
+  disagree with them about which rows belong to which device,
+  and a single device exports exactly the single-device file
+  for its track.
 - A CLI that runs a simulated walk and prints estimated vs true
   positions with error statistics.
 
@@ -2611,5 +2623,50 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   the same colours as the replay's dots — and the drift badge
   on A names tag-1 only, `tag-1: A +8.5 dB (uncertain);
   tag-2: none`, with a single-device overlay byte-identical
-  to v0.43.0. The roadmap grows as new needs surface — the
-  per-device overlay series is the latest addition.
+  to v0.43.0.
+
+## Combined multi-device track export
+
+The replay and the overlay could already read a combined
+file, but nobody wrote one: a ward dashboard had to collect
+each device's positions itself and concatenate the per-device
+exports by hand. `MultiDeviceTracker` now records every
+device's track as it runs — one position per reading, None
+for a reading too thin to locate, so the coverage stays
+honest — and `export_track_json(path)` /
+`export_track_csv(path)` write all of them as one combined
+file directly, in the same JSON and CSV formats as the
+single-device export, with the same header (total steps,
+located rows, overall coverage) and the device in the last
+CSV column; `python -m beacon.multi_device --demo
+--export-json ward-a-and-b.json --export-csv
+ward-a-and-b.csv` does the same at the end of a run, and the
+stream mode exports when the stream ends. The rows are the
+same `multi_track_rows` rows the overlay and the replay group
+by device, so the exported file replays and overlays exactly
+like the per-device exports it was combined from — the JSON
+and CSV files load back to identical rows, the replay draws
+the same dots and timestamp labels from either, and the
+overlay renders the same two series. A device's recorded
+track goes with it when the device is reset or removed, so a
+tag handed to a new patient stops appearing in the export
+until its next reading, and exporting a tracker that has
+tracked nothing raises instead of writing an empty file.
+
+```sh
+python3 -m beacon.multi_device --demo --export-json ward-a-and-b.json
+python3 -m beacon.multi_device --demo --export-json ward-a-and-b.json --export-csv ward-a-and-b.csv
+```
+
+Measured behaviour (v0.45.0): two simulated walks through
+one `MultiDeviceTracker` — tag-1 forward, seed 7, tag-2 the
+reverse walk, seed 11 — export to 80 rows, 40 per device,
+header steps 80, located 80, coverage 1.0, and the JSON and
+CSV files load back to the same rows `multi_track_rows`
+produces; a one-device tracker exports a file identical to
+the single-device export for that device's track; a tag fed
+one thin reading before its walk exports 80 rows from 81
+steps, header coverage 80/81, with that tag's rows carrying
+its own 40/41 coverage while the other tag's stay at 1.0.
+The roadmap grows as new needs surface — the combined
+multi-device export is the latest addition.

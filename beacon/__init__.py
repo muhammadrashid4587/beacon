@@ -26,10 +26,11 @@ from .replay import render_track_replay, write_track_replay
 from .rssi import distance_to_rssi, rssi_to_distance
 from .simulate import simulate_multifloor_walk, simulate_walk, two_floor_walk
 from .survey import Survey
-from .export import (export_track_csv, export_track_json,
+from .export import (export_multi_track_csv, export_multi_track_json,
+                     export_track_csv, export_track_json,
                      load_track_csv, load_track_json,
-                     multi_track_rows, track_from_dict, track_rows,
-                     track_to_dict)
+                     multi_track_rows, multi_track_to_dict,
+                     track_from_dict, track_rows, track_to_dict)
 from .map_overlay import (CoverageCell, HeatmapSummary, PlannerCell,
                         PlannerHeatmapSummary, confidence_colour,
                         coverage_heatmap, heatmap_summary,
@@ -50,7 +51,7 @@ from .validation import (DEFAULT_MAX_WORST_SEMI_MAJOR_M,
                          FloorLayoutVerdict, LayoutValidation,
                          validate_floor_layouts)
 
-__version__ = "0.44.0"
+__version__ = "0.45.0"
 
 __all__ = [
     "BatteryModel",
@@ -106,11 +107,14 @@ __all__ = [
     "drift_alerts",
     "forecast_alerts",
     "forecast_flags",
+    "export_multi_track_csv",
+    "export_multi_track_json",
     "export_track_csv",
     "export_track_json",
     "load_track_csv",
     "load_track_json",
     "multi_track_rows",
+    "multi_track_to_dict",
     "track_from_dict",
     "track_rows",
     "track_to_dict",

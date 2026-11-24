@@ -60,6 +60,7 @@ from beacon import (
     Survey,
     track_rows,
     TrackReport,
+    track_to_dict,
     trilaterate,
     two_floor_walk,
     validate_floor_layouts,
@@ -4909,6 +4910,190 @@ class TestMultiDeviceTracking(unittest.TestCase):
             self.assertGreaterEqual(last.y, -5.0)
             self.assertLessEqual(last.y, 17.0)
             self.assertEqual(last.floor, 0)
+
+
+class TestMultiDeviceExport(unittest.TestCase):
+    def _feed_two_devices(self, tracker):
+        """Two seeded walks through the tracker — tag-1 forward
+        (seed 7), tag-2 the reverse walk (seed 11) — and return
+        the walks."""
+        forward = simulate_walk(rectangular_walk(20.0, 12.0, 10),
+                                BEACONS, noise_db=2.0, seed=7)
+        reverse = simulate_walk(
+            list(reversed(rectangular_walk(20.0, 12.0, 10))),
+            BEACONS, noise_db=2.0, seed=11)
+        for i, (step_a, step_b) in enumerate(zip(forward, reverse)):
+            tracker.feed("tag-1", step_a["rssi"], float(i))
+            tracker.feed("tag-2", step_b["rssi"], float(i))
+        return forward, reverse
+
+    def test_two_device_export_round_trips(self):
+        tracker = MultiDeviceTracker(BEACONS)
+        self._feed_two_devices(tracker)
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "both.json")
+            csv_path = os.path.join(tmp, "both.csv")
+            tracker.export_track_json(json_path)
+            tracker.export_track_csv(csv_path)
+            json_rows = load_track_json(json_path)
+            csv_rows = load_track_csv(csv_path)
+            with open(json_path, encoding="utf-8") as handle:
+                header = json.load(handle)
+        self.assertEqual(json_rows, csv_rows)
+        # The file's rows are the same rows the overlay and the
+        # replay group by device — the export cannot disagree
+        # with them about which rows belong to which device.
+        self.assertEqual(json_rows, multi_track_rows(tracker.tracks()))
+        self.assertEqual(len(json_rows), 80)
+        self.assertEqual([row["device"] for row in json_rows],
+                         ["tag-1"] * 40 + ["tag-2"] * 40)
+        self.assertTrue(all(row["coverage"] == 1.0
+                            for row in json_rows))
+        self.assertEqual(header["steps"], 80)
+        self.assertEqual(header["located"], 80)
+        self.assertEqual(header["coverage"], 1.0)
+
+    def test_exported_file_replays_and_overlays_both_devices(self):
+        tracker = MultiDeviceTracker(BEACONS)
+        self._feed_two_devices(tracker)
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "both.json")
+            csv_path = os.path.join(tmp, "both.csv")
+            tracker.export_track_json(json_path)
+            tracker.export_track_csv(csv_path)
+            json_rows = load_track_json(json_path)
+            csv_rows = load_track_csv(csv_path)
+        replay_json = render_track_replay(json_rows, BEACONS)
+        replay_csv = render_track_replay(csv_rows, BEACONS)
+        self.assertEqual(replay_json, replay_csv)
+        self.assertEqual(replay_json.count('data-dot="true"'), 2)
+        self.assertEqual(replay_json.count("data-timestamp="), 80)
+        overlay_json = render_map_overlay(json_rows, BEACONS)
+        overlay_csv = render_map_overlay(csv_rows, BEACONS)
+        self.assertEqual(overlay_json, overlay_csv)
+        # Both series in their own colours — tag-1 pink,
+        # tag-2 blue — the same colours the replay uses.
+        self.assertIn("#d81b60", overlay_json)
+        self.assertIn("#1565c0", overlay_json)
+
+    def test_single_device_export_matches_single_device_file(self):
+        tracker = MultiDeviceTracker(BEACONS)
+        forward = simulate_walk(rectangular_walk(20.0, 12.0, 10),
+                                BEACONS, noise_db=2.0, seed=7)
+        positions = [tracker.feed("tag-1", step["rssi"], float(i))
+                     for i, step in enumerate(forward)]
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "tag-1.json")
+            csv_path = os.path.join(tmp, "tag-1.csv")
+            single_path = os.path.join(tmp, "single.json")
+            tracker.export_track_json(json_path)
+            tracker.export_track_csv(csv_path)
+            export_track_json(positions, single_path, device="tag-1")
+            with open(json_path, encoding="utf-8") as handle:
+                header = json.load(handle)
+            with open(single_path, encoding="utf-8") as handle:
+                single = json.load(handle)
+            csv_rows = load_track_csv(csv_path)
+            json_rows = load_track_json(json_path)
+        # One device in the tracker exports exactly the
+        # single-device file for that device's track.
+        self.assertEqual(header, single)
+        self.assertEqual(header, track_to_dict(positions,
+                                               device="tag-1"))
+        self.assertEqual(csv_rows, json_rows)
+
+    def test_thin_step_counts_against_coverage(self):
+        tracker = MultiDeviceTracker(BEACONS)
+        thin = {"A": -62.1, "B": -71.4}
+        self.assertIsNone(tracker.feed("tag-2", thin, 0.0))
+        # Feed both walks starting at t=1, so the thin step at
+        # t=0 stays the first step of tag-2's recorded track.
+        forward = simulate_walk(rectangular_walk(20.0, 12.0, 10),
+                                BEACONS, noise_db=2.0, seed=7)
+        reverse = simulate_walk(
+            list(reversed(rectangular_walk(20.0, 12.0, 10))),
+            BEACONS, noise_db=2.0, seed=11)
+        for i, (step_a, step_b) in enumerate(zip(forward, reverse)):
+            tracker.feed("tag-1", step_a["rssi"], float(i + 1))
+            tracker.feed("tag-2", step_b["rssi"], float(i + 1))
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "both.json")
+            tracker.export_track_json(json_path)
+            json_rows = load_track_json(json_path)
+            with open(json_path, encoding="utf-8") as handle:
+                header = json.load(handle)
+        # The thin step is a step, not a row: 80 rows from 81
+        # steps, and tag-2's rows carry its own 40/41 coverage
+        # while tag-1's stay at 1.0.
+        self.assertEqual(len(json_rows), 80)
+        self.assertEqual(header["steps"], 81)
+        self.assertEqual(header["located"], 80)
+        self.assertEqual(header["coverage"], 80 / 81)
+        tag_2_rows = [row for row in json_rows
+                      if row["device"] == "tag-2"]
+        self.assertEqual(len(tag_2_rows), 40)
+        self.assertTrue(all(row["coverage"] == 40 / 41
+                            for row in tag_2_rows))
+        tag_1_rows = [row for row in json_rows
+                      if row["device"] == "tag-1"]
+        self.assertTrue(all(row["coverage"] == 1.0
+                            for row in tag_1_rows))
+
+    def test_reset_and_remove_drop_the_recorded_track(self):
+        tracker = MultiDeviceTracker(BEACONS)
+        forward, reverse = self._feed_two_devices(tracker)
+        tracker.reset("tag-1")
+        self.assertEqual(set(tracker.tracks()), {"tag-2"})
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "both.json")
+            tracker.export_track_json(json_path)
+            rows = load_track_json(json_path)
+        self.assertEqual(len(rows), 40)
+        self.assertTrue(all(row["device"] == "tag-2" for row in rows))
+        # A reset device records a fresh track on its next
+        # reading, and removing the other device drops it from
+        # the export too.
+        tracker.feed("tag-1", forward[0]["rssi"], 0.0)
+        self.assertTrue(tracker.remove("tag-2"))
+        self.assertEqual(set(tracker.tracks()), {"tag-1"})
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "tag-1.json")
+            tracker.export_track_json(json_path)
+            rows = load_track_json(json_path)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["device"], "tag-1")
+
+    def test_export_with_no_devices_raises(self):
+        tracker = MultiDeviceTracker(BEACONS)
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                tracker.export_track_json(
+                    os.path.join(tmp, "both.json"))
+            with self.assertRaises(ValueError):
+                tracker.export_track_csv(
+                    os.path.join(tmp, "both.csv"))
+
+    def test_demo_cli_exports_combined_file(self):
+        import io
+
+        from beacon.multi_device import main as multi_main
+
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "both.json")
+            csv_path = os.path.join(tmp, "both.csv")
+            self.assertEqual(
+                multi_main(argv=["--demo", "--export-json", json_path,
+                                "--export-csv", csv_path],
+                           output_stream=out), 0)
+            json_rows = load_track_json(json_path)
+            csv_rows = load_track_csv(csv_path)
+        self.assertEqual(json_rows, csv_rows)
+        self.assertEqual(len(json_rows), 80)
+        self.assertEqual({row["device"] for row in json_rows},
+                         {"tag-1", "tag-2"})
+
+
 class TestFloorLayoutValidation(unittest.TestCase):
     def _two_floor_beacons(self):
         ground = [Beacon("A", 0.0, 0.0, floor=0),
