@@ -2807,3 +2807,92 @@ rises to 2.93 m — the per-device lines show which tag went
 wrong instead of one blended number hiding it.
 The roadmap grows as new needs surface — the CLI wiring for
 the multi-device accuracy report is the latest addition.
+
+## Smoothed-track export
+
+The exported track is the live filter's output: causal, so it
+lags behind turns and keeps some jitter. For a recorded walk
+the future is already known, so the walk can be smoothed after
+the fact and exported smoothed alongside the raw track —
+`smooth_track_rows` re-runs each device's located positions
+through the Kalman filter and the Rauch-Tung-Striebel backward
+recursion (the same smoothing `PositioningEngine.smooth_walk`
+performs on a walk), revising each past position with the
+observations that came after it, and the smoothed rows export
+exactly like the raw ones:
+
+```python
+from beacon import MultiDeviceTracker, smooth_track_rows
+from beacon.export import (export_smoothed_multi_track_json,
+                           export_smoothed_track_json)
+from beacon.simulate import rectangular_walk, simulate_walk
+
+beacons = [Beacon("A", 0, 0), Beacon("B", 20, 0),
+           Beacon("C", 20, 12), Beacon("D", 0, 12)]
+forward = simulate_walk(rectangular_walk(20.0, 12.0, 10), beacons,
+                        noise_db=2.0, seed=7)
+reverse = simulate_walk(
+    list(reversed(rectangular_walk(20.0, 12.0, 10))), beacons,
+    noise_db=2.0, seed=11)
+tracker = MultiDeviceTracker(beacons)
+for i, step in enumerate(forward):
+    tracker.feed("tag-1", step["rssi"], float(i))
+for i, step in enumerate(reverse):
+    tracker.feed("tag-2", step["rssi"], float(i))
+export_smoothed_multi_track_json(tracker.tracks(),
+                                 "ward-a-and-b-smoothed.json")
+# or per device, from rows already exported:
+# smooth_track_rows(load_track_json("ward-a-track.json"))
+```
+
+`smooth_track_rows(rows)` takes a row list as `track_rows`
+produces — or as `load_track_json` / `load_track_csv` loads
+back — and returns new rows with only the (x, y) revised:
+the timestamp, the floor, the confidence ellipse, the beacons
+used and excluded, the battery, the forecasts, the drift state
+and the coverage are the recorded step's own, carried
+unchanged. The ellipse is the live estimate's, not the
+smoothed position's, so it still reads as wide as the live
+geometry was. `smoothed_track_to_dict` /
+`smoothed_multi_track_to_dict` and
+`export_smoothed_track_json` / `export_smoothed_track_csv` /
+`export_smoothed_multi_track_json` /
+`export_smoothed_multi_track_csv` build and write the smoothed
+export directly from recorded tracks, and
+`MultiDeviceTracker.export_smoothed_track_json` /
+`export_smoothed_track_csv` write the combined smoothed file
+from the tracker — the same file shape, format and version as
+the raw export, so the smoothed file loads back with
+`load_track_json` / `load_track_csv` and renders in the
+overlay and the replay exactly like the raw one, with a
+`smoothed` flag and the `smoothing_method` in the JSON header
+so the file says it is smoothed instead of looking like a raw
+export. Rows from several devices are smoothed per device, so
+one tag's walk never pulls another tag's positions, and a
+series that changes floor is split at the change and each run
+smoothed on its own — the live filter resets on a floor
+change, so the smoother does too — instead of smoothing
+across two planes. `method="moving_average"` runs the
+moving-average filter over the series instead, the same
+opt-out the engine offers; on a track that is already
+live-filtered it adds lag and measures worse than the raw
+track, so the Rauch-Tung-Striebel method is the default. The
+CLIs export the smoothed file alongside the raw one:
+
+```sh
+python3 -m beacon.multi_device --demo --export-json ward-a-and-b.json --export-smoothed-json ward-a-and-b-smoothed.json
+python3 -m beacon.tracking --demo --export-smoothed-json ward-a-track-smoothed.json
+```
+
+Measured behaviour (v0.48.0): on the two-device demo walk
+the smoothed export cuts tag-1's mean error from 2.16 m to
+1.45 m and tag-2's from 1.72 m to 1.04 m — overall 1.94 m to
+1.25 m over the 80 located steps — and on the single-device
+demo walk it cuts the mean on every seed 1, 2, 3, 7, 11 (seed
+1: 1.97 m to 1.47 m; seed 2: 2.57 m to 1.90 m; seed 3: 2.63 m
+to 2.15 m; seed 7: 2.16 m to 1.45 m; seed 11: 1.83 m to
+1.19 m). The moving-average opt-out on the same single-device
+walk measures 2.93 m against the raw 2.16 m — worse than doing
+nothing, which is why it stays the opt-out.
+The roadmap grows as new needs surface — the smoothed-track
+export is the latest addition.

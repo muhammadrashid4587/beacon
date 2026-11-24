@@ -57,12 +57,40 @@ are a JSON string in the CSV field, since an exclusion carries a
 free-text reason.
 
 Pure standard library, no dependencies.
+
+A recorded track can also be exported smoothed: the live filter
+is causal, so the exported positions lag behind turns and keep
+some jitter, and for a recorded walk the future is already
+known. ``smooth_track_rows`` re-runs each device's located
+positions through the Kalman filter and the Rauch-Tung-Striebel
+backward recursion (the same smoothing ``PositioningEngine.
+smooth_walk`` performs on a walk), revising each past position
+with the observations that came after it, and the smoothed rows
+export exactly like the raw ones — same file shape, same
+columns, same loaders — so a dashboard can take either file.
+The smoothed file's header says it is smoothed, and which
+method was used. Only the (x, y) is revised: the timestamp, the
+floor, the confidence ellipse, the beacons used and excluded,
+the battery, the forecasts and the drift state are the recorded
+step's own, carried unchanged — the ellipse is the live
+estimate's, not the smoothed position's, so it still reads as
+wide as the live geometry was. A device's series is smoothed
+separately from every other device's, so one tag's walk never
+pulls another tag's positions, and a series that changes floor
+is split at the change — the live filter resets on a floor
+change, so the smoother does too — instead of smoothing
+across two planes. The moving-average method is available as
+an opt-out (``method="moving_average"``), the same filter the
+engine offers; on a track that is already live-filtered it
+adds lag and measures worse than the raw track, so the
+Rauch-Tung-Striebel method is the default.
 """
 
 import csv
 import json
 import math
 
+from .filter import KalmanFilter, MovingAverageFilter
 from .tracking import LivePosition
 
 FORMAT = "beacon-live-track"
@@ -234,6 +262,140 @@ def multi_track_to_dict(
         "coverage": located / steps if steps else 0.0,
         "rows": rows,
     }
+
+
+def _smooth_series(positions: list[tuple[float, float]],
+                   method: str, window: int) -> list[tuple[float, float]]:
+    """One device's (x, y) series, smoothed in order.
+
+    ``"rts"`` feeds the series through a fresh Kalman filter and
+    returns the Rauch-Tung-Striebel smoothed positions — each past
+    position revised with the observations that came after it.
+    ``"moving_average"`` runs the moving-average filter over the
+    series instead. The caller splits the series at floor
+    changes, so a run never spans two planes.
+    """
+    if method == "rts":
+        kalman = KalmanFilter()
+        for position in positions:
+            kalman.update(position)
+        return kalman.smooth()
+    # method == "moving_average": validated by smooth_track_rows.
+    average = MovingAverageFilter(window=window)
+    return [average.update(position) for position in positions]
+
+
+def smooth_track_rows(rows: list[dict], method: str = "rts",
+                      window: int = 5) -> list[dict]:
+    """The rows of a recorded track with their positions smoothed.
+
+    ``rows`` is a row list as :func:`track_rows` produces — or as
+    :func:`track_from_dict` / :func:`load_track_json` loads back —
+    one row per located position, in order. Each row comes back
+    with its (x, y) replaced by the smoothed position and
+    everything else copied unchanged: the timestamp, the floor,
+    the confidence ellipse, the beacons used and excluded, the
+    battery, the forecasts, the drift state and the coverage are
+    the recorded step's own. The input rows are not modified.
+
+    ``method`` is ``"rts"`` (the default) or ``"moving_average"``:
+    the Rauch-Tung-Striebel recursion over a fresh Kalman filter,
+    or the moving average over the last ``window`` positions (the
+    same opt-out the engine offers). On a track that is already
+    live-filtered the moving average adds lag and measures worse,
+    so it is the opt-out, not the default. Rows from several
+    devices are smoothed per device — each device's series
+    separately, in that device's own order — so one tag's walk
+    never pulls another tag's positions, and the rows come back
+    in their original order. A device's series that changes floor
+    is split at the change and each run smoothed on its own, the
+    way the live filter resets on a floor change.
+
+    Raises ValueError on an empty row list — with no located
+    steps there is nothing to smooth — on an unknown method, or
+    on a moving-average window below 1.
+    """
+    if not rows:
+        raise ValueError("cannot smooth an empty track")
+    if method not in ("rts", "moving_average"):
+        raise ValueError(
+            f"unknown smoothing method: {method!r} (expected 'rts' "
+            "or 'moving_average')")
+    if method == "moving_average" and window < 1:
+        raise ValueError("window must be at least 1")
+    smoothed = [dict(row) for row in rows]
+    # Row indices per device, in order — None is the unnamed
+    # single device, so a one-device track is unaffected.
+    by_device: dict[str | None, list[int]] = {}
+    for index, row in enumerate(rows):
+        by_device.setdefault(row.get("device"), []).append(index)
+    for indices in by_device.values():
+        # Contiguous runs of one floor, smoothed separately.
+        start = 0
+        while start < len(indices):
+            end = start + 1
+            while (end < len(indices)
+                   and rows[indices[end]]["floor"]
+                   == rows[indices[start]]["floor"]):
+                end += 1
+            run = indices[start:end]
+            positions = [(rows[i]["x"], rows[i]["y"]) for i in run]
+            for i, (x, y) in zip(
+                    run, _smooth_series(positions, method, window)):
+                smoothed[i]["x"] = x
+                smoothed[i]["y"] = y
+            start = end
+    return smoothed
+
+
+def smoothed_track_to_dict(
+        positions: list[LivePosition | None],
+        device: str | None = None,
+        method: str = "rts", window: int = 5) -> dict:
+    """Serialise a recorded track to plain JSON-ready data, with
+    the positions smoothed (see :func:`smooth_track_rows`).
+
+    The same shape as :func:`track_to_dict` — same format and
+    version, same steps, located and coverage, since smoothing
+    revises positions without adding or dropping rows — with a
+    ``smoothed`` flag and the ``smoothing_method`` in the header,
+    so the file says it is smoothed instead of looking like a
+    raw export. A track with steps but nothing located has no
+    rows to smooth, so it exports empty, like the raw export.
+    """
+    data = track_to_dict(positions, device=device)
+    if data["rows"]:
+        data["rows"] = smooth_track_rows(data["rows"], method=method,
+                                         window=window)
+    data["smoothed"] = True
+    data["smoothing_method"] = method
+    return data
+
+
+def smoothed_multi_track_to_dict(
+        tracks: dict[str, list[LivePosition | None]],
+        method: str = "rts", window: int = 5) -> dict:
+    """Serialise several devices' recorded tracks to one combined
+    JSON-ready dict, with every device's positions smoothed.
+
+    The same shape as :func:`multi_track_to_dict` — the header
+    aggregates the devices the same way — with a ``smoothed``
+    flag and the ``smoothing_method`` in the header. Each
+    device's rows are smoothed separately (see
+    :func:`smooth_track_rows`), so one tag's walk never pulls
+    another tag's positions. The dict loads back with
+    :func:`track_from_dict` exactly like a raw combined export,
+    since the smoothed rows carry the same fields.
+    """
+    if not tracks:
+        raise ValueError("cannot export an empty track")
+    data = multi_track_to_dict(tracks)
+    if data["rows"]:
+        data["rows"] = smooth_track_rows(data["rows"], method=method,
+                                         window=window)
+    data["smoothed"] = True
+    data["smoothing_method"] = method
+    return data
 
 
 def track_to_dict(positions: list[LivePosition | None],
@@ -417,6 +579,81 @@ def export_multi_track_json(
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(multi_track_to_dict(tracks), handle, indent=2)
         handle.write("\n")
+
+
+def export_smoothed_track_json(
+        positions: list[LivePosition | None], path: str,
+        device: str | None = None,
+        method: str = "rts", window: int = 5) -> None:
+    """Write a recorded track to ``path`` as JSON, with the
+    positions smoothed (see :func:`smoothed_track_to_dict`) —
+    the smoothed export alongside the raw one, so a dashboard
+    can replay the steadier path instead of the jittery live
+    one. ``device`` names the device the track belongs to, so
+    the file's rows carry it. The file loads back with
+    :func:`load_track_json`, since the smoothed rows carry the
+    same fields as the raw ones."""
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(smoothed_track_to_dict(positions, device=device,
+                                         method=method, window=window),
+                  handle, indent=2)
+        handle.write("\n")
+
+
+def export_smoothed_multi_track_json(
+        tracks: dict[str, list[LivePosition | None]], path: str,
+        method: str = "rts", window: int = 5) -> None:
+    """Write several devices' recorded tracks to ``path`` as one
+    combined JSON file, with every device's positions smoothed
+    (see :func:`smoothed_multi_track_to_dict`) — the smoothed
+    export alongside the raw combined one, so a dashboard can
+    replay the whole shift's steadier paths from one file. The
+    file loads back with :func:`load_track_json` to the same
+    rows the raw combined export carries, with the (x, y)
+    revised per device."""
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(smoothed_multi_track_to_dict(tracks, method=method,
+                                               window=window),
+                  handle, indent=2)
+        handle.write("\n")
+
+
+def export_smoothed_track_csv(
+        positions: list[LivePosition | None], path: str,
+        device: str | None = None,
+        method: str = "rts", window: int = 5) -> None:
+    """Write a recorded track to ``path`` as CSV, with the
+    positions smoothed — the same rows as
+    :func:`export_smoothed_track_json`, in the fixed CSV column
+    order, so a dashboard can take either format. ``device``
+    names the device the track belongs to. The file loads back
+    with :func:`load_track_csv`."""
+    data = smoothed_track_to_dict(positions, device=device,
+                                  method=method, window=window)
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(CSV_FIELDS))
+        writer.writeheader()
+        for row in data["rows"]:
+            writer.writerow(_row_to_csv(row))
+
+
+def export_smoothed_multi_track_csv(
+        tracks: dict[str, list[LivePosition | None]], path: str,
+        method: str = "rts", window: int = 5) -> None:
+    """Write several devices' recorded tracks to ``path`` as one
+    combined CSV file, with every device's positions smoothed —
+    the same rows as
+    :func:`export_smoothed_multi_track_json`, in the fixed CSV
+    column order, so a dashboard can take either format and
+    replay the whole shift's steadier paths from it. The file
+    loads back with :func:`load_track_csv`."""
+    data = smoothed_multi_track_to_dict(tracks, method=method,
+                                        window=window)
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(CSV_FIELDS))
+        writer.writeheader()
+        for row in data["rows"]:
+            writer.writerow(_row_to_csv(row))
 
 
 def load_track_json(path: str) -> list[dict]:

@@ -1142,7 +1142,11 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
     beacon going bad mid-track.
     ``--export-json`` / ``--export-csv`` save the recorded track
     (one row per located position) to a file a ward dashboard can
-    consume, in either mode. ``input_stream`` / ``output_stream``
+    consume, in either mode. ``--export-smoothed-json`` /
+    ``--export-smoothed-csv`` save the same track with its
+    positions smoothed (Rauch-Tung-Striebel), alongside the raw
+    export, so a dashboard can replay the steadier path.
+    ``input_stream`` / ``output_stream``
     exist so tests can drive the stream without touching
     sys.stdin / sys.stdout.
     """
@@ -1206,6 +1210,17 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
     parser.add_argument("--export-csv", default=None, metavar="PATH",
                         help="save the recorded track as CSV to PATH "
                         "(one row per located position)")
+    parser.add_argument("--export-smoothed-json", default=None,
+                        metavar="PATH",
+                        help="save the recorded track as JSON to PATH "
+                        "with its positions smoothed "
+                        "(Rauch-Tung-Striebel) — the smoothed export "
+                        "alongside the raw one")
+    parser.add_argument("--export-smoothed-csv", default=None,
+                        metavar="PATH",
+                        help="save the recorded track as CSV to PATH "
+                        "with its positions smoothed "
+                        "(Rauch-Tung-Striebel)")
     args = parser.parse_args(argv)
     if args.stale_after <= 0:
         parser.error("--stale-after must be positive")
@@ -1257,7 +1272,8 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                              =args.forecast_window_hours,
                              drift_monitor=drift_monitor,
                              drift_beacon=drift_beacon)
-        _export_track(positions, args.export_json, args.export_csv)
+        _export_track(positions, args.export_json, args.export_csv,
+                      args.export_smoothed_json, args.export_smoothed_csv)
         return 0
 
     tracker = LiveTracker(PositioningEngine(default_beacons()),
@@ -1285,19 +1301,24 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                                        tracker.drift_alarms,
                                        tracker.drift_alerts)),
               file=sink)
-    _export_track(positions, args.export_json, args.export_csv)
+    _export_track(positions, args.export_json, args.export_csv,
+                  args.export_smoothed_json, args.export_smoothed_csv)
     return 0
 
 
 def _export_track(positions: list[LivePosition | None],
-                  json_path: str | None, csv_path: str | None) -> None:
+                  json_path: str | None, csv_path: str | None,
+                  smoothed_json_path: str | None = None,
+                  smoothed_csv_path: str | None = None) -> None:
     """Save a recorded track to the requested export files, if
     any. A track with no steps (an empty stream) has nothing to
     export, so the flags are quietly skipped rather than
     failing a run that streamed nothing. The import is local:
     ``beacon.export`` imports this module for ``LivePosition``,
     so a top-level import here would be circular."""
-    from .export import export_track_csv, export_track_json
+    from .export import (export_smoothed_track_csv,
+                         export_smoothed_track_json, export_track_csv,
+                         export_track_json)
 
     if not positions:
         return
@@ -1305,6 +1326,10 @@ def _export_track(positions: list[LivePosition | None],
         export_track_json(positions, json_path)
     if csv_path is not None:
         export_track_csv(positions, csv_path)
+    if smoothed_json_path is not None:
+        export_smoothed_track_json(positions, smoothed_json_path)
+    if smoothed_csv_path is not None:
+        export_smoothed_track_csv(positions, smoothed_csv_path)
 
 
 if __name__ == "__main__":

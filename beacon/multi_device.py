@@ -60,7 +60,9 @@ from .beacon import Beacon
 from .deployment import DeploymentPlan
 from .drift import DriftAlarm, DriftClassification, DriftMonitor
 from .engine import PositioningEngine
-from .export import export_multi_track_csv, export_multi_track_json
+from .export import (export_multi_track_csv, export_multi_track_json,
+                     export_smoothed_multi_track_csv,
+                     export_smoothed_multi_track_json)
 from .simulate import rectangular_walk, simulate_walk
 from .tracking import (DEFAULT_DARK_AFTER_S, DEFAULT_FORECAST_WINDOW_HOURS,
                        DEFAULT_READMIT_AFTER, DEFAULT_SIGMA_RSSI_DB,
@@ -255,6 +257,32 @@ class MultiDeviceTracker:
         whole shift from it. Raises ValueError when no device
         has a track yet."""
         export_multi_track_csv(self._tracks, path)
+
+    def export_smoothed_track_json(self, path: str,
+                                   method: str = "rts",
+                                   window: int = 5) -> None:
+        """Write every device's recorded track to ``path`` as one
+        combined JSON file, with every device's positions
+        smoothed — the smoothed export alongside the raw one, so
+        a dashboard can replay the whole shift's steadier paths
+        from one file. Each device's rows are smoothed
+        separately, so one tag's walk never pulls another tag's
+        positions. Raises ValueError when no device has a track
+        yet."""
+        export_smoothed_multi_track_json(self._tracks, path,
+                                         method=method, window=window)
+
+    def export_smoothed_track_csv(self, path: str,
+                                  method: str = "rts",
+                                  window: int = 5) -> None:
+        """Write every device's recorded track to ``path`` as one
+        combined CSV file, with every device's positions smoothed
+        — the same rows as
+        :meth:`export_smoothed_track_json`, in the fixed CSV
+        column order, so a dashboard can take either format.
+        Raises ValueError when no device has a track yet."""
+        export_smoothed_multi_track_csv(self._tracks, path,
+                                        method=method, window=window)
 
     def drift_alarms(self, device_id: str) -> tuple[DriftAlarm, ...]:
         """The beacons currently alarming on one device's drift
@@ -460,6 +488,10 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
     (demo or stream), so a ward dashboard can replay the whole
     shift from it — with no devices tracked the flags are
     quietly skipped, like an empty stream.
+    ``--export-smoothed-json`` / ``--export-smoothed-csv`` save
+    the same combined file with every device's positions
+    smoothed (Rauch-Tung-Striebel, per device), alongside the
+    raw export, so a dashboard can replay the steadier paths.
     ``--evaluate`` (demo only) scores the two demo walks
     against their ground truth and prints the multi-device
     track accuracy report — one line per device plus the
@@ -533,6 +565,19 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                         help="save every device's recorded track as one "
                         "combined CSV file to PATH at the end of the "
                         "run (demo or stream)")
+    parser.add_argument("--export-smoothed-json", default=None,
+                        metavar="PATH",
+                        help="save every device's recorded track as one "
+                        "combined JSON file to PATH at the end of the "
+                        "run, with every device's positions smoothed "
+                        "(Rauch-Tung-Striebel, per device) — the "
+                        "smoothed export alongside the raw one")
+    parser.add_argument("--export-smoothed-csv", default=None,
+                        metavar="PATH",
+                        help="save every device's recorded track as one "
+                        "combined CSV file to PATH at the end of the "
+                        "run, with every device's positions smoothed "
+                        "(Rauch-Tung-Striebel, per device)")
     parser.add_argument("--evaluate", action="store_true",
                         help="demo only: score the two demo walks "
                         "against their ground truth and print the "
@@ -646,6 +691,10 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
             tracker.export_track_json(args.export_json)
         if args.export_csv is not None:
             tracker.export_track_csv(args.export_csv)
+        if args.export_smoothed_json is not None:
+            tracker.export_smoothed_track_json(args.export_smoothed_json)
+        if args.export_smoothed_csv is not None:
+            tracker.export_smoothed_track_csv(args.export_smoothed_csv)
     return 0
 
 
