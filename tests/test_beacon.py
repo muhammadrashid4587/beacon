@@ -3953,16 +3953,39 @@ class TestDriftTrackReplay(unittest.TestCase):
         svg = render_track_replay(rows, BEACONS, drift=True)
         frame_drift = [_drift_state_at_row(row) for row in rows]
         expected = _alarm_ranges(frame_drift)
-        self.assertEqual(expected, {"A": [(4, 39)], "C": [(25, 33)]})
-        found: dict[str, list[tuple[int, int]]] = {}
+        # A's verdict changes mid-alarm — moved on frames 4–6,
+        # uncertain from frame 7 — so its run splits where the
+        # verdict changes; C stays moved throughout.
+        self.assertEqual(expected, {
+            "A": [(4, 6, "moved"), (7, 39, "uncertain")],
+            "C": [(25, 33, "moved")]})
+        found: dict[str, list[tuple[int, int, str | None]]] = {}
         for beacon_id, group in re.findall(
                 r'<g data-drift-timeline="([^"]+)">(.*?)</g>',
                 svg, re.DOTALL):
-            found[beacon_id] = [
-                (int(first), int(last))
-                for first, last in re.findall(
-                    r'data-drift-timeline-range="(\d+)-(\d+)"', group)]
+            found[beacon_id] = []
+            for rect in re.findall(r"<rect [^>]*>", group):
+                first, last = re.search(
+                    r'data-drift-timeline-range="(\d+)-(\d+)"',
+                    rect).groups()
+                verdict = re.search(
+                    r'data-drift-verdict="([^"]+)"', rect)
+                found[beacon_id].append(
+                    (int(first), int(last),
+                     verdict.group(1) if verdict else None))
         self.assertEqual(found, expected)
+        # The segments are coloured by their verdict, not all
+        # red: A's early segment is the moved amber, its long
+        # segment the uncertain grey, C's the moved amber.
+        self.assertIn('fill="#e67e22" '
+                      'data-drift-timeline-range="4-6" '
+                      'data-drift-verdict="moved"', svg)
+        self.assertIn('fill="#7f8c8d" '
+                      'data-drift-timeline-range="7-39" '
+                      'data-drift-verdict="uncertain"', svg)
+        self.assertIn('fill="#e67e22" '
+                      'data-drift-timeline-range="25-33" '
+                      'data-drift-verdict="moved"', svg)
         self.assertIn("Drift alarm timeline", svg)
         self.assertIn("A \u00b7 frames 4\u201339", svg)
         self.assertIn("C \u00b7 frames 25\u201333", svg)
@@ -3999,6 +4022,76 @@ class TestDriftTrackReplay(unittest.TestCase):
         self.assertEqual(svg.count("data-drift-timeline-range="), 3)
         self.assertIn("A \u00b7 frames 0, 2", svg)
         self.assertIn("B \u00b7 frame 1", svg)
+
+    def test_timeline_strip_segments_coloured_by_verdict(self):
+        # Every verdict gets its own colour, a verdict change
+        # mid-alarm splits the segment, and an alarm with no
+        # classification recorded falls back to the alarm red —
+        # with the strip's colours read off the same per-frame
+        # verdicts the badges carry, so the two cannot disagree.
+        rows = [
+            self._row(2.0, 2.0, 1.0, t=0.0,
+                      alarms=[{"id": "A", "mean_residual_db": 8.5,
+                               "samples": 20},
+                              {"id": "D", "mean_residual_db": -7.0,
+                               "samples": 20}],
+                      classifications=[
+                          self._classification("A", "uncertain", 8.5)]),
+            self._row(5.0, 5.0, 1.0, t=1.0,
+                      alarms=[{"id": "A", "mean_residual_db": 8.6,
+                               "samples": 20},
+                              {"id": "B", "mean_residual_db": -6.9,
+                               "samples": 20}],
+                      classifications=[
+                          self._classification("A", "uncertain", 8.6),
+                          self._classification("B", "battery-sag",
+                                               -6.9)]),
+            self._row(8.0, 8.0, 1.0, t=2.0,
+                      alarms=[{"id": "A", "mean_residual_db": 9.0,
+                               "samples": 20},
+                              {"id": "C", "mean_residual_db": 7.0,
+                               "samples": 20}],
+                      classifications=[
+                          self._classification("A", "moved", 9.0),
+                          self._classification("C", "noisy", 7.0)]),
+        ]
+        svg = render_track_replay(rows, BEACONS, drift=True)
+        self.assertEqual(svg.count("data-drift-timeline-range="), 5)
+        # A splits where its verdict changes: uncertain grey on
+        # frames 0–1, moved amber on frame 2.
+        self.assertIn('fill="#7f8c8d" '
+                      'data-drift-timeline-range="0-1" '
+                      'data-drift-verdict="uncertain"', svg)
+        self.assertIn('fill="#e67e22" '
+                      'data-drift-timeline-range="2-2" '
+                      'data-drift-verdict="moved"', svg)
+        self.assertIn('fill="#2980b9" '
+                      'data-drift-timeline-range="1-1" '
+                      'data-drift-verdict="battery-sag"', svg)
+        self.assertIn('fill="#8e44ad" '
+                      'data-drift-timeline-range="2-2" '
+                      'data-drift-verdict="noisy"', svg)
+        # D has no classification: alarm red, no verdict
+        # attribute on its segment — the badges carry verdict
+        # attributes too, so check D's strip group itself.
+        self.assertIn('fill="#c0392b" '
+                      'data-drift-timeline-range="0-0"', svg)
+        import re
+
+        d_group = re.search(
+            r'<g data-drift-timeline="D">(.*?)</g>', svg, re.DOTALL)
+        self.assertIsNotNone(d_group)
+        self.assertNotIn("data-drift-verdict=", d_group.group(1))
+        # The row labels still give the full frame ranges.
+        self.assertIn("A \u00b7 frames 0\u20132", svg)
+        self.assertIn("B \u00b7 frame 1", svg)
+        self.assertIn("C \u00b7 frame 2", svg)
+        self.assertIn("D \u00b7 frame 0", svg)
+        # The legend keys the colours actually shown.
+        for key in ("timeline: moved", "timeline: battery-sag",
+                    "timeline: noisy", "timeline: uncertain",
+                    "timeline: alarm, no verdict"):
+            self.assertIn(key, svg)
 
     def test_timeline_strip_empty_when_no_beacon_alarms(self):
         rows = [self._row(2.0, 2.0, 1.0, t=0.0),

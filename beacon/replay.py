@@ -14,7 +14,9 @@ alarming and clears when it recovers — including a beacon that
 alarmed mid-track and cleared before the walk ended, which the
 end-of-track marking never showed — and a timeline strip under
 the replay shows, per beacon, when each alarm started and
-ended, so the history reads at a glance without stepping
+ended, each segment coloured by the drift classification
+verdict on those frames, so the history — and what the monitor
+thought was wrong — reads at a glance without stepping
 through the frames.
 
 The animation is SMIL, not JavaScript: the dot's ``cx`` / ``cy``
@@ -60,6 +62,32 @@ from .map_overlay import (
 )
 
 DOT_COLOUR = "#d81b60"
+
+# One colour per drift classification verdict, for the timeline
+# strip's segments: a segment's colour is the verdict the monitor
+# gave on those frames, so the strip reads as a diagnosis at a
+# glance, not just a red alarm. An alarm with no classification
+# recorded falls back to the alarm red, the same colour the
+# badges use, so an unclassified segment still reads as an alarm.
+DRIFT_VERDICT_COLOURS = {
+    "moved": "#e67e22",
+    "battery-sag": "#2980b9",
+    "noisy": "#8e44ad",
+    "uncertain": "#7f8c8d",
+}
+
+
+def drift_verdict_colour(verdict: str | None) -> str:
+    """The timeline-strip colour for one drift verdict.
+
+    ``None`` (no classification recorded for the alarm), a
+    ``healthy`` verdict on an alarming beacon, or an unknown
+    verdict falls back to the alarm red — an alarm is an alarm
+    even when the monitor gave no diagnosis for it.
+    """
+    if verdict is None:
+        return DRIFT_ALARM_COLOUR
+    return DRIFT_VERDICT_COLOURS.get(verdict, DRIFT_ALARM_COLOUR)
 
 
 def _frame_timing(rows: list[dict], seconds_per_step: float
@@ -160,25 +188,49 @@ def _alarm_history(frame_drift: list[dict[str, tuple[float, str | None]]]
 
 
 def _alarm_ranges(frame_drift: list[dict[str, tuple[float, str | None]]]
-                    ) -> dict[str, list[tuple[int, int]]]:
+                    ) -> dict[str, list[tuple[int, int, str | None]]]:
     """Each beacon's alarming frames as contiguous runs.
 
-    Returns beacon id -> [(first frame, last frame), ...] in frame
-    order, so a beacon that alarmed, cleared and alarmed again
-    gets one run per alarm, and a beacon that never alarms is
-    absent. Built from the same per-frame alarm data the replay's
-    badges use, so the timeline strip can never disagree with
-    them.
+    Returns beacon id -> [(first frame, last frame, verdict),
+    ...] in frame order, so a beacon that alarmed, cleared and
+    alarmed again gets one run per alarm, and a beacon that never
+    alarms is absent. A run also splits when the verdict changes
+    mid-alarm, so every run carries a single verdict — the same
+    per-frame verdict the replay's badges carry on those frames,
+    so the timeline strip can never disagree with them. Built
+    from the same per-frame alarm data the badges use; the
+    verdict is ``None`` when no classification was recorded for
+    the alarm.
     """
-    runs: dict[str, list[tuple[int, int]]] = {}
+    runs: dict[str, list[tuple[int, int, str | None]]] = {}
     for i, state in enumerate(frame_drift):
-        for beacon_id in state:
+        for beacon_id, (_mean_db, verdict) in state.items():
             beacon_runs = runs.setdefault(beacon_id, [])
-            if beacon_runs and beacon_runs[-1][1] == i - 1:
-                beacon_runs[-1] = (beacon_runs[-1][0], i)
+            if (beacon_runs and beacon_runs[-1][1] == i - 1
+                    and beacon_runs[-1][2] == verdict):
+                beacon_runs[-1] = (beacon_runs[-1][0], i, verdict)
             else:
-                beacon_runs.append((i, i))
+                beacon_runs.append((i, i, verdict))
     return runs
+
+
+def _merge_frame_ranges(
+        runs: list[tuple[int, int, str | None]]) -> list[tuple[int, int]]:
+    """Verdict-split runs back into the alarm's frame spans.
+
+    A run splits when the verdict changes, but the alarm itself
+    never stopped — so the row label merges adjacent runs back
+    into one span ("frames 4–39"), while the segments stay split
+    by verdict. A real gap (the beacon cleared and alarmed
+    again) stays two spans.
+    """
+    merged: list[tuple[int, int]] = []
+    for first, last, _verdict in runs:
+        if merged and merged[-1][1] == first - 1:
+            merged[-1] = (merged[-1][0], last)
+        else:
+            merged.append((first, last))
+    return merged
 
 
 def _format_frame_ranges(ranges: list[tuple[int, int]]) -> str:
@@ -232,11 +284,14 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
     its end. Under the replay a timeline strip shows the same
     history as coloured segments — one row per beacon that
     alarmed, one segment per contiguous run of alarming frames,
-    labelled with the beacon and its frame ranges — so a viewer
-    can see at a glance when each alarm started and ended
-    without stepping through the frames; with no alarms the
-    strip is an empty labelled track. A track recorded without a
-    monitor marks nothing.
+    coloured by the drift classification verdict on those frames
+    (moved, battery-sag, noisy, uncertain — red when no
+    classification was recorded), labelled with the beacon and
+    its frame ranges — so a viewer can see at a glance when each
+    alarm started and ended, and what the monitor thought was
+    wrong, without stepping through the frames; with no alarms
+    the strip is an empty labelled track. A track recorded
+    without a monitor marks nothing.
 
     Raises ValueError on an empty track, with no beacons, a
     non-positive ``seconds_per_step``, or when the chosen floor
@@ -497,9 +552,13 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
         # viewer can see at a glance when each alarm started and
         # ended without stepping through the frames. The strip
         # reuses the same per-frame alarm data the badges use, so
-        # it can never disagree with them; with no alarms it is
-        # an empty labelled track, so the absence of segments
-        # reads as no alarm recorded rather than a missing strip.
+        # it can never disagree with them; a run splits when the
+        # verdict changes mid-alarm, and each segment is coloured
+        # by the verdict on its frames, so the strip's colours
+        # are the badges' verdicts, not a second opinion; with
+        # no alarms it is an empty labelled track, so the absence
+        # of segments reads as no alarm recorded rather than a
+        # missing strip.
         ranges = _alarm_ranges(frame_drift)
         strip_y = legend_y
         parts.append(
@@ -515,8 +574,13 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
             if beacon_id is None:
                 label = "none"
             else:
+                # The label is the alarm's span, merged across
+                # verdict changes — the segments below stay split
+                # by verdict, so the label says when it alarmed
+                # and the colours say what the monitor thought.
                 label = (f"{beacon_id} \u00b7 "
-                         f"{_format_frame_ranges(beacon_ranges)}")
+                         f"{_format_frame_ranges(
+                             _merge_frame_ranges(beacon_ranges))}")
             parts.append(
                 f'<line x1="{track_x0:.1f}" y1="{row_y:.1f}" '
                 f'x2="{track_x1:.1f}" y2="{row_y:.1f}" '
@@ -529,14 +593,18 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
                 continue
             row_parts = [
                 f'<g data-drift-timeline="{escape(str(beacon_id))}">']
-            for first, last in beacon_ranges:
+            for first, last, verdict in beacon_ranges:
                 seg_x0 = track_x0 + (first / max(n - 1, 1)) * span_px
                 seg_x1 = track_x0 + (last / max(n - 1, 1)) * span_px
+                verdict_attr = (
+                    f' data-drift-verdict="{escape(verdict)}"'
+                    if verdict is not None else "")
                 row_parts.append(
                     f'<rect x="{seg_x0:.1f}" y="{row_y - 4:.1f}" '
                     f'width="{max(seg_x1 - seg_x0, 3.0):.1f}" '
-                    f'height="8" fill="{DRIFT_ALARM_COLOUR}" '
-                    f'data-drift-timeline-range="{first}-{last}"/>')
+                    f'height="8" fill="{drift_verdict_colour(verdict)}" '
+                    f'data-drift-timeline-range="{first}-{last}"'
+                    f"{verdict_attr}/>")
             row_parts.append("</g>")
             parts.append("".join(row_parts))
         # The legend sits below the strip, so the canvas grows
@@ -554,6 +622,20 @@ def render_track_replay(rows: list[dict], beacons: list[Beacon],
         legend_items.append(
             (DRIFT_ALARM_COLOUR,
              "drift alarm (red ! badge, per frame)"))
+        # The strip's verdict colours, for the verdicts this
+        # replay actually shows, so a viewer can read the
+        # segments — one key per verdict present, plus the alarm
+        # red for a segment with no classification recorded.
+        for verdict in ("moved", "battery-sag", "noisy", "uncertain"):
+            if any(verdict in [v for _first, _last, v in runs]
+                   for runs in ranges.values()):
+                legend_items.append(
+                    (DRIFT_VERDICT_COLOURS[verdict],
+                     f"timeline: {verdict}"))
+        if any(v is None for runs in ranges.values()
+               for _first, _last, v in runs):
+            legend_items.append(
+                (DRIFT_ALARM_COLOUR, "timeline: alarm, no verdict"))
     for _limit, colour, label in CONFIDENCE_BANDS:
         legend_items.append((colour, f"95% ellipse \u2014 {label}"))
     legend_items.append((NO_ELLIPSE_COLOUR, NO_ELLIPSE_LABEL))
