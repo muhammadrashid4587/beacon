@@ -17,6 +17,18 @@ even when the device is standing still. Two filters are provided:
 
 from collections import deque
 
+# Measured measurement noise for the smoother, in metres (standard
+# deviation): on the default demo walk at 2 dB RSSI noise the live
+# estimates err by about 2 m, so a filter that assumes the 1 m
+# default understates the noise and its 95% ellipse is overconfident
+# — only 20 of 40 true positions fell inside the smoothed ellipse
+# on seed 7, against 33 of 40 inside the raw geometry ellipse.
+# The smoothing path (see ``beacon.export.smooth_track_rows``)
+# defaults to this measured value instead of the filter's 1 m
+# default; the live filter keeps the 1 m default, since its
+# positions carry no covariance-based ellipse of their own.
+MEASURED_MEASUREMENT_NOISE_M = 2.0
+
 
 def _matmul(a: list[list[float]], b: list[list[float]]) -> list[list[float]]:
     """Matrix product of two small dense matrices."""
@@ -100,8 +112,14 @@ class KalmanFilter:
 
     ``process_noise`` is the variance of the (unknown) acceleration
     between steps: larger values trust the measurements more and
-    follow turns faster, smaller values smooth more. Defaults are
-    tuned for a walking device with ~1 m measurement noise.
+    follow turns faster, smaller values smooth more. ``measurement_noise``
+    is the variance of the position estimates the filter is fed:
+    the default 1.0 (a 1 m standard deviation) is tuned for a walking
+    device with ~1 m measurement noise, but the live estimates on
+    the demo walk err by about 2 m, so the smoothing path uses
+    ``MEASURED_MEASUREMENT_NOISE_M`` (2 m, variance 4.0) instead —
+    a filter that assumes less noise than the estimates really
+    carry reports a tighter posterior than it has earned.
     """
 
     # State-transition (constant velocity, dt = 1) and observation

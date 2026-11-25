@@ -2880,6 +2880,12 @@ moving-average filter over the series instead, the same
 opt-out the engine offers; on a track that is already
 live-filtered it adds lag and measures worse than the raw
 track, so the Rauch-Tung-Striebel method is the default. The
+smoother's measurement noise is a parameter too —
+`measurement_noise_m`, the standard deviation in metres of
+the estimates being smoothed, defaulting to the measured
+2 m (see the calibrated noise model below) — and it is
+ignored by the moving-average method, which has no noise
+model. The
 CLIs export the smoothed file alongside the raw one:
 
 ```sh
@@ -2887,16 +2893,17 @@ python3 -m beacon.multi_device --demo --export-json ward-a-and-b.json --export-s
 python3 -m beacon.tracking --demo --export-smoothed-json ward-a-track-smoothed.json
 ```
 
-Measured behaviour (v0.48.0): on the two-device demo walk
-the smoothed export cuts tag-1's mean error from 2.16 m to
-1.45 m and tag-2's from 1.72 m to 1.04 m — overall 1.94 m to
-1.25 m over the 80 located steps — and on the single-device
-demo walk it cuts the mean on every seed 1, 2, 3, 7, 11 (seed
-1: 1.97 m to 1.47 m; seed 2: 2.57 m to 1.90 m; seed 3: 2.63 m
-to 2.15 m; seed 7: 2.16 m to 1.45 m; seed 11: 1.83 m to
-1.19 m). The moving-average opt-out on the same single-device
-walk measures 2.93 m against the raw 2.16 m — worse than doing
-nothing, which is why it stays the opt-out.
+Measured behaviour (v0.48.0, re-measured in v0.54.0): on the
+two-device demo walk the smoothed export cuts tag-1's mean
+error from 2.16 m to 1.34 m and tag-2's from 1.72 m to 0.92 m
+— overall 1.94 m to 1.13 m over the 80 located steps — and on
+the single-device demo walk it cuts the mean on every seed 1,
+2, 3, 7, 11 (seed 1: 1.97 m to 1.26 m; seed 2: 2.57 m to
+1.64 m; seed 3: 2.63 m to 1.92 m; seed 7: 2.16 m to 1.34 m;
+seed 11: 1.83 m to 1.11 m). The moving-average opt-out on the
+same single-device walk measures 2.93 m against the raw
+2.16 m — worse than doing nothing, which is why it stays the
+opt-out.
 
 ## Smoothed track on the ward-map overlay and replay
 
@@ -2930,15 +2937,15 @@ python3 -m beacon.cli --map-overlay ward-a-and-b.json --map-smoothed ward-a-and-
 python3 -m beacon.cli --map-overlay ward-a-and-b.json --map-smoothed ward-a-and-b-smoothed.json --map-replay --map-output ward-a-and-b-replay.svg
 ```
 
-Measured behaviour (v0.49.0): on the two-device demo walk
-the dashed trails on the overlay, unprojected back to metres,
-score exactly the smoothed export's numbers — tag-1 1.45 m
-against the raw 2.16 m, tag-2 1.04 m against 1.72 m, overall
-1.25 m against 1.94 m over the 80 located steps — and on the
-single-device demo walk the rendered smoothed trail scores
-1.45 m against the raw 2.16 m on seed 7. The improvement the
-map shows is the improvement the export measured, not a
-second opinion.
+Measured behaviour (v0.49.0, re-measured in v0.54.0): on the
+two-device demo walk the dashed trails on the overlay,
+unprojected back to metres, score exactly the smoothed
+export's numbers — tag-1 1.34 m against the raw 2.16 m, tag-2
+0.92 m against 1.72 m, overall 1.13 m against 1.94 m over the
+80 located steps — and on the single-device demo walk the
+rendered smoothed trail scores 1.34 m against the raw 2.16 m
+on seed 7. The improvement the map shows is the improvement
+the export measured, not a second opinion.
 The roadmap grows as new needs surface — the smoothed-track
 rendering on the overlay and the replay is the latest addition.
 
@@ -2983,17 +2990,17 @@ verdict is available from the command line instead of only in
 code. Both need `--demo`, like `--evaluate`: a stream has no
 ground truth to score against.
 
-Measured behaviour (v0.50.0): on the two-device demo walk
-the smoothed report cuts tag-1's mean error from 2.16 m to
-1.45 m (median 1.20 m, p90 3.10 m, worst 3.90 m) and tag-2's
-from 1.72 m to 1.04 m (median 0.91 m, p90 1.84 m, worst
-2.56 m) — overall 1.94 m to 1.25 m (median 1.05 m, p90
-2.53 m, worst 3.90 m) over the 80 located steps — the same
-numbers the smoothed export and the rendered trails measured,
-so the report, the export and the map now all agree. The
-moving-average opt-out on the same walk measures 2.74 m
-against the raw 1.94 m — worse than doing nothing, which is
-why it stays the opt-out.
+Measured behaviour (v0.50.0, re-measured in v0.54.0): on the
+two-device demo walk the smoothed report cuts tag-1's mean
+error from 2.16 m to 1.34 m (median 1.01 m, p90 2.67 m, worst
+3.40 m) and tag-2's from 1.72 m to 0.92 m (median 0.77 m, p90
+1.87 m, worst 2.83 m) — overall 1.94 m to 1.13 m (median
+0.85 m, p90 2.31 m, worst 3.40 m) over the 80 located steps —
+the same numbers the smoothed export and the rendered trails
+measured, so the report, the export and the map now all
+agree. The moving-average opt-out on the same walk measures
+2.74 m against the raw 1.94 m — worse than doing nothing,
+which is why it stays the opt-out.
 The roadmap grows as new needs surface — the smoothed-track
 accuracy report is the latest addition.
 
@@ -3064,13 +3071,13 @@ used and excluded, and battery; the forecast flags and drift
 state are not rebuilt, since the report scores positions,
 not the monitor.
 
-Measured behaviour (v0.51.0): scoring the demo's own
-smoothed export file reproduces the demo's smoothed report
-exactly — tag-1 1.45 m, tag-2 1.04 m, overall 1.25 m over the
-80 located steps, in JSON and in CSV — and a track starved
-of one step scores 39 of 40 located on that device, coverage
-0.98, instead of silently dropping the step from the
-denominator.
+Measured behaviour (v0.51.0, re-measured in v0.54.0): scoring
+the demo's own smoothed export file reproduces the demo's
+smoothed report exactly — tag-1 1.34 m, tag-2 0.92 m, overall
+1.13 m over the 80 located steps, in JSON and in CSV — and a
+track starved of one step scores 39 of 40 located on that
+device, coverage 0.98, instead of silently dropping the step
+from the denominator.
 The roadmap grows as new needs surface — scoring a smoothed
 track file is the latest addition.
 
@@ -3100,17 +3107,18 @@ the coverage is the raw walk's.
 python3 -m beacon.cli --steps 10 --noise 2.0 --seed 7
 ```
 
-Measured behaviour (v0.52.0): on the default demo walk the
-smoothed summary cuts the mean error from 2.16 m to 1.45 m
-(median 1.20 m, p90 3.10 m, worst 3.90 m) over the 40 located
-steps — the same numbers tag-1 scores in the multi-device
-smoothed report, since it is the same forward walk, seed 7 —
-and smoothing helps on every seed (1, 2, 3, 7, 11: raw 1.83–
-2.63 m, smoothed 1.19–2.15 m). The moving-average opt-out
-smoothed over a Kalman track measures 2.93 m against the raw
-2.16 m — worse than doing nothing, which is why it stays the
-opt-out — and smoothing a moving-average walk helps a little
-(2.73 m to 2.60 m) but stays worse than the Kalman default.
+Measured behaviour (v0.52.0, re-measured in v0.54.0): on the
+default demo walk the smoothed summary cuts the mean error
+from 2.16 m to 1.34 m (median 1.01 m, p90 2.67 m, worst
+3.40 m) over the 40 located steps — the same numbers tag-1
+scores in the multi-device smoothed report, since it is the
+same forward walk, seed 7 — and smoothing helps on every
+seed (1, 2, 3, 7, 11: raw 1.83–2.63 m, smoothed 1.11–1.92 m).
+The moving-average opt-out smoothed over a Kalman track
+measures 2.93 m against the raw 2.16 m — worse than doing
+nothing, which is why it stays the opt-out — and smoothing a
+moving-average walk helps a little (2.73 m to 2.55 m) but
+stays worse than the Kalman default.
 The roadmap grows as new needs surface — the smoothed-track
 accuracy in the demo summary is the latest addition.
 
@@ -3143,24 +3151,87 @@ python3 -m beacon.cli --map-overlay ward-a-track.json --map-smoothed ward-a-trac
 python3 -m beacon.cli --map-overlay ward-a-track.json --map-smoothed ward-a-track-smoothed.json --map-replay --map-output ward-a-track-replay.svg
 ```
 
-Measured behaviour (v0.53.0): on the default demo walk the
-smoothed ellipse averages 1.14 m semi-major against the raw
-ellipse's 6.32 m — the smoother has seen the observations
-that came after, so it trusts each revised position far more
-than the live geometry did — and the overlay draws all 40 and
-the replay animates all 40, from the JSON export and from the
-CSV export alike. But the 95% claim is only as good as the
-filter's noise model, and the filter assumes 1 m measurement
-noise while the live estimates err by about 2 m: only 20 of
-the 40 true positions fall inside the smoothed ellipse on the
-demo walk (6–20 across seeds 1, 2, 3, 7, 11), against 33 of
-40 inside the raw ellipse — so the smoothed ellipse reads
-tighter than the track's actual accuracy, and it shows the
-smoother's confidence under its own model, not a calibrated
-interval. The filter's noise model is isotropic, so the
-smoothed ellipse is near-circular on every seed (semi-minor
-1.14 m too) — it carries almost no orientation, unlike the raw
-geometry ellipse, which stretches along the weak axis.
+Measured behaviour (v0.53.0, re-measured in v0.54.0): on the
+default demo walk the smoothed ellipse averages 1.90 m
+semi-major against the raw ellipse's 6.32 m — the smoother
+has seen the observations that came after, so it trusts each
+revised position far more than the live geometry did — and
+the overlay draws all 40 and the replay animates all 40,
+from the JSON export and from the CSV export alike. The
+smoothed ellipse is still near-circular on every seed
+(semi-minor 1.90 m too) — the filter's noise model is
+isotropic, so it carries almost no orientation, unlike the
+raw geometry ellipse, which stretches along the weak axis —
+but its 95% claim is now an honest one: with the noise model
+calibrated to the measured 2 m (v0.54.0) 30 of the 40 true
+positions fall inside the smoothed ellipse on the demo walk
+(21–37 across seeds 1, 2, 3, 7, 11), against 33 of 40 inside
+the raw ellipse. Before the calibration it was 20 of 40 on
+seed 7 (6–20 across seeds) at 1.14 m semi-major: the filter
+assumed 1 m measurement noise while the live estimates err
+by about 2 m, so the ellipse read tighter than the track's
+actual accuracy. It still does not cover a full 95% on seeds
+2 and 3 (26 and 21 of 40) — one isotropic number cannot
+capture geometry-dependent error, so the interval stays an
+approximation, just an honest one now.
 The roadmap grows as new needs surface — the smoothed-track
 uncertainty ellipse on the overlay and replay is the latest
 addition.
+
+## Calibrated smoother noise model
+
+A 95% ellipse is a promise, and the smoother was breaking
+it: its filter assumed 1 m measurement noise while the live
+estimates it smooths err by about 2 m, so the smoothed
+ellipse covered far fewer than 95% of the true positions —
+20 of 40 on the demo walk, 6–20 across seeds. The fix is the
+noise model, not the positions: the smoothing path now takes
+a `measurement_noise_m` parameter — the standard deviation,
+in metres, of the position estimates being smoothed — and
+defaults it to the measured value
+`MEASURED_MEASUREMENT_NOISE_M` (2.0 m, from
+`beacon.filter`), squared into the Kalman filter's
+measurement-noise variance. The parameter is plumbed through
+the whole smoothing path — `smooth_track_rows`,
+`smoothed_track_to_dict` / `smoothed_multi_track_to_dict`,
+the four `export_smoothed_*` writers,
+`MultiDeviceTracker.export_smoothed_track_json` /
+`export_smoothed_track_csv`, and
+`evaluate_smoothed_live_track` /
+`evaluate_smoothed_multi_device_track` — so the overlay, the
+replay, the export and the reports all draw and score the
+same calibrated track, and passing 1.0 reproduces the old
+numbers exactly. A non-positive value raises instead of
+smoothing on a made-up noise, and the moving-average
+opt-out ignores the parameter, since it has no noise model.
+The live filter keeps its 1 m default: its positions carry no
+covariance-based ellipse of their own, so the overconfidence
+never showed there, and `PositioningEngine.smooth_walk` still
+runs through the live filter and returns positions only.
+
+```python
+from beacon import smooth_track_rows
+from beacon.export import load_track_json
+
+smoothed = smooth_track_rows(load_track_json("ward-a-track.json"))
+# or, on a space whose estimates err differently:
+# smooth_track_rows(rows, measurement_noise_m=1.5)
+```
+
+Measured behaviour (v0.54.0): on the default demo walk the
+smoothed ellipse widens from 1.14 m to 1.90 m mean semi-major
+and now covers 30 of 40 true positions on seed 7 (21–37
+across seeds 1, 2, 3, 7, 11), against 33 of 40 inside the raw
+ellipse. The positions move too — a filter that trusts its
+measurements less leans harder on its velocity model — and
+the move is a small improvement, not a retune: the smoothed
+mean error falls from 1.45 m to 1.34 m on seed 7 (1.26 m,
+1.64 m, 1.92 m, 1.34 m, 1.11 m across seeds 1, 2, 3, 7, 11),
+and the two-device report from 1.25 m to 1.13 m overall. The
+honest limit stays honest: seeds 2 and 3 still cover only 26
+and 21 of 40, because one isotropic number cannot capture
+geometry-dependent error — the ellipse is calibrated to the
+average error, not to each step's — so the interval is an
+honest approximation, not a guarantee.
+The roadmap grows as new needs surface — the calibrated
+smoother noise model is the latest addition.

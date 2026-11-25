@@ -65,6 +65,7 @@ from .export import (export_multi_track_csv, export_multi_track_json,
                      export_smoothed_multi_track_csv,
                      export_smoothed_multi_track_json, load_track_csv,
                      load_track_json, track_from_dict)
+from .filter import MEASURED_MEASUREMENT_NOISE_M
 from .simulate import rectangular_walk, simulate_walk
 from .tracking import (DEFAULT_DARK_AFTER_S, DEFAULT_FORECAST_WINDOW_HOURS,
                        DEFAULT_READMIT_AFTER, DEFAULT_SIGMA_RSSI_DB,
@@ -265,29 +266,44 @@ class MultiDeviceTracker:
 
     def export_smoothed_track_json(self, path: str,
                                    method: str = "rts",
-                                   window: int = 5) -> None:
+                                   window: int = 5,
+                                   measurement_noise_m: float =
+                                   MEASURED_MEASUREMENT_NOISE_M
+                                   ) -> None:
         """Write every device's recorded track to ``path`` as one
         combined JSON file, with every device's positions
         smoothed — the smoothed export alongside the raw one, so
         a dashboard can replay the whole shift's steadier paths
         from one file. Each device's rows are smoothed
         separately, so one tag's walk never pulls another tag's
-        positions. Raises ValueError when no device has a track
-        yet."""
+        positions. ``measurement_noise_m`` is the smoother's
+        measurement-noise standard deviation in metres (see
+        :func:`beacon.export.smooth_track_rows`). Raises
+        ValueError when no device has a track yet."""
         export_smoothed_multi_track_json(self._tracks, path,
-                                         method=method, window=window)
+                                         method=method, window=window,
+                                         measurement_noise_m=
+                                         measurement_noise_m)
 
     def export_smoothed_track_csv(self, path: str,
                                   method: str = "rts",
-                                  window: int = 5) -> None:
+                                  window: int = 5,
+                                  measurement_noise_m: float =
+                                  MEASURED_MEASUREMENT_NOISE_M
+                                  ) -> None:
         """Write every device's recorded track to ``path`` as one
         combined CSV file, with every device's positions smoothed
         — the same rows as
         :meth:`export_smoothed_track_json`, in the fixed CSV
         column order, so a dashboard can take either format.
-        Raises ValueError when no device has a track yet."""
+        ``measurement_noise_m`` is the smoother's
+        measurement-noise standard deviation in metres (see
+        :func:`beacon.export.smooth_track_rows`). Raises
+        ValueError when no device has a track yet."""
         export_smoothed_multi_track_csv(self._tracks, path,
-                                        method=method, window=window)
+                                        method=method, window=window,
+                                        measurement_noise_m=
+                                        measurement_noise_m)
 
     def drift_alarms(self, device_id: str) -> tuple[DriftAlarm, ...]:
         """The beacons currently alarming on one device's drift

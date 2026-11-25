@@ -103,7 +103,8 @@ import csv
 import json
 import math
 
-from .filter import KalmanFilter, MovingAverageFilter
+from .filter import (MEASURED_MEASUREMENT_NOISE_M, KalmanFilter,
+                     MovingAverageFilter)
 from .tracking import LivePosition
 from .uncertainty import PositionUncertainty, ellipse_from_covariance
 
@@ -293,7 +294,8 @@ def multi_track_to_dict(
 
 def _smooth_series(
         positions: list[tuple[float, float]], method: str,
-        window: int
+        window: int,
+        measurement_noise_m: float = MEASURED_MEASUREMENT_NOISE_M
         ) -> list[tuple[float, float, PositionUncertainty | None]]:
     """One device's (x, y) series, smoothed in order, with the
     smoothed ellipse per step.
@@ -309,9 +311,24 @@ def _smooth_series(
     series instead and carries no ellipse at any step, since a
     moving average has no covariance. The caller splits the
     series at floor changes, so a run never spans two planes.
+
+    ``measurement_noise_m`` is the standard deviation, in
+    metres, of the position estimates the smoother is fed — the
+    filter's measurement-noise variance is its square. It
+    defaults to the measured value
+    (``MEASURED_MEASUREMENT_NOISE_M``, 2 m on the demo walk):
+    a filter that assumes less noise than the estimates really
+    carry reports a tighter posterior than it has earned, so
+    its 95% ellipse covers far fewer than 95% of the true
+    positions. The parameter is ignored by the moving-average
+    method, which has no noise model. Raises ValueError on a
+    non-positive noise for the ``"rts"`` method.
     """
     if method == "rts":
-        kalman = KalmanFilter()
+        if measurement_noise_m <= 0.0:
+            raise ValueError("measurement_noise_m must be positive")
+        kalman = KalmanFilter(
+            measurement_noise=measurement_noise_m ** 2)
         for position in positions:
             kalman.update(position)
         smoothed = []
@@ -330,7 +347,9 @@ def _smooth_series(
 
 
 def smooth_track_rows(rows: list[dict], method: str = "rts",
-                      window: int = 5) -> list[dict]:
+                      window: int = 5,
+                      measurement_noise_m: float =
+                      MEASURED_MEASUREMENT_NOISE_M) -> list[dict]:
     """The rows of a recorded track with their positions smoothed.
 
     ``rows`` is a row list as :func:`track_rows` produces — or as
@@ -356,8 +375,16 @@ def smooth_track_rows(rows: list[dict], method: str = "rts",
     or the moving average over the last ``window`` positions (the
     same opt-out the engine offers). On a track that is already
     live-filtered the moving average adds lag and measures worse,
-    so it is the opt-out, not the default. Rows from several
-    devices are smoothed per device — each device's series
+    so it is the opt-out, not the default. ``measurement_noise_m``
+    is the standard deviation, in metres, of the position
+    estimates the smoother is fed — the filter's measurement-noise
+    variance is its square — defaulting to the measured
+    ``MEASURED_MEASUREMENT_NOISE_M`` (2 m on the demo walk), so
+    the smoothed 95% ellipse is an honest interval instead of the
+    overconfident one the filter's 1 m default produced; pass 1.0
+    to reproduce the old behaviour. It is ignored by the
+    moving-average method, which has no noise model. Rows from
+    several devices are smoothed per device — each device's series
     separately, in that device's own order — so one tag's walk
     never pulls another tag's positions, and the rows come back
     in their original order. A device's series that changes floor
@@ -365,8 +392,9 @@ def smooth_track_rows(rows: list[dict], method: str = "rts",
     way the live filter resets on a floor change.
 
     Raises ValueError on an empty row list — with no located
-    steps there is nothing to smooth — on an unknown method, or
-    on a moving-average window below 1.
+    steps there is nothing to smooth — on an unknown method, on
+    a moving-average window below 1, or on a non-positive
+    ``measurement_noise_m`` for the ``"rts"`` method.
     """
     if not rows:
         raise ValueError("cannot smooth an empty track")
@@ -394,7 +422,8 @@ def smooth_track_rows(rows: list[dict], method: str = "rts",
             run = indices[start:end]
             positions = [(rows[i]["x"], rows[i]["y"]) for i in run]
             for i, (x, y, ellipse) in zip(
-                    run, _smooth_series(positions, method, window)):
+                    run, _smooth_series(positions, method, window,
+                                        measurement_noise_m)):
                 smoothed[i]["x"] = x
                 smoothed[i]["y"] = y
                 smoothed[i]["smoothed_ellipse_semi_major_m"] = (
@@ -410,7 +439,9 @@ def smooth_track_rows(rows: list[dict], method: str = "rts",
 def smoothed_track_to_dict(
         positions: list[LivePosition | None],
         device: str | None = None,
-        method: str = "rts", window: int = 5) -> dict:
+        method: str = "rts", window: int = 5,
+        measurement_noise_m: float = MEASURED_MEASUREMENT_NOISE_M
+        ) -> dict:
     """Serialise a recorded track to plain JSON-ready data, with
     the positions smoothed (see :func:`smooth_track_rows`).
 
@@ -422,12 +453,16 @@ def smoothed_track_to_dict(
     raw export, and with the smoothed ellipse on each row (see
     :func:`smooth_track_rows`). A track with steps but nothing
     located has no rows to smooth, so it exports empty, like the
-    raw export.
+    raw export. ``measurement_noise_m`` is the smoother's
+    measurement-noise standard deviation in metres (see
+    :func:`smooth_track_rows`).
     """
     data = track_to_dict(positions, device=device)
     if data["rows"]:
         data["rows"] = smooth_track_rows(data["rows"], method=method,
-                                         window=window)
+                                         window=window,
+                                         measurement_noise_m=
+                                         measurement_noise_m)
     data["smoothed"] = True
     data["smoothing_method"] = method
     return data
@@ -435,7 +470,9 @@ def smoothed_track_to_dict(
 
 def smoothed_multi_track_to_dict(
         tracks: dict[str, list[LivePosition | None]],
-        method: str = "rts", window: int = 5) -> dict:
+        method: str = "rts", window: int = 5,
+        measurement_noise_m: float = MEASURED_MEASUREMENT_NOISE_M
+        ) -> dict:
     """Serialise several devices' recorded tracks to one combined
     JSON-ready dict, with every device's positions smoothed.
 
@@ -447,14 +484,18 @@ def smoothed_multi_track_to_dict(
     another tag's positions. The dict loads back with
     :func:`track_from_dict` exactly like a raw combined export,
     since the smoothed rows carry the same fields plus the
-    smoothed ellipse.
+    smoothed ellipse. ``measurement_noise_m`` is the smoother's
+    measurement-noise standard deviation in metres (see
+    :func:`smooth_track_rows`).
     """
     if not tracks:
         raise ValueError("cannot export an empty track")
     data = multi_track_to_dict(tracks)
     if data["rows"]:
         data["rows"] = smooth_track_rows(data["rows"], method=method,
-                                         window=window)
+                                         window=window,
+                                         measurement_noise_m=
+                                         measurement_noise_m)
     data["smoothed"] = True
     data["smoothing_method"] = method
     return data
@@ -678,7 +719,9 @@ def export_multi_track_json(
 def export_smoothed_track_json(
         positions: list[LivePosition | None], path: str,
         device: str | None = None,
-        method: str = "rts", window: int = 5) -> None:
+        method: str = "rts", window: int = 5,
+        measurement_noise_m: float = MEASURED_MEASUREMENT_NOISE_M
+        ) -> None:
     """Write a recorded track to ``path`` as JSON, with the
     positions smoothed (see :func:`smoothed_track_to_dict`) —
     the smoothed export alongside the raw one, so a dashboard
@@ -686,17 +729,23 @@ def export_smoothed_track_json(
     one. ``device`` names the device the track belongs to, so
     the file's rows carry it. The file loads back with
     :func:`load_track_json`, since the smoothed rows carry the
-    raw fields plus the smoothed ellipse."""
+    raw fields plus the smoothed ellipse. ``measurement_noise_m``
+    is the smoother's measurement-noise standard deviation in
+    metres (see :func:`smooth_track_rows`)."""
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(smoothed_track_to_dict(positions, device=device,
-                                         method=method, window=window),
+                                         method=method, window=window,
+                                         measurement_noise_m=
+                                         measurement_noise_m),
                   handle, indent=2)
         handle.write("\n")
 
 
 def export_smoothed_multi_track_json(
         tracks: dict[str, list[LivePosition | None]], path: str,
-        method: str = "rts", window: int = 5) -> None:
+        method: str = "rts", window: int = 5,
+        measurement_noise_m: float = MEASURED_MEASUREMENT_NOISE_M
+        ) -> None:
     """Write several devices' recorded tracks to ``path`` as one
     combined JSON file, with every device's positions smoothed
     (see :func:`smoothed_multi_track_to_dict`) — the smoothed
@@ -704,10 +753,14 @@ def export_smoothed_multi_track_json(
     replay the whole shift's steadier paths from one file. The
     file loads back with :func:`load_track_json` to the same
     rows the raw combined export carries, with the (x, y)
-    revised per device and the smoothed ellipse on each row."""
+    revised per device and the smoothed ellipse on each row.
+    ``measurement_noise_m`` is the smoother's measurement-noise
+    standard deviation in metres (see :func:`smooth_track_rows`)."""
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(smoothed_multi_track_to_dict(tracks, method=method,
-                                               window=window),
+                                               window=window,
+                                               measurement_noise_m=
+                                               measurement_noise_m),
                   handle, indent=2)
         handle.write("\n")
 
@@ -715,7 +768,9 @@ def export_smoothed_multi_track_json(
 def export_smoothed_track_csv(
         positions: list[LivePosition | None], path: str,
         device: str | None = None,
-        method: str = "rts", window: int = 5) -> None:
+        method: str = "rts", window: int = 5,
+        measurement_noise_m: float = MEASURED_MEASUREMENT_NOISE_M
+        ) -> None:
     """Write a recorded track to ``path`` as CSV, with the
     positions smoothed — the same rows as
     :func:`export_smoothed_track_json`, in the smoothed CSV
@@ -723,9 +778,12 @@ def export_smoothed_track_csv(
     plus the smoothed ellipse per step), so a dashboard can
     take either format. ``device`` names the device the track
     belongs to. The file loads back with
-    :func:`load_track_csv`."""
+    :func:`load_track_csv`. ``measurement_noise_m`` is the
+    smoother's measurement-noise standard deviation in metres
+    (see :func:`smooth_track_rows`)."""
     data = smoothed_track_to_dict(positions, device=device,
-                                  method=method, window=window)
+                                  method=method, window=window,
+                                  measurement_noise_m=measurement_noise_m)
     with open(path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle,
                                 fieldnames=list(SMOOTHED_CSV_FIELDS))
@@ -736,16 +794,22 @@ def export_smoothed_track_csv(
 
 def export_smoothed_multi_track_csv(
         tracks: dict[str, list[LivePosition | None]], path: str,
-        method: str = "rts", window: int = 5) -> None:
+        method: str = "rts", window: int = 5,
+        measurement_noise_m: float = MEASURED_MEASUREMENT_NOISE_M
+        ) -> None:
     """Write several devices' recorded tracks to ``path`` as one
     combined CSV file, with every device's positions smoothed —
     the same rows as
     :func:`export_smoothed_multi_track_json`, in the smoothed
     CSV column order, so a dashboard can take either format and
     replay the whole shift's steadier paths from it. The file
-    loads back with :func:`load_track_csv`."""
+    loads back with :func:`load_track_csv`.
+    ``measurement_noise_m`` is the smoother's measurement-noise
+    standard deviation in metres (see :func:`smooth_track_rows`)."""
     data = smoothed_multi_track_to_dict(tracks, method=method,
-                                        window=window)
+                                        window=window,
+                                        measurement_noise_m=
+                                        measurement_noise_m)
     with open(path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle,
                                 fieldnames=list(SMOOTHED_CSV_FIELDS))

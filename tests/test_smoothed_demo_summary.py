@@ -46,15 +46,15 @@ def _demo_track_and_truth(seed=7, filter_name="kalman"):
 class EvaluateSmoothedLiveTrackTest(unittest.TestCase):
     def test_demo_smoothed_report_numbers(self):
         # The README's demo numbers: the smoothed track cuts the
-        # mean from 2.16 m to 1.45 m — the same numbers tag-1
+        # mean from 2.16 m to 1.34 m — the same numbers tag-1
         # scores in the multi-device smoothed report, since it is
         # the same forward walk, seed 7.
         positions, truth = _demo_track_and_truth()
         report = evaluate_smoothed_live_track(positions, truth)
-        self.assertAlmostEqual(report.mean_error_m, 1.45, places=2)
-        self.assertAlmostEqual(report.median_error_m, 1.20, places=2)
-        self.assertAlmostEqual(report.p90_error_m, 3.10, places=2)
-        self.assertAlmostEqual(report.max_error_m, 3.90, places=2)
+        self.assertAlmostEqual(report.mean_error_m, 1.34, places=2)
+        self.assertAlmostEqual(report.median_error_m, 1.01, places=2)
+        self.assertAlmostEqual(report.p90_error_m, 2.67, places=2)
+        self.assertAlmostEqual(report.max_error_m, 3.40, places=2)
         self.assertEqual(report.steps, 40)
         self.assertEqual(report.located, 40)
         self.assertEqual(report.coverage, 1.0)
@@ -156,8 +156,8 @@ class SmoothedDemoSummaryCliTest(unittest.TestCase):
         self.assertIn("Smoothed track (Rauch-Tung-Striebel):", output)
         self.assertIn(
             "smoothed: steps: 40  located: 40  coverage: 1.00  "
-            "mean error: 1.45 m  median: 1.20 m  p90: 3.10 m  "
-            "worst: 3.90 m", output)
+            "mean error: 1.34 m  median: 1.01 m  p90: 2.67 m  "
+            "worst: 3.40 m", output)
 
     def test_demo_smoothed_line_uses_the_shared_formatter(self):
         # The CLI line is the shared formatter's output for the
@@ -172,13 +172,13 @@ class SmoothedDemoSummaryCliTest(unittest.TestCase):
     def test_demo_with_moving_average_filter_prints_smoothed(self):
         # The moving-average engine still gets a smoothed summary:
         # smoothing its laggy estimates helps a little (2.73 m to
-        # 2.60 m) but stays worse than the Kalman default.
+        # 2.55 m) but stays worse than the Kalman default.
         output = self._run_demo(["--steps", "10", "--noise", "2.0",
                                  "--seed", "7",
                                  "--filter", "moving_average"])
         self.assertIn("steps: 40  mean error: 2.73 m", output)
         self.assertIn("Smoothed track (Rauch-Tung-Striebel):", output)
-        self.assertIn("mean error: 2.60 m", output)
+        self.assertIn("mean error: 2.55 m", output)
 
     def test_demo_smoothed_beats_raw_on_other_seeds(self):
         for seed in (1, 2, 3, 11):

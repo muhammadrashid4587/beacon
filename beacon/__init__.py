@@ -13,7 +13,8 @@ from .deployment import (DEFAULT_LOSS_THRESHOLD_DB,
                          MIN_BEACONS_TO_TRIANGULATE, BeaconForecast,
                          DeploymentPlan, forecast_beacon, plan_deployment)
 from .engine import PositioningEngine
-from .filter import KalmanFilter, MovingAverageFilter
+from .filter import (MEASURED_MEASUREMENT_NOISE_M, KalmanFilter,
+                     MovingAverageFilter)
 from .drift import DriftAlarm, DriftClassification, DriftMonitor
 from .health import BeaconHealth, assess_beacon_health, healthy_beacons
 from .fingerprint import (FingerprintMap, MultiFloorFingerprintMap,
@@ -63,7 +64,7 @@ from .validation import (DEFAULT_MAX_WORST_SEMI_MAJOR_M,
                          FloorLayoutVerdict, LayoutValidation,
                          validate_floor_layouts)
 
-__version__ = "0.53.0"
+__version__ = "0.54.0"
 
 __all__ = [
     "BatteryModel",
@@ -71,6 +72,7 @@ __all__ = [
     "PositioningEngine",
     "MovingAverageFilter",
     "KalmanFilter",
+    "MEASURED_MEASUREMENT_NOISE_M",
     "BeaconHealth",
     "assess_beacon_health",
     "healthy_beacons",

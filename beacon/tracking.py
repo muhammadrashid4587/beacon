@@ -72,6 +72,7 @@ from .beacon import Beacon
 from .deployment import DeploymentPlan, plan_deployment
 from .drift import DriftAlarm, DriftClassification, DriftMonitor
 from .engine import PositioningEngine
+from .filter import MEASURED_MEASUREMENT_NOISE_M
 from .schedule import (REASON_DARK, REASON_LOSS, REASON_NEVER, REASON_NOISE)
 from .simulate import rectangular_walk, simulate_walk
 from .uncertainty import PositionUncertainty
@@ -896,7 +897,8 @@ def evaluate_smoothed_multi_device_track(
         tracks: dict[str, list[LivePosition | None]],
         truths: dict[str, list[tuple[float, float]
                             | tuple[float, float, int]]],
-        method: str = "rts", window: int = 5
+        method: str = "rts", window: int = 5,
+        measurement_noise_m: float = MEASURED_MEASUREMENT_NOISE_M
         ) -> MultiDeviceTrackReport:
     """Score every device's recorded track against its own truth,
     after smoothing.
@@ -913,6 +915,13 @@ def evaluate_smoothed_multi_device_track(
     a step too thin to locate stays unlocated, so the coverage
     is the raw track's and the smoothed report never claims a
     step the tracker never located.
+
+    ``measurement_noise_m`` is the smoother's measurement-noise
+    standard deviation in metres (see
+    :func:`beacon.export.smooth_track_rows`): it defaults to the
+    measured 2 m, so the smoothed positions the report scores
+    are the ones the overlay and the replay draw from the
+    smoothed export.
 
     The smoothing is the same :func:`beacon.export.smooth_track_rows`
     the smoothed export uses — the track's rows are smoothed and
@@ -941,7 +950,8 @@ def evaluate_smoothed_multi_device_track(
             smoothed_tracks[device_id] = list(positions)
             continue
         smoothed_rows = iter(
-            smooth_track_rows(rows, method=method, window=window))
+            smooth_track_rows(rows, method=method, window=window,
+                              measurement_noise_m=measurement_noise_m))
         smoothed_positions: list[LivePosition | None] = []
         for position in positions:
             if position is None:
@@ -957,7 +967,8 @@ def evaluate_smoothed_multi_device_track(
 def evaluate_smoothed_live_track(
         positions: list[LivePosition | None],
         truth: list[tuple[float, float] | tuple[float, float, int]],
-        method: str = "rts", window: int = 5
+        method: str = "rts", window: int = 5,
+        measurement_noise_m: float = MEASURED_MEASUREMENT_NOISE_M
         ) -> TrackReport:
     """Score one live track against ground truth, after smoothing.
 
@@ -973,6 +984,13 @@ def evaluate_smoothed_live_track(
     to locate stays unlocated, so the coverage is the raw
     track's and the smoothed report never claims a step the
     tracker never located.
+
+    ``measurement_noise_m`` is the smoother's measurement-noise
+    standard deviation in metres (see
+    :func:`beacon.export.smooth_track_rows`): it defaults to the
+    measured 2 m, so the smoothed positions the report scores
+    are the ones the overlay and the replay draw from the
+    smoothed export.
 
     The smoothing is the same :func:`beacon.export.smooth_track_rows`
     the smoothed export uses, and the scoring is the shared
@@ -994,7 +1012,8 @@ def evaluate_smoothed_live_track(
         # track, instead of reporting zeroes.
         return evaluate_live_track(positions, truth)
     smoothed_rows = iter(
-        smooth_track_rows(rows, method=method, window=window))
+        smooth_track_rows(rows, method=method, window=window,
+                          measurement_noise_m=measurement_noise_m))
     smoothed_positions: list[LivePosition | None] = []
     for position in positions:
         if position is None:
