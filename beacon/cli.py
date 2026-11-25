@@ -37,6 +37,7 @@ from .deployment import (DEFAULT_LOSS_THRESHOLD_DB,
                          plan_deployment)
 from .drift import DriftMonitor
 from .engine import PositioningEngine
+from .filter import MEASURED_MEASUREMENT_NOISE_M
 from .map_overlay import load_track_for_overlay, render_map_overlay
 from .replay import render_track_replay
 from .schedule import replacement_schedule
@@ -252,6 +253,14 @@ def main(argv=None) -> int:
                         default="kalman",
                         help="position filter (default: kalman; "
                         "moving_average is the pre-0.5.0 default)")
+    parser.add_argument("--smoothing-noise-m", type=float,
+                        default=MEASURED_MEASUREMENT_NOISE_M,
+                        help="measurement-noise stddev in metres for "
+                        "the smoother behind the smoothed-track "
+                        "summary (default: "
+                        f"{MEASURED_MEASUREMENT_NOISE_M}, the "
+                        "calibrated value); 1.0 reproduces the "
+                        "pre-0.54.0 numbers")
     parser.add_argument("--map-overlay", default=None, metavar="PATH",
                         help="render a ward-map SVG overlay from an "
                         "exported live track (.json or .csv) instead "
@@ -356,6 +365,9 @@ def main(argv=None) -> int:
                         "the fraction of a full charge every beacon "
                         "burns per hour (default: 0.05)")
     args = parser.parse_args(argv)
+
+    if args.smoothing_noise_m <= 0:
+        parser.error("--smoothing-noise-m must be positive")
 
     if args.deployment_plan:
         return run_deployment_plan(args)
@@ -472,7 +484,8 @@ def main(argv=None) -> int:
         for i, (est, step) in enumerate(zip(estimates, steps))
     ]
     smoothed_report = evaluate_smoothed_live_track(
-        positions, [step["true"] for step in steps])
+        positions, [step["true"] for step in steps],
+        measurement_noise_m=args.smoothing_noise_m)
     print("\nSmoothed track (Rauch-Tung-Striebel):")
     print(format_report_line("smoothed", smoothed_report))
     return 0

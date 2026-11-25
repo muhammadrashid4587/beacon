@@ -1279,6 +1279,10 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
     ``--export-smoothed-csv`` save the same track with its
     positions smoothed (Rauch-Tung-Striebel), alongside the raw
     export, so a dashboard can replay the steadier path.
+    ``--smoothing-noise-m`` sets the smoother's
+    measurement-noise stddev in metres for those smoothed
+    exports (default: the calibrated 2 m; 1.0 reproduces the
+    pre-0.54.0 numbers).
     ``input_stream`` / ``output_stream``
     exist so tests can drive the stream without touching
     sys.stdin / sys.stdout.
@@ -1306,6 +1310,14 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                         default=DEFAULT_SIGMA_RSSI_DB,
                         help="assumed RSSI noise in dB for the confidence "
                         f"ellipse (default: {DEFAULT_SIGMA_RSSI_DB})")
+    parser.add_argument("--smoothing-noise-m", type=float,
+                        default=MEASURED_MEASUREMENT_NOISE_M,
+                        help="measurement-noise stddev in metres for "
+                        "the smoother behind --export-smoothed-json "
+                        "/ --export-smoothed-csv (default: "
+                        f"{MEASURED_MEASUREMENT_NOISE_M}, the "
+                        "calibrated value); 1.0 reproduces the "
+                        "pre-0.54.0 numbers")
     parser.add_argument("--battery-drain-per-hour", type=float, default=0.0,
                         help="demo only: drain beacon D's battery at "
                         "this fraction of a full charge per hour, so "
@@ -1365,6 +1377,8 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
         parser.error("--readmit-after must be at least 1")
     if args.sigma_rssi <= 0:
         parser.error("--sigma-rssi must be positive")
+    if args.smoothing_noise_m <= 0:
+        parser.error("--smoothing-noise-m must be positive")
     if args.battery_drain_per_hour < 0:
         parser.error("--battery-drain-per-hour must not be negative")
     if args.forecast_window_hours <= 0:
@@ -1406,7 +1420,8 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                              drift_monitor=drift_monitor,
                              drift_beacon=drift_beacon)
         _export_track(positions, args.export_json, args.export_csv,
-                      args.export_smoothed_json, args.export_smoothed_csv)
+                      args.export_smoothed_json, args.export_smoothed_csv,
+                      measurement_noise_m=args.smoothing_noise_m)
         return 0
 
     tracker = LiveTracker(PositioningEngine(default_beacons()),
@@ -1435,20 +1450,26 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                                        tracker.drift_alerts)),
               file=sink)
     _export_track(positions, args.export_json, args.export_csv,
-                  args.export_smoothed_json, args.export_smoothed_csv)
+                  args.export_smoothed_json, args.export_smoothed_csv,
+                  measurement_noise_m=args.smoothing_noise_m)
     return 0
 
 
 def _export_track(positions: list[LivePosition | None],
                   json_path: str | None, csv_path: str | None,
                   smoothed_json_path: str | None = None,
-                  smoothed_csv_path: str | None = None) -> None:
+                  smoothed_csv_path: str | None = None,
+                  measurement_noise_m: float
+                  = MEASURED_MEASUREMENT_NOISE_M) -> None:
     """Save a recorded track to the requested export files, if
     any. A track with no steps (an empty stream) has nothing to
     export, so the flags are quietly skipped rather than
     failing a run that streamed nothing. The import is local:
     ``beacon.export`` imports this module for ``LivePosition``,
-    so a top-level import here would be circular."""
+    so a top-level import here would be circular.
+    ``measurement_noise_m`` is the smoother's measurement-noise
+    standard deviation in metres for the smoothed exports (see
+    :func:`beacon.export.smooth_track_rows`)."""
     from .export import (export_smoothed_track_csv,
                          export_smoothed_track_json, export_track_csv,
                          export_track_json)
@@ -1460,9 +1481,11 @@ def _export_track(positions: list[LivePosition | None],
     if csv_path is not None:
         export_track_csv(positions, csv_path)
     if smoothed_json_path is not None:
-        export_smoothed_track_json(positions, smoothed_json_path)
+        export_smoothed_track_json(positions, smoothed_json_path,
+                                   measurement_noise_m=measurement_noise_m)
     if smoothed_csv_path is not None:
-        export_smoothed_track_csv(positions, smoothed_csv_path)
+        export_smoothed_track_csv(positions, smoothed_csv_path,
+                                  measurement_noise_m=measurement_noise_m)
 
 
 if __name__ == "__main__":

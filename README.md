@@ -3235,3 +3235,46 @@ average error, not to each step's — so the interval is an
 honest approximation, not a guarantee.
 The roadmap grows as new needs surface — the calibrated
 smoother noise model is the latest addition.
+
+## The smoother noise on the command line
+
+The noise value is a library parameter, but a ward dashboard
+that only runs the CLIs had no way to set it — the smoothing
+path always used the calibrated 2 m. `--smoothing-noise-m`
+exposes it on every CLI that smooths: the single-device demo
+summary (`python -m beacon.cli`), the live tracker's smoothed
+exports (`python -m beacon.tracking --demo
+--export-smoothed-json`), and the multi-device smoothed
+exports and smoothed demo reports (`python -m beacon.multi_device
+--demo --evaluate-smoothed`, `--export-smoothed-json` /
+`--export-smoothed-csv`) — the same parameter the library
+already takes, so the overlay, the replay, the export and the
+reports all honour one value: smooth a track with the flag and
+the file the overlay and the replay draw is the track the
+report scores. It defaults to the calibrated
+`MEASURED_MEASUREMENT_NOISE_M` (2.0 m), and a non-positive
+value is rejected by the parser instead of smoothing on a
+made-up noise. A track file scored with
+`--evaluate-smoothed-file` is already smoothed, so the flag
+does not re-smooth it — re-export the track with the flag
+instead.
+
+```sh
+python3 -m beacon.cli --smoothing-noise-m 1.0
+python3 -m beacon.tracking --demo --export-smoothed-json ward-a-track-smoothed.json --smoothing-noise-m 1.5
+python3 -m beacon.multi_device --demo --evaluate-smoothed --smoothing-noise-m 1.0
+```
+
+Measured behaviour (v0.55.0): `--smoothing-noise-m 1.0`
+reproduces the pre-0.54.0 numbers exactly — the single-device
+smoothed mean error goes back from 1.34 m to 1.45 m on the
+demo walk, the two-device overall mean from 1.13 m to 1.25 m,
+and the smoothed ellipse from 1.90 m to 1.14 m mean
+semi-major. The flag does not fix the honest limit from
+v0.54.0: one isotropic number still cannot capture
+geometry-dependent error, so seeds 2 and 3 still cover only 26
+and 21 of 40 inside the smoothed ellipse — the flag lets a
+space whose estimates err differently calibrate to its own
+average error, it does not make the interval per-step.
+The roadmap grows as new needs surface — the smoother noise
+on the command line is the latest addition.

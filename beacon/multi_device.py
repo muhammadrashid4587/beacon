@@ -740,6 +740,10 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
     the same combined file with every device's positions
     smoothed (Rauch-Tung-Striebel, per device), alongside the
     raw export, so a dashboard can replay the steadier paths.
+    ``--smoothing-noise-m`` sets the smoother's
+    measurement-noise stddev in metres for the smoothed
+    exports and the smoothed demo reports (default: the
+    calibrated 2 m; 1.0 reproduces the pre-0.54.0 numbers).
     ``--evaluate`` (demo only) scores the two demo walks
     against their ground truth and prints the multi-device
     track accuracy report — one line per device plus the
@@ -792,6 +796,15 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                         default=DEFAULT_SIGMA_RSSI_DB,
                         help="assumed RSSI noise in dB for the confidence "
                         f"ellipse (default: {DEFAULT_SIGMA_RSSI_DB})")
+    parser.add_argument("--smoothing-noise-m", type=float,
+                        default=MEASURED_MEASUREMENT_NOISE_M,
+                        help="measurement-noise stddev in metres for "
+                        "the smoother behind --export-smoothed-json "
+                        "/ --export-smoothed-csv and the "
+                        "--evaluate-smoothed reports (default: "
+                        f"{MEASURED_MEASUREMENT_NOISE_M}, the "
+                        "calibrated value); 1.0 reproduces the "
+                        "pre-0.54.0 numbers")
     parser.add_argument("--forecast", action="store_true",
                         help="attach the deployment plan to every "
                         "device's tracker, so each live position "
@@ -895,6 +908,8 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
         parser.error("--readmit-after must be at least 1")
     if args.sigma_rssi <= 0:
         parser.error("--sigma-rssi must be positive")
+    if args.smoothing_noise_m <= 0:
+        parser.error("--smoothing-noise-m must be positive")
     if args.forecast_window_hours <= 0:
         parser.error("--forecast-window-hours must be positive")
     if args.drain_rate < 0:
@@ -1027,7 +1042,8 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
             if (args.evaluate_smoothed
                     or args.evaluate_smoothed_json is not None):
                 smoothed_report = evaluate_smoothed_multi_device_track(
-                    tracker.tracks(), truths)
+                    tracker.tracks(), truths,
+                    measurement_noise_m=args.smoothing_noise_m)
                 if args.evaluate_smoothed:
                     print(file=sink)
                     print("Smoothed track (Rauch-Tung-Striebel):",
@@ -1073,9 +1089,13 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
         if args.export_csv is not None:
             tracker.export_track_csv(args.export_csv)
         if args.export_smoothed_json is not None:
-            tracker.export_smoothed_track_json(args.export_smoothed_json)
+            tracker.export_smoothed_track_json(
+                args.export_smoothed_json,
+                measurement_noise_m=args.smoothing_noise_m)
         if args.export_smoothed_csv is not None:
-            tracker.export_smoothed_track_csv(args.export_smoothed_csv)
+            tracker.export_smoothed_track_csv(
+                args.export_smoothed_csv,
+                measurement_noise_m=args.smoothing_noise_m)
     return 0
 
 
