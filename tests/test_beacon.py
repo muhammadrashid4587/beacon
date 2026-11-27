@@ -1748,6 +1748,19 @@ class TestDriftClassification(unittest.TestCase):
                                    "--move-beacon", "D:5,-5"]), 0)
         self.assertIn("moved", out.getvalue())
 
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(main(["--drift-classify", "--seed", "7",
+                                   "--battery-degrade", "D",
+                                   "--loops", "3"]), 0)
+        self.assertIn("battery-sag", out.getvalue())
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(main(["--drift-classify", "--seed", "7",
+                                   "--loops", "1"]), 0)
+        self.assertIn("healthy", out.getvalue())
+
         with self.assertRaises(SystemExit):
             main(["--battery-degrade", "D"])
         with self.assertRaises(SystemExit):

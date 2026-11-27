@@ -379,6 +379,43 @@ class MultifloorDriftCliTest(unittest.TestCase):
                                    "D:5,-5"]), 0)
         self.assertIn("moved", out.getvalue())
 
+    def test_cli_three_loops_catch_the_slow_sag(self):
+        # The fix the v0.60.0 notes pointed at, from the command
+        # line: a third loop fills the long window with drained
+        # readings until its mean crosses the sag gate on its own,
+        # so the slow sag reads battery-sag on 5/5 seeds and the
+        # other seven beacons stay healthy. The default two loops
+        # still miss it on three seeds (see
+        # test_cli_multifloor_battery_sag).
+        for seed in SEEDS:
+            out = io.StringIO()
+            with redirect_stdout(out):
+                self.assertEqual(main(["--drift-classify", "--multifloor",
+                                       "--seed", str(seed),
+                                       "--battery-degrade", "D",
+                                       "--loops", "3"]), 0)
+            text = out.getvalue()
+            self.assertIn("battery-sag", text, f"seed {seed}")
+            self.assertEqual(text.count("healthy"), 7, f"seed {seed}")
+
+    def test_cli_three_loops_healthy(self):
+        for seed in SEEDS:
+            out = io.StringIO()
+            with redirect_stdout(out):
+                self.assertEqual(main(["--drift-classify", "--multifloor",
+                                       "--seed", str(seed),
+                                       "--loops", "3"]), 0)
+            self.assertEqual(out.getvalue().count("healthy"), 8,
+                             f"seed {seed}")
+
+    def test_cli_loops_validation(self):
+        # Zero loops is rejected, and --loops needs --drift-classify
+        # like the other drift flags.
+        self.assertEqual(main(["--drift-classify", "--seed", "7",
+                               "--loops", "0"]), 2)
+        with self.assertRaises(SystemExit):
+            main(["--loops", "3"])
+
     def test_cli_multifloor_needs_drift_classify(self):
         with self.assertRaises(SystemExit):
             main(["--multifloor"])

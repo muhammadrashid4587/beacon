@@ -17,7 +17,7 @@ Usage:
         --map-smoothed track-smoothed.json [--map-output map.svg]
     python -m beacon.cli --drift-classify [--seed 7]
         [--battery-degrade D] [--move-beacon D:5,-5]
-        [--multifloor]
+        [--multifloor] [--loops 3]
     python -m beacon.cli --deployment-plan
         [--battery-levels A=0.9,B=0.6] [--drain-rate 0.05]
     python -m beacon.cli --replacement-schedule
@@ -106,8 +106,19 @@ def run_drift_classify(args: argparse.Namespace) -> int:
     ``--multifloor`` walks the two-floor ward twice instead — each
     floor's loop twice, so revisits exist per floor — and classifies
     all eight beacons; the monitor is floor-aware, so a beacon heard
-    through the slab does not read as drift.
+    through the slab does not read as drift. ``--loops`` walks the
+    loop that many times instead of twice: a third loop is what
+    catches a slow battery sag on a multi-floor walk, where two
+    loops leave the decline buried in the noise on three of five
+    seeds — the extra loop fills the long window with drained
+    readings until its mean crosses the sag gate on its own. One
+    loop has no revisits, so the classifier falls back to the
+    within-window trend and cannot rule a move out.
     """
+    loops = args.loops if args.loops is not None else 2
+    if loops < 1:
+        print("--loops must be at least 1", file=sys.stderr)
+        return 2
     beacons = (default_multifloor_beacons() if args.multifloor
                else default_beacons())
     known_ids = {b.id for b in beacons}
@@ -141,12 +152,12 @@ def run_drift_classify(args: argparse.Namespace) -> int:
     if args.multifloor:
         walk = two_floor_walk(WARD_WIDTH_M, WARD_HEIGHT_M, args.steps)
         steps = simulate_multifloor_walk(
-            walk + walk, sim_beacons,
+            walk * loops, sim_beacons,
             noise_db=args.noise, seed=args.seed,
             batteries=batteries, step_seconds=step_seconds)
     else:
         loop = rectangular_walk(WARD_WIDTH_M, WARD_HEIGHT_M, args.steps)
-        steps = simulate_walk(loop + loop, sim_beacons,
+        steps = simulate_walk(loop * loops, sim_beacons,
                               noise_db=args.noise, seed=args.seed,
                               batteries=batteries, step_seconds=step_seconds)
     # The classification window must span a full cycle of the walk,
@@ -370,7 +381,8 @@ def main(argv=None) -> int:
     parser.add_argument("--multifloor", action="store_true",
                         help="with --drift-classify, walk the "
                         "two-floor ward twice (each floor's loop "
-                        "twice, so revisits exist per floor) "
+                        "twice, so revisits exist per floor; "
+                        "--loops N walks it N times) "
                         "instead of the single-floor loop, and "
                         "classify all eight beacons — the drift "
                         "monitor is floor-aware, so a beacon heard "
@@ -380,6 +392,14 @@ def main(argv=None) -> int:
                         "beacon's battery during the walk (0.3 per "
                         "hour, 120 s steps) so the classifier has a "
                         "real sag to find")
+    parser.add_argument("--loops", type=int, default=None,
+                        metavar="N",
+                        help="with --drift-classify, walk the loop N "
+                        "times instead of twice — a third loop is "
+                        "what catches a slow battery sag on a "
+                        "multi-floor walk, where two loops leave the "
+                        "decline buried in the noise on three of "
+                        "five seeds (default: 2)")
     parser.add_argument("--long-window", type=int, default=None,
                         metavar="N",
                         help="with --drift-classify, readings per "
@@ -438,9 +458,9 @@ def main(argv=None) -> int:
         return run_drift_classify(args)
 
     if (args.battery_degrade is not None or args.move_beacon is not None
-            or args.multifloor):
-        parser.error("--battery-degrade, --move-beacon and --multifloor "
-                     "need --drift-classify")
+            or args.multifloor or args.loops is not None):
+        parser.error("--battery-degrade, --move-beacon, --multifloor "
+                     "and --loops need --drift-classify")
 
     if args.validate_layout:
         validation = validate_floor_layouts(

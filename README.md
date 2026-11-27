@@ -3651,3 +3651,51 @@ that is real but barely significant, and the reason says so,
 citing the long history it was taken from.
 The roadmap grows as new needs surface — the long-history
 drift classification is the latest addition.
+
+## A third loop for drift classification
+
+The long-history fix caught the slow sag on two of five seeds
+from two loops of data, and the v0.60.0 notes pointed at the
+rest: walk a third loop and the window fills with drained
+readings until its mean crosses the gate on its own. The
+classifier could already do that — the monitor takes any
+number of loops — but the demo could not: `--drift-classify`
+hardcoded two loops. It takes `--loops N` now, walking the
+loop N times instead of twice (the default is still 2, so the
+existing demo is unchanged), on the single-floor loop and the
+two-floor ward alike. One loop has no revisits, so the
+classifier falls back to the within-window trend and cannot
+rule a move out; fewer than one loop is rejected.
+
+```sh
+python3 -m beacon.cli --drift-classify --multifloor --seed 7 --battery-degrade D --loops 3
+python3 -m beacon.cli --drift-classify --seed 7 --battery-degrade D --loops 3
+python3 -m beacon.cli --drift-classify --seed 7 --loops 1
+```
+
+Measured behaviour (v0.61.0): on the tripled two-floor walk,
+2 dB RSSI noise, beacon D, seeds 1, 2, 3, 7, 11 — the other
+seven beacons stay `healthy` in every scenario:
+
+| scenario | verdicts |
+|---|---|
+| healthy | `healthy` 5/5 (8/8 beacons on every seed) |
+| D draining, 0.3/hr | `battery-sag` 5/5 (mean -2.00 to -2.82 dB, revisit delta -1.71 to -3.11 dB, 72 pairs) |
+| D moved (0, 12) to (5, 7) | `moved` 4/5 (mean +3.98 to +4.48 dB, spread 2.59 to 3.07 dB); seed 2 `uncertain` (spread 2.48 dB, just under the 2.5 dB threshold) |
+
+The third loop does what the notes said it would: the slow
+sag reads `battery-sag` on 5/5 seeds, where two loops caught
+only 2/5 — the extra loop's drained readings pull the
+long-window mean to -2.00 to -2.82 dB, past the -1.5 dB gate,
+and the revisit delta measures the decline at -1.71 to
+-3.11 dB over 72 pairs. The moved beacon reads `moved` on
+one more seed than the two-loop walk (4/5 instead of 3/5 at
+the demo's 80-reading window), and seed 2 stays `uncertain`
+for the same honest reason as before — its spread is 2.48 dB,
+0.02 dB under the moved threshold. On the single-floor walk
+a third loop keeps the sag at `battery-sag` 5/5 (mean -3.75
+to -5.12 dB, revisit delta -2.72 to -5.16 dB, 20 pairs — the
+20-reading window limits the pairs) and the healthy walk at
+`healthy` 4/4.
+The roadmap grows as new needs surface — the third loop for
+drift classification is the latest addition.
