@@ -4959,3 +4959,105 @@ next item is the single-loop slow sag, a measured limit of
 this evidence. The roadmap grows as new needs surface —
 the middle third having to be noisier than the first is the
 latest addition.
+
+The v0.74.0 notes left the single-loop slow sag, and v0.75.0
+measures it gate by gate instead of tuning past it. On one
+loop there are no revisits (0–1 pairs), so only the fallback
+route can fire, and its three legs almost never pass
+together: the short-window mean clears -1.5 dB on only 4 of
+100 seeds in-sample (its median is -0.47 dB — the sag's
+whole fall across one loop is under 1 dB, since the loss
+grows with the square of the charge used and the walk only
+uses 40% of the cell), the trend leg (long slope below
+-0.15 dB per reading, or the second half 1.5 dB below the
+first) on 7, and the level drop below -1.0 dB at 1.5
+standard errors on 21 — all three at once on exactly 1
+seed, out of sample 8, 11, 15 and 3. The classification now
+carries the drop's standard error as `level_drop_se_db`,
+so the verdict shows why: the drop's median z-score is
+-0.75 on the slow sag against -0.19 on a healthy walk, and
+77 of 100 sag seeds sit inside 1.5 standard errors of
+zero, against 84 of 100 healthy — the two distributions
+overlap almost completely, and the drop's standard error
+itself is about 1 dB on 40 readings, larger than the
+sag's whole fall. No significance gate on this evidence
+can call the sag without also calling noise.
+
+Twelve candidate angles were measured on the pinned
+sweeps, seeds 1–200, and all twelve rejected:
+
+- Dropping the 1.5-SE leg from the drop gate (magnitude
+  only, the same precedent as the late-decline gate):
+  slow sag 1 to 2 in-sample, 3 to 6 out-of-sample, and the
+  fast sag 49 to 63 and 61 to 69 — but the noisy beacon's
+  misreads rise 3 to 4 and 1 to 4, the very misreads the
+  last four versions repaired. The SE leg is load-bearing
+  for the noisy beacon, whose drop standard error is about
+  2.3 dB.
+- Replacing the drop with the last-third minus first-third
+  decline: same trade, slow 1 to 1 and 3 to 6, noisy
+  misreads 3 to 5 and 1 to 4.
+- A slope t-stat leg (long slope below -1.5 standard
+  errors, replacing the -0.15 dB per reading magnitude):
+  slow 1 to 2 and 3 to 4, but the steady -6 dB offset
+  misreads 0 to 5 in-sample and 1 to 5 out-of-sample.
+- A correlation leg (long correlation below -0.5 as a third
+  trend leg): never fires — the slow sag's correlation
+  only reaches -0.42, so the leg is dead.
+- Relaxing the mean gate to -1.0 dB with the
+  magnitude-only drop: slow 1 to 4 and 3 to 8, but the
+  noisy misreads rise 3 to 7 and 1 to 7. At -0.75 dB a
+  healthy walk misreads out of sample too.
+- A three-way AND of 1-SE legs (mean below -1.0 dB, drop
+  below 1 standard error, slope t-stat below -1.0): the
+  best slow-sag gain measured, 1 to 9 and 3 to 9 — but the
+  offset misreads 0 to 9 in-sample and 1 to 10
+  out-of-sample, and the noisy misreads 3 to 5 and 1 to 8.
+- A half-spread-growth AND leg (the second half noisier
+  than the first, the v0.74.0 signal on one loop): slow 1
+  to 4 and 3 to 8, but the noisy misreads rise and fast
+  sags are pushed into `uncertain` (1 to 6 in-sample) — it
+  costs true sags.
+- A short-window spread veto on the fallback (a window
+  spreading past 5.5 dB cannot be a sag): repairs 2 of the
+  4 noisy misreads at zero cost on these 200 seeds — but
+  the margin is 0.15 dB (the fastest true sag spreads to
+  5.08 dB, the misreads sit at 5.07 to 5.90 dB), a tuned
+  threshold on a knife-edge that repairs only half the
+  misreads, so it stays out.
+- The half-spread growth and the quadratic t-stat, already
+  rejected in v0.74.0, re-measured and still overlapping:
+  half-spread growth median +0.47 dB on the sag against
+  -0.07 dB healthy, ranges -0.74 to +1.99 against -1.18 to
+  +1.17; the quadratic t-stat below -1.5 fires on 13 sag
+  seeds against 7 healthy, 7 offset and 10 noisy.
+
+The trap is structural, not a threshold to find. An
+offset's trend statistics are identical to a healthy
+walk's by construction — adding a constant shifts no
+slope, drop or correlation — so any relaxation of a trend
+leg fires on offsets at the same rate it fires on sags,
+and any relaxation of a level leg fires on the healthy
+and noisy walks whose means overlap the sag's. The sag
+sits between them in the (mean, drop) plane, and its
+whole signal is about one standard error of every
+statistic that measures it. The fix is a longer history
+(more loops), not a sharper threshold — the same
+conclusion v0.71.0 reached for the late cliffs, and the
+reason the two-loop walk already detects the slow sag on
+84 of 100 seeds.
+
+Measured behaviour (v0.75.0): 2 dB RSSI noise, beacon D —
+no verdict changes anywhere, on any loop count, on
+either sample; every pinned tally stands exactly as
+v0.74.0 left it, including the single-loop slow sag at
+1/100 in-sample (now pinned in the test suite) and 3/100
+out-of-sample. The classification carries the evidence as
+`level_drop_se_db`, and the export round-trips it (a file
+written before v0.75.0 loads with it null). The next item
+is seed 156's two-loop noisy misread — the last late cliff
+whose spread evidence is too thin for the mid-first gate —
+and the single-loop slow sag stays a measured limit of
+this evidence, pending longer walks. The roadmap grows as
+new needs surface — the drop's standard error is the
+latest addition.

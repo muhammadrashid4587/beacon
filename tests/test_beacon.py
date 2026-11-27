@@ -2208,6 +2208,17 @@ class TestDriftClassification(unittest.TestCase):
                 s, batteries=fast_sag, step_seconds=120.0)),
             {"battery-sag": 49, "healthy": 30, "noisy": 20,
              "uncertain": 1})
+        # The single-loop slow sag, pinned in-sample for the
+        # first time (v0.75.0): 1/100 — the only detection is
+        # the seed whose short-window mean, trend and drop all
+        # clear their gates at once, and the gate-by-gate counts
+        # are pinned in test_level_drop_se_db_pins_... below, so
+        # a future change that shifts this count must update
+        # both tests and the README deliberately, not silently.
+        self.assertEqual(
+            tally(lambda s: one_loop(
+                s, batteries=slow_sag, step_seconds=120.0)),
+            {"healthy": 99, "battery-sag": 1})
         self.assertEqual(tally(lambda s: one_loop(s)),
                          {"healthy": 100})
         self.assertEqual(
@@ -2556,6 +2567,107 @@ class TestDriftClassification(unittest.TestCase):
         loaded_old = _drift_classifications_from_dict(old)
         self.assertIsNone(
             loaded_old[0]["mid_first_spread_growth_db"])
+
+    def test_level_drop_se_db_pins_single_loop_slow_sag_limit(self):
+        # The single-loop slow sag, measured gate by gate
+        # (v0.75.0): on one loop the fallback's three legs pass
+        # almost never together — the short-window mean clears
+        # -1.5 dB on only 4 of 100 seeds (its median is -0.47
+        # dB: the sag's whole fall across one loop is under
+        # 1 dB), the trend leg on 7, the drop plus its 1.5-SE
+        # leg on 21 — and all three at once on exactly 1, the
+        # seed the sweep pins as battery-sag. The classification
+        # now carries the drop's standard error as
+        # level_drop_se_db, so the verdict shows why: the drop's
+        # median z-score (drop over its own standard error) is
+        # -0.75 on the slow sag against -0.19 on a healthy walk,
+        # and 77 of 100 sag seeds sit inside 1.5 standard
+        # errors of zero, against 84 of 100 healthy — the two
+        # distributions overlap almost completely, so no
+        # significance gate on this evidence can call the sag
+        # without also calling noise.
+        mean_pass = drop_pass = all_pass = 0
+        z_scores = []
+        for seed in range(1, 101):
+            loop = rectangular_walk(20.0, 12.0, 10)
+            steps = simulate_walk(
+                loop, BEACONS, noise_db=2.0, seed=seed,
+                batteries={"D": BatteryModel(
+                    drain_rate_per_hour=0.3)}, step_seconds=120.0)
+            monitor = DriftMonitor(BEACONS)
+            for step in steps:
+                monitor.feed(step)
+            result = monitor.classify("D")
+            self.assertIsNotNone(result.level_drop_db, seed)
+            self.assertIsNotNone(result.level_drop_se_db, seed)
+            self.assertGreater(result.level_drop_se_db, 0.0, seed)
+            z_scores.append(result.level_drop_db
+                            / result.level_drop_se_db)
+            if result.mean_residual_db < -1.5:
+                mean_pass += 1
+            drop_ok = (result.level_drop_db < -1.0
+                       and result.level_drop_db
+                       < -1.5 * result.level_drop_se_db)
+            if drop_ok:
+                drop_pass += 1
+            # The trend leg, recomputed from the walk itself: the
+            # least-squares slope and the second half's mean
+            # residual minus the first's, the same split the
+            # fallback reads over the long history. The
+            # classification's own slope is the short window's,
+            # so the long slope is recomputed here.
+            residuals = [
+                step["rssi"]["D"] - distance_to_rssi(math.dist(
+                    step["true"], (0.0, 12.0)))
+                for step in steps]
+            half = len(residuals) // 2
+            half_delta = (statistics.mean(residuals[half:])
+                          - statistics.mean(residuals[:half]))
+            count = len(residuals)
+            mean_t = (count - 1) / 2
+            mean_r = statistics.mean(residuals)
+            long_slope = (
+                sum((i - mean_t) * (r - mean_r)
+                    for i, r in enumerate(residuals))
+                / sum((i - mean_t) ** 2 for i in range(count)))
+            trend_ok = long_slope <= -0.15 or half_delta <= -1.5
+            if (result.mean_residual_db < -1.5 and drop_ok
+                    and trend_ok):
+                all_pass += 1
+        self.assertEqual(mean_pass, 4)
+        self.assertEqual(drop_pass, 21)
+        self.assertEqual(all_pass, 1)
+        ordered = sorted(z_scores)
+        median_z = (ordered[49] + ordered[50]) / 2
+        self.assertAlmostEqual(median_z, -0.75, places=1)
+        self.assertEqual(
+            sum(1 for z in z_scores if abs(z) < 1.5), 77)
+
+    def test_level_drop_se_db_round_trips_through_export(self):
+        # The classification's drop standard error rides the
+        # export rows like the level drop itself does, and a
+        # file written before v0.75.0 — with no
+        # level_drop_se_db key at all — loads with it null
+        # instead of failing.
+        loop = rectangular_walk(20.0, 12.0, 10)
+        steps = simulate_walk(loop + loop + loop, BEACONS,
+                              noise_db=2.0, seed=124)
+        rng = random.Random(124 + 1000)
+        for step in steps:
+            step["rssi"]["D"] += rng.gauss(0.0, 5.0)
+        monitor = DriftMonitor(BEACONS)
+        for step in steps:
+            monitor.feed(step)
+        raw = [monitor.classify("D").to_dict()]
+        loaded = _drift_classifications_from_dict(raw)
+        self.assertEqual(len(loaded), 1)
+        self.assertAlmostEqual(
+            loaded[0]["level_drop_se_db"],
+            raw[0]["level_drop_se_db"])
+        old = [dict(raw[0])]
+        del old[0]["level_drop_se_db"]
+        loaded_old = _drift_classifications_from_dict(old)
+        self.assertIsNone(loaded_old[0]["level_drop_se_db"])
 
     def test_early_delta_gate_keeps_true_sag_on_thin_early_evidence(self):
         # The pair-count minimum, pinned by seed: the true slow

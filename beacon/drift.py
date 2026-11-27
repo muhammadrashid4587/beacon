@@ -803,6 +803,14 @@ class DriftClassification:
     fell from the first quarter to the last quarter of the floor's
     long history (None when the history is too short to split) —
     the check that keeps a steady offset from reading as a sag;
+    ``level_drop_se_db`` is the standard error of that fall — how
+    precisely the level drop is known (None when the history is
+    too short to split) — the number that says whether the fall
+    is real or noise: on a single loop the fall's standard error
+    is about 1 dB while the slow sag's whole fall is under 1 dB,
+    so the fall sits inside 1.5 standard errors of zero on most
+    seeds and no significance gate can call it without also
+    calling noise;
     ``late_decline_db`` is how far the level fell in the late
     interval — the mean of the last third of the history minus
     the mean of the middle third (None when the history is too
@@ -843,6 +851,7 @@ class DriftClassification:
     samples: int
     reason: str
     level_drop_db: float | None = None
+    level_drop_se_db: float | None = None
     late_decline_db: float | None = None
     spread_growth_db: float | None = None
     early_revisit_delta_db: float | None = None
@@ -854,6 +863,7 @@ class DriftClassification:
         when the device never revisited a spot, so no delta was
         measured, and ``level_drop_db`` is null when the history
         was too short to split into quarters, and
+        ``level_drop_se_db`` is null with it, and
         ``late_decline_db`` is null when it was too short to
         split into thirds, and ``spread_growth_db`` is null when
         it was too short to estimate a spread per third, and
@@ -874,6 +884,7 @@ class DriftClassification:
             "samples": self.samples,
             "reason": self.reason,
             "level_drop_db": self.level_drop_db,
+            "level_drop_se_db": self.level_drop_se_db,
             "late_decline_db": self.late_decline_db,
             "spread_growth_db": self.spread_growth_db,
             "early_revisit_delta_db": self.early_revisit_delta_db,
@@ -1329,7 +1340,8 @@ class DriftMonitor:
                 time_correlation=correlation,
                 revisit_delta_db=delta, revisit_pairs=pairs,
                 samples=samples, reason=reason,
-                level_drop_db=drop, late_decline_db=late_decline,
+                level_drop_db=drop, level_drop_se_db=drop_se,
+                late_decline_db=late_decline,
                 spread_growth_db=spread_growth,
                 early_revisit_delta_db=early_delta,
                 mid_first_spread_growth_db=mid_first_growth)
