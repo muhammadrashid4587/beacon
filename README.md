@@ -3581,3 +3581,73 @@ as the window fills with drained readings, its mean crosses the
 gate on its own.
 The roadmap grows as new needs surface — the per-floor
 classification window is the latest addition.
+
+## Long-history drift classification
+
+The per-floor window fixed the verdict following the window, and
+left the slow sag behind: the own-floor window averages a fresh
+loop with a drained one, so its mean never reaches the -1.5 dB
+sag gate. The fix is a longer history, not a sharper threshold.
+Each beacon now keeps a second window per floor — the long
+window, `long_window` readings (the full history by default,
+configurable per monitor, at least the short window and at most
+the history) — and the sag check consults it. The long window is
+consulted for the sag only, never for a move: a move's signature
+is positional, not temporal, and the short window already carries
+it. And it uses the same revisit thresholds as the short-window
+test — a revisit delta below -1.0 dB, at least 1.5 standard errors
+from zero, over at least 5 pairs — plus one guard: the beacon must
+read weaker overall across the long history, its mean at least
+1.5 standard errors below zero. A noise fluke that fakes a
+revisit decline leaves the mean near zero, so it cannot borrow
+this route: the single-floor healthy walk's seed 11 flukes a
+-1.00 dB long revisit delta but its long mean is only -0.15 dB,
+so it stays healthy. The noisy check runs first, so a noisy
+beacon whose revisit delta flukes negative stays noisy, and a
+moved beacon's revisit delta is near zero, so it cannot borrow
+the route either. The alarm, the moved and noisy verdicts, and
+the fast-sag fallback all still read the short window exactly as
+before — fast detection does not wait for the long history.
+
+```python
+monitor = DriftMonitor(beacons, window=20, long_window=240)
+```
+
+```sh
+python3 -m beacon.cli --drift-classify --multifloor --seed 7
+python3 -m beacon.cli --drift-classify --multifloor --seed 1 --battery-degrade D --long-window 120
+```
+
+Measured behaviour (v0.60.0): on the doubled two-floor walk,
+2 dB RSSI noise, beacon D, seeds 1, 2, 3, 7, 11 — the other
+seven beacons stay `healthy` in every scenario, and the
+single-floor table is unchanged (the slow sag still reads
+`battery-sag` 5/5 there, healthy 5/5, the steady offset still
+misread as a sag on seed 11 through the short window):
+
+| scenario | verdicts |
+|---|---|
+| healthy | `healthy` 5/5 (mean -0.01 to +0.12 dB, revisit -0.14 to +0.79 dB, 41 pairs) |
+| D draining, 0.3/hr | `battery-sag` 2/5 (seeds 1 and 11; mean -0.67 to -0.79 dB, revisit delta -1.50 dB); seeds 2, 3 and 7 `healthy` (revisit -0.87, -0.19 and -0.48 dB) — no alarm, the mean never reaches 5 dB |
+| D moved (0, 12) to (5, 7) | `moved` 3/5 (mean +4.10 to +4.24 dB, spread 2.47 to 3.07 dB); seeds 1 and 2 `uncertain` (spread 2.47 and 2.50 dB, just under the 2.5 dB threshold) |
+| D with 5 dB extra noise | `noisy` 5/5 (spread 4.48 to 6.11 dB) |
+| D steady -6 dB offset | `uncertain` 5/5 (mean -5.88 to -6.01 dB), alarming on D throughout |
+
+The three misses are honest limits, not a threshold to sharpen.
+The inter-loop decline is only about 1.5 dB while each reading
+carries 2 dB of noise plus up to 2.4 dB of extra battery noise by
+the end of the walk, so on seeds 2, 3 and 7 the revisit pairs
+genuinely do not show a decline — seed 3's is -0.19 dB — and no
+statistic can separate that from a healthy beacon without more
+history. More history is what fixes it: walk a third loop and
+the window fills with drained readings until its mean crosses
+the gate on its own, and the slow sag reads `battery-sag` on
+5/5 seeds (mean -2.00 to -2.82 dB, revisit delta -1.71 to
+-3.11 dB, 72 pairs). The long route's own guard is thin on seed
+11 — its long mean of -0.67 dB clears the 1.5-standard-error gate
+of -0.61 dB by 0.06 dB — which is the price of catching a slow
+decline from two loops of data: the verdict rests on a decline
+that is real but barely significant, and the reason says so,
+citing the long history it was taken from.
+The roadmap grows as new needs surface — the long-history
+drift classification is the latest addition.

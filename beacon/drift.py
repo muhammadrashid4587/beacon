@@ -99,6 +99,24 @@ instead, for inspection, and the classification carries the floor
 it was taken on. A beacon never heard on its own floor is
 ``uncertain`` — no readings to classify — not healthy.
 
+The per-floor window has an honest cost for a slow drain: the
+own-floor window averages a fresh loop with a drained one, so its
+mean never reaches the sag gate, and the walk ends upstairs, so
+the window never sees the most-drained readings at all. The fix
+is a longer history, not a sharper threshold. Each beacon also
+keeps one *long* window per floor — ``long_window`` readings by
+default the full history — and the sag check consults it: a
+strongly negative revisit delta over the long window, with the
+beacon reading weaker overall across that history, is a sag even
+when the short window's mean is above the gate. The long window
+is consulted for the sag only, never for a move — a move's
+signature is positional, not temporal, and the short window
+already carries it — and the noisy check runs first, so a noisy
+beacon whose revisit delta flukes negative stays noisy. Fast
+detection still rests on the short window: the alarm, the moved
+and noisy verdicts, and the fast-sag fallback all read the short
+window exactly as before.
+
 Measured behaviour (simulator, 2 dB RSSI noise, two-loop ward
 walk, seeds 1, 2, 3, 7, 11 — see the README for the full table):
 a slowly draining beacon (0.3 per hour, 120 s steps) is called
@@ -108,7 +126,13 @@ noise fluke that fakes a decline also blocks the moved call), a
 beacon with 5 dB of extra noise is called noisy on 5/5, and a
 steady -6 dB offset is called uncertain on 4/5 and misread as
 battery-sag on seed 11, where the noise itself drifts down over
-the walk. A move under about 2 m is invisible at 2 dB noise and
+the walk. On the doubled two-floor walk the same slow drain is
+called battery-sag on 2/5 seeds (1 and 11) through the long
+history — seeds 2, 3 and 7 lack the signal in the revisit pairs
+(-0.87, -0.19 and -0.48 dB), so the classifier stays honest and
+says healthy rather than inventing a decline — and with a third
+loop, a longer history still, it is called battery-sag on 5/5.
+A move under about 2 m is invisible at 2 dB noise and
 is called healthy or uncertain, which is a limit of the data, not
 a bug in the classifier.
 """
@@ -176,6 +200,15 @@ MOVED_MEAN_MIN_DB = 1.5
 # without being able to name it.
 UNCERTAIN_MIN_DB = 1.5
 UNCERTAIN_MIN_T = 3.0
+
+# The long-history sag test needs the beacon to read weaker overall
+# across the long history, by at least this many standard errors
+# below zero — the same "standard errors from zero" convention as
+# the uncertain gate, so a noise fluke that fakes a revisit
+# decline (single-floor healthy seed 11: long revisit delta
+# -1.00 dB, but long mean only -0.15 dB) cannot borrow the long
+# route and turn a healthy beacon into a sag.
+SAG_LONG_MEAN_MIN_T = 1.5
 
 VERDICTS = ("healthy", "battery-sag", "moved", "noisy", "uncertain")
 
@@ -310,6 +343,12 @@ class DriftMonitor:
     matching the simulator): the predicted RSSI for a beacon on
     another floor accounts for the vertical gap and the slab, and
     revisit pairs only match readings on the same floor.
+    ``long_window`` is how many recent readings per beacon per
+    floor the long history covers (the full history by default):
+    the sag check consults it for a slow drain the short window's
+    mean cannot see, while the alarm and the moved and noisy
+    verdicts keep reading the short window. It must be at least
+    ``window`` and at most ``history``.
     """
 
     def __init__(self, beacons: list[Beacon],
@@ -321,7 +360,8 @@ class DriftMonitor:
                  revisit_gap: int = DEFAULT_REVISIT_GAP,
                  revisit_radius_m: float = DEFAULT_REVISIT_RADIUS_M,
                  floor_height_m: float = DEFAULT_FLOOR_HEIGHT_M,
-                 floor_attenuation_db: float = DEFAULT_FLOOR_ATTENUATION_DB):
+                 floor_attenuation_db: float = DEFAULT_FLOOR_ATTENUATION_DB,
+                 long_window: int | None = None):
         if not beacons:
             raise ValueError("drift monitor needs at least one beacon")
         if window < 1:
@@ -346,8 +386,21 @@ class DriftMonitor:
             raise ValueError("floor_height_m must be positive")
         if floor_attenuation_db < 0:
             raise ValueError("floor_attenuation_db cannot be negative")
+        if long_window is None:
+            long_window = history
+        if long_window < 1:
+            raise ValueError("long_window must be at least 1")
+        if long_window < window:
+            raise ValueError(
+                "long_window must be at least window: "
+                f"got long_window={long_window}, window={window}")
+        if long_window > history:
+            raise ValueError(
+                "long_window cannot exceed history: "
+                f"got long_window={long_window}, history={history}")
         self._beacons = {b.id: b for b in beacons}
         self._window = window
+        self._long_window = long_window
         self._threshold = drift_threshold_db
         self._min_samples = min_samples
         self._noise_db = noise_db
@@ -362,6 +415,17 @@ class DriftMonitor:
         # a single mixed window happens to cover — and the longer
         # history, per beacon, for classification.
         self._observations: dict[str, dict[int, deque[tuple[int, float, float, int, float]]]] = {
+            b.id: {} for b in beacons}
+        # The long window per beacon per floor: the same readings as
+        # the rolling window, kept longer — the slow-drift evidence.
+        # A slow drain barely moves the short window's mean (on the
+        # two-floor walk the own-floor window averages a fresh loop
+        # with a drained one), but across the long window the
+        # decline at revisited spots is measurable, so the sag
+        # check consults this window while the alarm, the moved
+        # and noisy verdicts, and the fast-sag fallback all keep
+        # reading the short one.
+        self._long_observations: dict[str, dict[int, deque[tuple[int, float, float, int, float]]]] = {
             b.id: {} for b in beacons}
         self._history: dict[str, deque[tuple[int, float, float, int, float]]] = {
             b.id: deque(maxlen=history) for b in beacons}
@@ -379,6 +443,17 @@ class DriftMonitor:
         deque when it was never heard there."""
         return self._observations[beacon_id].get(
             floor, deque(maxlen=self._window))
+
+    def _long_window_for(self, beacon_id: str, floor: int
+                ) -> deque[tuple[int, float, float, int, float]]:
+        """The long window for one beacon on one floor — an empty
+        deque when it was never heard there. The slow-drift
+        evidence: the same readings as the rolling window, kept
+        longer, so a decline spread over several loops is still
+        measurable after the short window has forgotten the fresh
+        readings it started from."""
+        return self._long_observations[beacon_id].get(
+            floor, deque(maxlen=self._long_window))
 
     def observe(self, position: tuple[float, float]
                 | tuple[float, float, int],
@@ -421,6 +496,10 @@ class DriftMonitor:
             if floor not in windows:
                 windows[floor] = deque(maxlen=self._window)
             windows[floor].append(entry)
+            long_windows = self._long_observations[beacon_id]
+            if floor not in long_windows:
+                long_windows[floor] = deque(maxlen=self._long_window)
+            long_windows[floor].append(entry)
             self._history[beacon_id].append(entry)
 
     def feed(self, step: dict) -> None:
@@ -429,10 +508,14 @@ class DriftMonitor:
         self.observe(step["true"], step["rssi"])
 
     def reset(self) -> None:
-        """Forget every reading — the rolling windows, the revisit
-        history, and the sequence — so a new device starts with a
-        clean monitor, as a new ``LiveTracker`` would."""
+        """Forget every reading — the rolling windows, the long
+        windows, the revisit history, and the sequence — so a new
+        device starts with a clean monitor, as a new ``LiveTracker``
+        would."""
         for windows in self._observations.values():
+            for observations in windows.values():
+                observations.clear()
+        for windows in self._long_observations.values():
             for observations in windows.values():
                 observations.clear()
         for history in self._history.values():
@@ -462,7 +545,8 @@ class DriftMonitor:
             revisit_gap=self._revisit_gap,
             revisit_radius_m=self._revisit_radius_m,
             floor_height_m=self._floor_height_m,
-            floor_attenuation_db=self._floor_attenuation_db)
+            floor_attenuation_db=self._floor_attenuation_db,
+            long_window=self._long_window)
 
     def status(self, beacon_id: str, floor: int | None = None
                ) -> DriftAlarm | None:
@@ -636,6 +720,49 @@ class DriftMonitor:
                 f"the expected {self._noise_db:.2f} dB noise, with "
                 f"no steady decline — the beacon is unreliable, "
                 "not miscalibrated")
+
+        # Slow battery sag, over the longer history: the short
+        # window's mean never reaches the sag gate on a slow drain
+        # — on the two-floor walk the own-floor window averages a
+        # fresh loop with a drained one, so the mean stays above
+        # -1.5 dB even while the battery is dying — but the decline
+        # is still there across the full per-floor history. The
+        # long window is consulted for the sag only, and only with
+        # the same revisit thresholds as the short-window test, so
+        # this is a longer history, not a sharper threshold: the
+        # beacon must read weaker at the same spot over the long
+        # window (delta below -1.0 dB, at least 1.5 standard errors
+        # from zero) and weaker overall across it (mean at least
+        # 1.5 standard errors below zero — a noise fluke that fakes
+        # a revisit decline leaves the mean near zero, so it cannot
+        # borrow this route). The noisy check above runs first, so
+        # a noisy beacon whose revisit delta flukes negative stays
+        # noisy, and a moved beacon's revisit delta is near zero,
+        # so it cannot borrow this route either.
+        long_window = list(self._long_window_for(beacon_id, floor))
+        if len(long_window) >= self._min_samples:
+            long_residuals = [entry[4] for entry in long_window]
+            long_mean = _mean(long_residuals)
+            long_std = _stdev(long_residuals)
+            long_delta, long_delta_se, long_pairs = (
+                self._revisit_delta(beacon_id, floor, long_window))
+            long_se_mean = (long_std / math.sqrt(len(long_window))
+                            if long_window else 0.0)
+            if (long_pairs >= 5
+                    and long_delta is not None
+                    and long_delta_se is not None
+                    and long_delta < SAG_DELTA_MAX_DB
+                    and long_delta < SAG_DELTA_MIN_T * long_delta_se
+                    and long_mean < -SAG_LONG_MEAN_MIN_T * long_se_mean):
+                return result(
+                    "battery-sag",
+                    f"over the longer {len(long_window)}-reading "
+                    f"history on floor {floor} the residual at "
+                    f"revisited spots fell {long_delta:.2f} dB "
+                    f"({long_pairs} pairs) and the mean is "
+                    f"{long_mean:.2f} dB — the slow decline only "
+                    f"shows across the full history, not in the "
+                    f"{samples}-reading window")
 
         # Moved: stable at the same spot, wrong by a
         # position-dependent amount — the residuals spread out

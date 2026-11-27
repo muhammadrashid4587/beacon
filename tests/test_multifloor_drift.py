@@ -40,7 +40,7 @@ BEACONS = [Beacon("A", 0, 0, floor=0), Beacon("B", 20, 0, floor=0),
 CYCLE_WINDOW = 80
 
 
-def _walk(seed, scenario):
+def _walk(seed, scenario, loops=2):
     """Two loops of the two-floor ward, with D drifted per scenario."""
     walk = two_floor_walk(20, 12, 10)
     sim = list(BEACONS)
@@ -52,7 +52,7 @@ def _walk(seed, scenario):
     elif scenario == "move":
         sim = [Beacon(b.id, b.x + 5, b.y - 5, floor=b.floor)
                if b.id == "D" else b for b in BEACONS]
-    steps = simulate_multifloor_walk(walk + walk, sim, noise_db=2.0,
+    steps = simulate_multifloor_walk(walk * loops, sim, noise_db=2.0,
                                      seed=seed, batteries=batteries,
                                      step_seconds=step_seconds)
     rng = random.Random(seed)
@@ -135,23 +135,29 @@ class MultifloorDriftMonitorTest(unittest.TestCase):
                 self.assertEqual(result.verdict, "healthy",
                                  f"seed {seed} beacon {result.id}")
 
-    def test_slow_sag_is_missed_on_the_two_floor_walk(self):
-        # The honest limit the per-floor window introduces: the slow
-        # sag no longer reaches the classifier on this walk. The old
-        # mixed window borrowed the more-drained cross-floor tail —
-        # readings taken later, at a lower battery — which pulled
-        # the window's mean past the -1.5 dB sag gate. The own-floor
+    def test_slow_sag_is_caught_on_two_of_five_seeds(self):
+        # The long-history fix for the v0.59.0 miss: the own-floor
         # window averages the fresh first loop with the drained
-        # second loop, so the mean stays at -0.60 to -0.79 dB and
-        # the gate blocks the verdict, even though the revisit delta
-        # still measures the decline (-1.50 dB on seeds 1 and 11).
-        # No alarm either: the mean never reaches the 5 dB alarm
-        # threshold. The walk ends upstairs, so D's own-floor
-        # window never sees the most-drained readings at all.
+        # second loop, so its mean stays at -0.60 to -0.79 dB and
+        # the short-window sag gate (-1.5 dB) never fires — but the
+        # decline is still there across the full per-floor history,
+        # and the classifier consults that long window for the sag
+        # only. Seeds 1 and 11 have a long-history revisit delta
+        # of -1.50 dB, so they read battery-sag; seeds 2, 3 and 7
+        # lack the signal in the revisit pairs (-0.87, -0.19 and
+        # -0.48 dB — the noise buries the ~1.5 dB inter-loop
+        # decline), so the classifier stays honest and says healthy
+        # rather than inventing a decline. No alarm either: the mean
+        # never reaches the 5 dB alarm threshold. The short-window
+        # mean is above the gate on every seed, so only the long
+        # route can produce the battery-sag verdicts.
+        expected = {1: "battery-sag", 2: "healthy", 3: "healthy",
+                    7: "healthy", 11: "battery-sag"}
         for seed in SEEDS:
             monitor = _classify(seed, "sag")
             result = monitor.classify("D")
-            self.assertEqual(result.verdict, "healthy", f"seed {seed}")
+            self.assertEqual(result.verdict, expected[seed],
+                             f"seed {seed}")
             self.assertGreater(result.mean_residual_db, -1.5,
                                f"seed {seed}")
             self.assertEqual(monitor.alarms(), [])
@@ -159,6 +165,41 @@ class MultifloorDriftMonitorTest(unittest.TestCase):
                       if c.id != "D"]
             self.assertTrue(all(c.verdict == "healthy" for c in others),
                             f"seed {seed}")
+
+    def test_three_loops_catch_the_slow_sag_on_every_seed(self):
+        # Longer history still: a third loop, and the window fills
+        # with drained readings until its mean crosses the sag gate
+        # on its own — the fix the v0.59.0 notes pointed at. With
+        # three loops the slow sag reads battery-sag on 5/5 seeds,
+        # and the other seven beacons stay healthy.
+        for seed in SEEDS:
+            monitor = DriftMonitor(BEACONS, window=CYCLE_WINDOW)
+            for step in _walk(seed, "sag", loops=3):
+                monitor.feed(step)
+            self.assertEqual(monitor.classify("D").verdict,
+                             "battery-sag", f"seed {seed}")
+            others = [c for c in monitor.classifications()
+                      if c.id != "D"]
+            self.assertTrue(all(c.verdict == "healthy" for c in others),
+                            f"seed {seed}")
+
+    def test_long_window_is_validated(self):
+        with self.assertRaises(ValueError):
+            DriftMonitor(BEACONS, long_window=0)
+        with self.assertRaises(ValueError):
+            DriftMonitor(BEACONS, window=20, long_window=10)
+        with self.assertRaises(ValueError):
+            DriftMonitor(BEACONS, history=100, long_window=200)
+
+    def test_fresh_keeps_the_long_window(self):
+        monitor = DriftMonitor(BEACONS, window=20, long_window=120)
+        fresh = monitor.fresh()
+        self.assertEqual(fresh._long_window, 120)
+        self.assertEqual(fresh._window, 20)
+
+    def test_long_window_default_is_the_full_history(self):
+        monitor = DriftMonitor(BEACONS, window=20)
+        self.assertEqual(monitor._long_window, 500)
 
     def test_moved_beacon_is_moved_on_three_of_five_seeds(self):
         # Seeds 1 and 2 are the honest misses: the own-floor

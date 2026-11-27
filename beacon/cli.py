@@ -157,7 +157,8 @@ def run_drift_classify(args: argparse.Namespace) -> int:
     # The single-floor demo keeps the default 20-reading window.
     monitor = DriftMonitor(
         beacons,
-        window=8 * args.steps if args.multifloor else DEFAULT_WINDOW)
+        window=8 * args.steps if args.multifloor else DEFAULT_WINDOW,
+        long_window=args.long_window)
     for step in steps:
         monitor.feed(step)
 
@@ -379,6 +380,13 @@ def main(argv=None) -> int:
                         "beacon's battery during the walk (0.3 per "
                         "hour, 120 s steps) so the classifier has a "
                         "real sag to find")
+    parser.add_argument("--long-window", type=int, default=None,
+                        metavar="N",
+                        help="with --drift-classify, readings per "
+                        "floor the classifier's long-history sag "
+                        "check consults — the slow-drift evidence "
+                        "the short window's mean cannot see "
+                        "(default: the full history)")
     parser.add_argument("--move-beacon", default=None,
                         metavar="ID:DX,DY",
                         help="with --drift-classify, simulate this "
