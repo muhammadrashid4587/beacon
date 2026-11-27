@@ -624,7 +624,15 @@ loops), not a sharper threshold. On a single pass
 with no revisits, the fallback catches the fast 1.2-per-hour sag
 on 4/5 seeds (seed 11's decline is buried in the noise: slope
 -0.05 dB per reading) and a beacon moved away from the ward
-reads like a steady offset, so it comes back `uncertain`.
+reads like a steady offset, so it comes back `uncertain`. A
+beacon moved towards the ward reads `moved` on a single pass on
+5/5 seeds, and a steady +6 dB offset reads `uncertain` on 5/5 —
+the fallback's moved call now needs the longer history to agree
+the spread is real, the same guard the revisit path got in
+v0.64.0 (see the v0.65.0 notes at the end): on seed 31 the
+offset's short window spreads 2.58 dB, over the moved gate, but
+its 40-reading history spreads only 2.23 dB, under the 2.34 dB
+the agreement needs.
 
 ## Deployment planner
 
@@ -2692,6 +2700,22 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   under the moved gate with a long spread that would pass the
   test, so a slightly unluckier noise draw could still misread
   it (see the v0.64.0 notes at the end).
+- The no-revisit fallback gets the same guard — done (v0.65.0):
+  the v0.64.0 agreement check only guarded the moved call that
+  has revisits to confirm against, but a single pass has no
+  revisits, so the fallback read the short window alone — and a
+  steady +6 dB offset's short window flukes above the moved gate
+  about one time in twenty, the same ~0.3 dB standard error on a
+  20-reading spread. On seed 31 it spreads 2.58 dB around a
+  +6 dB mean and read `moved`. The fallback now needs the longer
+  history to agree the spread is real, the same 1.5-standard-error
+  test over the expected noise: the offset's 40-reading history
+  spreads 2.23 dB, under the 2.34 dB the agreement needs, so it
+  reads `uncertain`, while a beacon moved towards the ward keeps
+  its `moved` on 5/5 seeds (long spread 2.53 to 2.92 dB). The
+  roadmap grows as new needs surface — the longer history
+  agreeing the spread is real on the no-revisit fallback is the
+  latest addition.
 
 ## Combined multi-device track export
 
@@ -3950,3 +3974,76 @@ the offset reads `uncertain` on 4/4 and the move reads `moved`
 on 4/4 at the default window on the tripled walk.
 The roadmap grows as new needs surface — the longer history
 agreeing the spread is real is the latest addition.
+
+## The no-revisit fallback needs the longer history too
+
+The v0.64.0 fix guarded the moved call that has revisits to
+confirm against, but a single pass has no revisits — the loop
+closes on itself, so only one pair matches — and the fallback
+read the short window alone. A steady positive offset's short
+window can fluke above the moved gate there just as it did on
+the tripled walk: a spread estimated from 20 readings carries
+a ~0.3 dB standard error, so pure noise clears the 2.5 dB gate
+about one time in twenty. The fix is the same design, applied
+to the fallback: when a longer history exists, the fallback
+moved call needs it to agree that the spread is real — the long
+window's spread must clear the expected 2 dB noise by at least
+1.5 standard errors, the same magnitude-plus-significance
+convention as the sag gates. On a single loop the long window
+holds all 40 readings against the short window's 20, so the
+agreement is a real second opinion, not the same readings twice.
+A moved beacon's spread survives it; a steady offset's settled
+spread sits at the noise level and the verdict falls through to
+`uncertain`. The verdict's reason cites the longer history it
+rests on, and the reported mean, spread, delta and pair count
+stay the short window's — the same convention as the
+long-history sag and moved verdicts. When the long window holds
+no more readings than the short one — a walk shorter than the
+window — it says nothing the short window has not already said,
+and the call reads the short window alone.
+
+```python
+from beacon import Beacon, DriftMonitor
+from beacon.simulate import rectangular_walk, simulate_walk
+
+beacons = [Beacon("A", 0, 0), Beacon("B", 20, 0),
+           Beacon("C", 20, 12), Beacon("D", 0, 12)]
+steps = simulate_walk(rectangular_walk(20, 12, 10), beacons,
+                      noise_db=2.0, seed=31)
+for step in steps:
+    step["rssi"]["D"] += 6.0   # a steady +6 dB offset, one loop
+monitor = DriftMonitor(beacons)
+for step in steps:
+    monitor.feed(step)
+monitor.classify("D").verdict   # "uncertain", was "moved" before the fix
+```
+
+Measured behaviour (v0.65.0): 2 dB RSSI noise, beacon D,
+seeds 1, 2, 3, 7, 11 — the other beacons stay `healthy` in
+every scenario:
+
+| walk | verdicts |
+|---|---|
+| single loop, D steady +6 dB offset | `uncertain` 5/5, and `uncertain` on all 20 seeds scanned (1, 2, 3, 7, 11, 5, 13, 17, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71) — seed 31 used to read `moved`: short-window spread still 2.58 dB, but the 40-reading history spreads only 2.23 dB, under the 2.34 dB the agreement needs |
+| single loop, D moved (0, 12) to (5, 7) | `moved` 5/5, unchanged (long spread 2.53 to 2.92 dB, and the reason cites the longer history) |
+| single loop, D steady -6 dB offset | `uncertain` 5/5, unchanged (the fallback requires a positive mean, so a negative offset never reaches it) |
+| single loop, healthy | `healthy` 5/5, unchanged |
+
+The fix is honest about its margin, and it is thin. The
+offset's long spread clears the noise test by only 0.11 dB on
+seed 31 (2.23 dB against a 2.34 dB gate), and the moved
+beacon's long spread clears it by only 0.19 dB on seed 11
+(2.53 dB against the same gate) — a slightly unluckier noise
+draw on either side could still flip a verdict, and only more
+history would settle it. Extra seeds 5, 13, 17, 23, 29, 37,
+41, 43, 47, 53, 59, 61, 67 and 71, measured after the fix,
+agree: the offset reads `uncertain` on 15/15 and the move
+reads `moved` on 14/15 — seed 17's move stays `uncertain`,
+but that is the pre-existing short-spread miss (2.44 dB,
+0.06 dB under the gate), not the new guard: its long spread
+is 2.30 dB, 0.04 dB under the agreement gate too, so the two
+gates agree the move is not visible on that draw, and a third
+loop — revisits — is what would settle it.
+The roadmap grows as new needs surface — the longer history
+agreeing the spread is real on the no-revisit fallback is the
+latest addition.

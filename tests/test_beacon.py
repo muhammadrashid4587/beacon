@@ -1700,6 +1700,75 @@ class TestDriftClassification(unittest.TestCase):
         self.assertIn(monitor.classify("D").verdict,
                       ("healthy", "uncertain"))
 
+    def test_single_loop_positive_offset_is_uncertain(self):
+        # One loop only, no revisits: a steady +6 dB offset reads
+        # louder from the first reading, so the no-revisit moved
+        # fallback is the only moved path that can fire — and it
+        # used to fire on a noise fluke. Seed 31's 20-reading
+        # window spreads 2.58 dB, 0.08 dB over the moved gate,
+        # around a +6 dB mean, and read "moved" before the fix;
+        # its 40-reading history spreads only 2.23 dB, under the
+        # 2.34 dB the longer history must clear (2 dB noise plus
+        # 1.5 standard errors over 40 readings), so the fallback
+        # now needs that agreement and the offset reads
+        # "uncertain" — the same guard v0.64.0 gave the revisit
+        # path, which the fallback never had.
+        for seed in (1, 2, 3, 7, 11, 31):
+            loop = rectangular_walk(20.0, 12.0, 10)
+            steps = simulate_walk(loop, BEACONS, noise_db=2.0,
+                                  seed=seed)
+            for step in steps:
+                step["rssi"]["D"] += 6.0
+            monitor = DriftMonitor(BEACONS)
+            for step in steps:
+                monitor.feed(step)
+            result = monitor.classify("D")
+            self.assertEqual(result.verdict, "uncertain", seed)
+            self.assertGreater(result.mean_residual_db, 5.0, seed)
+            self.assertIsNotNone(monitor.alarm("D"))
+            for other in ("A", "B", "C"):
+                self.assertEqual(monitor.classify(other).verdict,
+                                 "healthy", (seed, other))
+        # The pin against the pre-fix behaviour: seed 31's short
+        # window really does clear the moved gate, so without the
+        # longer-history agreement this verdict would be "moved".
+        loop = rectangular_walk(20.0, 12.0, 10)
+        steps = simulate_walk(loop, BEACONS, noise_db=2.0, seed=31)
+        for step in steps:
+            step["rssi"]["D"] += 6.0
+        monitor = DriftMonitor(BEACONS)
+        for step in steps:
+            monitor.feed(step)
+        result = monitor.classify("D")
+        self.assertGreater(result.residual_std_db, 2.5)
+        self.assertEqual(result.verdict, "uncertain")
+
+    def test_single_loop_moved_beacon_still_moved(self):
+        # The guard must not veto a real move: on one loop D
+        # displaced from (0, 12) to (5, 7) reads louder on
+        # average with a position-dependent spread, and the
+        # longer 40-reading history agrees on every seed — its
+        # spread is 2.53 to 2.92 dB against the 2.34 dB the
+        # agreement needs, so the fallback still fires, and the
+        # reason cites the longer history it rests on.
+        moved = [Beacon(b.id, b.x, b.y) for b in BEACONS]
+        moved[3] = Beacon("D", 5.0, 7.0)
+        for seed in (1, 2, 3, 7, 11):
+            loop = rectangular_walk(20.0, 12.0, 10)
+            steps = simulate_walk(loop, moved, noise_db=2.0,
+                                  seed=seed)
+            monitor = DriftMonitor(BEACONS)
+            for step in steps:
+                monitor.feed(step)
+            result = monitor.classify("D")
+            self.assertEqual(result.verdict, "moved", seed)
+            self.assertGreater(result.mean_residual_db, 1.5, seed)
+            self.assertGreater(result.residual_std_db, 2.5, seed)
+            self.assertIn("longer", result.reason, seed)
+            for other in ("A", "B", "C"):
+                self.assertEqual(monitor.classify(other).verdict,
+                                 "healthy", (seed, other))
+
     def test_fixed_position_decline_classifies_as_sag(self):
         # No walk at all: a reference tag at one fixed spot hears
         # D fade 0.3 dB per reading. Revisits are exact (same spot

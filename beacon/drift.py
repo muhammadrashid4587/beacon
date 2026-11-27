@@ -82,7 +82,11 @@ signatures in the residuals, so ``classify`` names the cause:
   at least 1.5 standard errors, the same convention as the sag
   gates. A moved beacon's spread survives the longer history; a
   noise fluke settles to the noise level and the verdict falls
-  through to ``uncertain`` instead.
+  through to ``uncertain`` instead. The same guard applies to the
+  no-revisit fallback: a steady positive offset's short window can
+  fluke above the moved gate on a single pass too (2.58 dB on seed
+  31, where its 40-reading history spreads only 2.23 dB), so the
+  fallback call needs the longer history to agree as well.
 - **noisy**: the residual spread is more than twice the expected
   RSSI noise (``noise_db``, 2 dB by default, so above 4 dB) with
   no coherent time trend — the beacon is still roughly calibrated
@@ -962,19 +966,20 @@ class DriftMonitor:
         # short window is a noisy estimate — 20 readings carry a
         # ~0.3 dB standard error — so a steady offset's short
         # window can fluke above the gate while its settled spread
-        # sits at the noise level: on the tripled two-floor walk
-        # the offset's short spread is 2.70 dB on seed 1 but its
-        # 120-reading history spreads only 2.09 dB, 0.70 standard
-        # errors above the 2 dB noise. When a longer history
-        # exists, the short-window call needs it to agree that the
+        # sits at the noise level: on a single loop the offset's
+        # short spread is 2.58 dB on seed 31 but its 40-reading
+        # history spreads only 2.23 dB. When a longer history
+        # exists, the fallback call needs it to agree that the
         # spread is real excess over the expected noise (at least
         # 1.5 standard errors above it, the same convention as
-        # the sag gates) — a moved beacon's spread survives the
-        # longer history, a noise fluke does not, and the verdict
-        # falls through to uncertain instead. When the long window
-        # holds no more readings than the short one, it says
-        # nothing the short window has not already said, and the
-        # call reads the short window alone.
+        # the sag gates) — the same guard v0.64.0 gave the
+        # revisit path, which this fallback never had. A moved
+        # beacon's spread survives the longer history, a noise
+        # fluke does not, and the verdict falls through to
+        # uncertain instead. When the long window holds no more
+        # readings than the short one, it says nothing the short
+        # window has not already said, and the call reads the
+        # short window alone.
         if std > MOVED_STD_MIN_DB and abs(mean) > MOVED_MEAN_MIN_DB:
             if pairs >= 5:
                 if delta is not None and abs(delta) < 1.0:
@@ -996,12 +1001,22 @@ class DriftMonitor:
                                 f"{self._noise_db:.2f} dB noise")
                         return result("moved", reason)
             elif mean > MOVED_MEAN_MIN_DB:
-                return result(
-                    "moved",
-                    f"residuals spread {std:.2f} dB around a "
-                    f"{mean:+.2f} dB mean with no steady decline "
-                    "— no revisits to confirm against, so a "
-                    "power change cannot be ruled out")
+                if (len(long_window) <= samples
+                        or _spread_above_noise(
+                            long_std, len(long_window),
+                            self._noise_db)):
+                    reason = (
+                        f"residuals spread {std:.2f} dB around a "
+                        f"{mean:+.2f} dB mean with no steady decline "
+                        "— no revisits to confirm against, so a "
+                        "power change cannot be ruled out")
+                    if len(long_window) > samples:
+                        reason += (
+                            f", and the longer "
+                            f"{len(long_window)}-reading history "
+                            f"spreads {long_std:.2f} dB, above the "
+                            f"{self._noise_db:.2f} dB noise")
+                    return result("moved", reason)
 
         # Moved, over the longer history: the short window's spread
         # is an estimate from few readings, and a move whose spread
