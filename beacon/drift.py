@@ -110,7 +110,11 @@ if the battery is draining. Without revisits the classifier falls
 back to the within-window trend (a strong monotonic decline, or a
 second half of the window much weaker than the first), which
 catches a fast sag most of the time but cannot rule a move out;
-the verdict's reason says which evidence was used.
+the verdict's reason says which evidence was used. The fallback
+needs the level to have fallen across the walk too — the same
+-1.0 dB, 1.5-standard-error drop gate as the revisit path —
+since a steady offset's within-window slope can fluke below the
+trend gate on a single pass while its level stays flat.
 
 On a multi-floor walk the rolling window is per floor, not one
 window per beacon: the classifier's evidence is the window, and a
@@ -861,7 +865,15 @@ class DriftMonitor:
         # standard errors from zero, the same convention as the
         # delta gate. A beacon whose drop does not clear the gate
         # falls through to the checks below instead of being
-        # called a sag.
+        # called a sag. The fallback had no such gate until
+        # v0.66.0: a steady offset's within-window slope can fluke
+        # below the trend gate on a single pass (seed 13: -0.202
+        # dB per reading) while its level only falls 0.45 dB, so
+        # it read battery-sag. The same drop gate now guards the
+        # fallback too — a sag is a process, an offset is a level,
+        # with or without revisits. When the history is too short
+        # to split into quarters the drop is null and the fallback
+        # stays silent, the same convention as the revisit path.
         if mean < SAG_MEAN_MAX_DB:
             if pairs >= 5:
                 if (delta is not None and delta_se is not None
@@ -879,13 +891,18 @@ class DriftMonitor:
                         f"the last quarter of the history — the "
                         "beacon reads weaker at the same place "
                         "over time, and keeps falling")
-            elif (slope <= SAG_SLOPE_MAX_DB_PER_STEP
-                    or half_delta <= SAG_HALF_DELTA_MAX_DB):
+            elif ((slope <= SAG_SLOPE_MAX_DB_PER_STEP
+                    or half_delta <= SAG_HALF_DELTA_MAX_DB)
+                    and drop is not None and drop_se is not None
+                    and drop < SAG_DROP_MAX_DB
+                    and drop < SAG_DROP_MIN_T * drop_se):
                 return result(
                     "battery-sag",
                     f"mean residual {mean:.2f} dB and the residual "
                     f"falls {slope:.2f} dB per reading within the "
-                    "window — no revisits to confirm against, so "
+                    "window and the level fell {drop:.2f} dB from "
+                    "the first quarter to the last quarter of the "
+                    "history — no revisits to confirm against, so "
                     "a move cannot be ruled out")
 
         # Noise: spread more than twice the expected RSSI noise,

@@ -624,7 +624,14 @@ loops), not a sharper threshold. On a single pass
 with no revisits, the fallback catches the fast 1.2-per-hour sag
 on 4/5 seeds (seed 11's decline is buried in the noise: slope
 -0.05 dB per reading) and a beacon moved away from the ward
-reads like a steady offset, so it comes back `uncertain`. A
+reads like a steady offset, so it comes back `uncertain`. The
+fallback's sag call now needs the level to have fallen across
+the walk too — the same -1.0 dB, 1.5-standard-error drop gate as
+the revisit path (see the v0.66.0 notes at the end): a steady
+-6 dB offset's within-window slope flukes below the trend gate
+on seed 13 (-0.202 dB per reading) while its level only falls
+0.45 dB, so it used to read `battery-sag` and now reads
+`uncertain`. A
 beacon moved towards the ward reads `moved` on a single pass on
 5/5 seeds, and a steady +6 dB offset reads `uncertain` on 5/5 —
 the fallback's moved call now needs the longer history to agree
@@ -2712,10 +2719,23 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   test over the expected noise: the offset's 40-reading history
   spreads 2.23 dB, under the 2.34 dB the agreement needs, so it
   reads `uncertain`, while a beacon moved towards the ward keeps
-  its `moved` on 5/5 seeds (long spread 2.53 to 2.92 dB). The
-  roadmap grows as new needs surface — the longer history
-  agreeing the spread is real on the no-revisit fallback is the
-  latest addition.
+  its `moved` on 5/5 seeds (long spread 2.53 to 2.92 dB).
+- The no-revisit sag fallback gets the level-drop gate — done
+  (v0.66.0): the v0.63.0 level-drop check guarded the sag call
+  that has revisits to confirm against, but the no-revisit
+  fallback read the within-window trend alone — and a steady
+  -6 dB offset's slope flukes below the -0.15 dB-per-reading
+  trend gate about one time in fifty, the same noise that fakes
+  a revisit decline on the two-loop walk. On seed 13 it slopes
+  -0.202 dB per reading and read `battery-sag`. The fallback
+  now needs the same drop the revisit path needs — the mean of
+  the last quarter of the history at least 1.0 dB below the
+  first, at least 1.5 standard errors from zero: the offset's
+  level only falls 0.45 dB, so it reads `uncertain`, while the
+  fast sag's level falls 2.47 to 4.67 dB and keeps its
+  `battery-sag` on 4/5 seeds. The roadmap grows as new needs
+  surface — the level-drop gate on the no-revisit sag fallback
+  is the latest addition.
 
 ## Combined multi-device track export
 
@@ -4047,3 +4067,72 @@ loop — revisits — is what would settle it.
 The roadmap grows as new needs surface — the longer history
 agreeing the spread is real on the no-revisit fallback is the
 latest addition.
+
+The v0.65.0 fix guarded the fallback's moved call, but its sag
+call still read the within-window trend alone — and a steady
+offset's slope can fluke below the trend gate on a single pass
+just as its spread can fluke above the moved gate. On seed 13
+the steady -6 dB offset slopes -0.202 dB per reading, past the
+-0.15 gate, around a -5.59 dB mean, and read `battery-sag` — a
+level misread as a process, because the trend gate only asks
+whether the window declines, never whether the level actually
+fell. The fix is the same design, applied to the other half of
+the fallback: the sag call now needs the level-drop gate the
+revisit path got in v0.63.0 — the mean of the last quarter of
+the history at least 1.0 dB below the mean of the first, at
+least 1.5 standard errors from zero. On a single loop the long
+window holds all 40 readings against the short window's 20, so
+the drop is a real second opinion, not the same readings twice:
+the offset's level only falls 0.45 dB on seed 13, 0.51 standard
+errors from zero, so the fallback stays silent and the verdict
+falls through to `uncertain`. The reason cites the drop the
+call rests on, and the reported mean, slope, delta and pair
+count stay the short window's — the same convention as the
+long-history sag and moved verdicts. When the history is too
+short to split into quarters the drop is null and the fallback
+stays silent, the same convention as the revisit path.
+
+```python
+from beacon import Beacon, DriftMonitor
+from beacon.simulate import rectangular_walk, simulate_walk
+
+beacons = [Beacon("A", 0, 0), Beacon("B", 20, 0),
+           Beacon("C", 20, 12), Beacon("D", 0, 12)]
+steps = simulate_walk(rectangular_walk(20, 12, 10), beacons,
+                      noise_db=2.0, seed=13)
+for step in steps:
+    step["rssi"]["D"] -= 6.0   # a steady -6 dB offset, one loop
+monitor = DriftMonitor(beacons)
+for step in steps:
+    monitor.feed(step)
+monitor.classify("D").verdict   # "uncertain", was "battery-sag" before the fix
+```
+
+Measured behaviour (v0.66.0): 2 dB RSSI noise, beacon D,
+seeds 1, 2, 3, 7, 11 — the other beacons stay `healthy` in
+every scenario:
+
+| walk | verdicts |
+|---|---|
+| single loop, D steady -6 dB offset | `uncertain` 5/5, and `uncertain` on all 50 seeds scanned (1–50) — seed 13 used to read `battery-sag`: its slope is still -0.202 dB per reading, but its level only falls 0.45 dB, under the 1.0 dB the gate needs |
+| single loop, D fast sag 1.2/hr | `battery-sag` 4/5, unchanged (level falls 2.47 to 4.67 dB; seed 11's decline is buried in the noise, slope -0.05 dB per reading, and stays `healthy`) |
+| single loop, D steady +6 dB offset | `uncertain` 5/5, unchanged (the v0.65.0 moved guard still holds) |
+| single loop, D moved (0, 12) to (5, 7) | `moved` 5/5, unchanged |
+| single loop, healthy | `healthy` 5/5, unchanged |
+
+The fix is honest about its margin, and it is thin. The fast
+sag's drop clears the significance gate by only 0.02 standard
+errors on seed 3 (-2.92 dB at 1.52 standard errors from zero),
+so a slightly unluckier noise draw on that seed could veto a
+real sag — the same knife-edge the revisit path carries on
+seed 11, where the moved beacon's long revisit delta sits
+0.004 dB inside its gate. No statistic in the window can tell
+a real decline from that fluke; the fix is a longer history
+(more loops), not a sharper threshold. Extra seeds 8, 38 and
+45, measured after the fix, show the gate is a veto, not a
+trigger: their offset levels fall 1.15 to 2.36 dB, past the
+drop gate, but their within-window trends sit above the trend
+gates, so they stay `uncertain` — the drop alone never calls
+a sag.
+The roadmap grows as new needs surface — the level-drop gate
+on the no-revisit sag fallback is the latest addition.

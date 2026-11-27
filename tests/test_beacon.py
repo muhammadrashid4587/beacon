@@ -1700,6 +1700,70 @@ class TestDriftClassification(unittest.TestCase):
         self.assertIn(monitor.classify("D").verdict,
                       ("healthy", "uncertain"))
 
+    def test_no_revisit_sag_fallback_needs_level_drop(self):
+        # One loop only, no revisits: a steady -6 dB offset reads
+        # weak from the first reading and stays flat — a level,
+        # not a process — but its within-window slope can still
+        # fluke below the trend gate on a single pass. Seed 13
+        # slopes -0.202 dB per reading, past the -0.15 gate, and
+        # read "battery-sag" before the fix; its level only falls
+        # 0.45 dB from the first quarter to the last, so the
+        # level-drop gate vetoes it now. The other canonical
+        # seeds never fired the trend gate, but the gate is what
+        # keeps the offset uncertain on every seed, not luck.
+        for seed in (1, 2, 3, 7, 11, 13):
+            loop = rectangular_walk(20.0, 12.0, 10)
+            steps = simulate_walk(loop, BEACONS, noise_db=2.0,
+                                  seed=seed)
+            for step in steps:
+                step["rssi"]["D"] -= 6.0
+            monitor = DriftMonitor(BEACONS)
+            for step in steps:
+                monitor.feed(step)
+            result = monitor.classify("D")
+            self.assertEqual(result.verdict, "uncertain", seed)
+            self.assertIsNotNone(monitor.alarm("D"), seed)
+            self.assertIsNotNone(result.level_drop_db, seed)
+        # The pin against the pre-fix behaviour: seed 13's slope
+        # really does clear the trend gate, so without the
+        # level-drop gate this verdict would be "battery-sag".
+        loop = rectangular_walk(20.0, 12.0, 10)
+        steps = simulate_walk(loop, BEACONS, noise_db=2.0, seed=13)
+        for step in steps:
+            step["rssi"]["D"] -= 6.0
+        monitor = DriftMonitor(BEACONS)
+        for step in steps:
+            monitor.feed(step)
+        result = monitor.classify("D")
+        self.assertLessEqual(result.time_slope_db_per_step, -0.15)
+        self.assertGreater(result.level_drop_db, -1.0)
+        self.assertEqual(result.verdict, "uncertain")
+
+    def test_no_revisit_sag_fallback_drop_gate_passes_real_sag(self):
+        # The gate must not veto a real fast sag: on a single
+        # pass the 1.2-per-hour drain's level falls 2.47 to
+        # 4.67 dB from the first quarter to the last on seeds 1,
+        # 2, 3 and 7 — well past the -1.0 dB gate — so the
+        # fallback still fires, and the reason cites the drop it
+        # rests on. Seed 3 is the thin one: its drop is only 1.52
+        # standard errors from zero, 0.02 past the gate, so a
+        # slightly unluckier noise draw could still veto it —
+        # the same knife-edge the revisit path carries on seed 11.
+        for seed in (1, 2, 3, 7):
+            steps = simulate_walk(rectangular_walk(20.0, 12.0, 10),
+                                  BEACONS, noise_db=2.0, seed=seed,
+                                  batteries={"D": BatteryModel(
+                                      drain_rate_per_hour=1.2)},
+                                  step_seconds=120.0)
+            monitor = DriftMonitor(BEACONS)
+            for step in steps:
+                monitor.feed(step)
+            result = monitor.classify("D")
+            self.assertEqual(result.verdict, "battery-sag", seed)
+            self.assertIsNotNone(result.level_drop_db, seed)
+            self.assertLess(result.level_drop_db, -1.0, seed)
+            self.assertIn("level fell", result.reason, seed)
+
     def test_single_loop_positive_offset_is_uncertain(self):
         # One loop only, no revisits: a steady +6 dB offset reads
         # louder from the first reading, so the no-revisit moved
