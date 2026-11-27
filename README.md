@@ -559,9 +559,10 @@ time and position are confounded (the device walks from one side
 of the ward to the other as the battery drains), so a declining
 residual could be either a sag or a move. Walk the loop twice
 and the two come apart. Without revisits the classifier falls
-back to the within-window trend — a strong monotonic decline, or
-a second half much weaker than the first — which catches a fast
-sag most of the time but cannot rule a move out, and the reason
+back to the trend over the longer history — a strong monotonic
+decline, or a second half of the history much weaker than the
+first — which catches a fast sag about half the time on a single
+pass (50/100 seeds) but cannot rule a move out, and the reason
 says which evidence was used. And the revisit delta alone is not
 enough for a sag: a noise excursion in the tail of the walk can
 fake a decline at revisited spots, so the sag call also requires
@@ -3752,8 +3753,8 @@ hardcoded two loops. It takes `--loops N` now, walking the
 loop N times instead of twice (the default is still 2, so the
 existing demo is unchanged), on the single-floor loop and the
 two-floor ward alike. One loop has no revisits, so the
-classifier falls back to the within-window trend and cannot
-rule a move out; fewer than one loop is rejected.
+classifier falls back to the trend over the longer history and
+cannot rule a move out; fewer than one loop is rejected.
 
 ```sh
 python3 -m beacon.cli --drift-classify --multifloor --seed 7 --battery-degrade D --loops 3
@@ -4517,3 +4518,112 @@ single-loop offset misreads (2 of 100 seeds, through the
 fallback path this fix deliberately leaves alone).
 The roadmap grows as new needs surface — the decline
 having to be there late is the latest addition.
+
+## The fallback trend reads the longer history alone
+
+The v0.70.0 notes left two open problems: the remaining
+late-cliff misreads (seeds 33, 97, 12), and the single-loop
+offset misreads (2 of 100 seeds, through the fallback
+path). The first one has no fix on this evidence; the
+second one does.
+
+The late cliffs first, measured before anything was
+changed. Ten candidate discriminators were tried against
+the three misreads on three loops, seeds 1–100 and
+out-of-sample 101–200, noisy beacon against the true slow
+sag — and none separates without costing real detections:
+
+- The decline in the first revisit round (the mean revisit
+  delta for pairs whose later visit is in the middle loop):
+  seeds 33 and 97 show none (+0.02 and +0.36 dB) while
+  every true sag in-sample shows at least -0.59 dB — but
+  out of sample a true sag (seed 164) shows +0.11 dB while
+  the out-of-sample misread (seed 124) shows -1.81 dB.
+  Repairs 2 in-sample, costs 4 true sags out-of-sample,
+  repairs none out-of-sample.
+- The median pair delta: seed 97's is -0.35 dB against the
+  true sags' -0.52 dB — a 0.02 dB margin, a fit to the
+  noise, and it repairs only 97.
+- The fraction of pairs below -1 dB: the misreads sit at
+  0.46 to 0.60, the true sags at 0.44 and up — no cut.
+- The late split (last sixth against the fifth sixth):
+  costs 28 true sags.
+- The gap-difference (long-gap pairs minus short-gap
+  pairs): the misreads sit at -3.82, -1.99 and -2.02 dB,
+  inside the true sags' range (median -2.67 dB).
+- The gap slope (pair delta against the time gap between
+  visits): the misreads sit at +0.0039, -0.0955 and
+  -0.0495 dB per reading, inside the true sags' range
+  (up to +0.02).
+- The spread growth (late-third spread minus middle-third
+  spread): the misreads sit at +0.81, +0.55 and -0.63 dB,
+  against the true sags' minimum of -0.67 dB — no cut.
+- The short window's own pair median: repairs only the
+  out-of-sample misread (+0.31 dB) and costs one true sag
+  in-sample and one out-of-sample.
+- The short window's pair fraction below -1 dB: the
+  misreads sit at 0.50 to 0.55, with two of them at
+  exactly 0.50, and the cut costs true sags on both
+  samples.
+- The short window's slope: the misreads sit at -0.066,
+  +0.079 and +0.059 dB per reading, inside the true sags'
+  range (90th percentile +0.15 dB).
+
+Seed 12 is the worst of the three: it looks like a sag on
+every statistic — median pair delta -3.61 dB, first-round
+delta -3.36 dB, second-round -2.39 dB, late split -2.18 dB —
+because its excursion spans the whole walk, not one
+interval. And the misreads are not an in-sample artefact:
+seed 124, out of sample, reads `battery-sag` on three
+loops with a late decline of -2.41 dB, a revisit delta of
+-3.62 dB over 20 pairs and a level drop of -2.39 dB —
+every number a true slow sag also produces. The late
+cliffs stand as the honest limit: a noise excursion that
+happens to fall late and keep falling is, on this
+evidence, a sag.
+
+The single-loop offset misreads do have a fix, and it is
+the same guard the moved fallback got in v0.65.0: the
+longer history has to agree. A steady offset's short slope
+flukes below the trend gate on seeds 57 and 84 (-0.167
+and -0.155 dB per reading) while its 40-reading history
+stays flat (long slopes -0.026 and -0.052), so the
+fallback now reads the trend from the longer history
+alone, at the same gates — the window's trend on its own
+is not evidence of a process. Requiring the window's
+trend as well was measured and rejected: it repairs one
+more offset (seed 144, whose step sits mid-walk so its
+long half is -1.87 dB) and costs the sags that only show
+across the full history — three fast sags in-sample that
+fire through the long terms alone, and two more slow sags
+out of sample — so the gate stays long-only, and seed 144
+remains the single-loop offset misread.
+
+Measured behaviour (v0.71.0): 2 dB RSSI noise, beacon D,
+single loop — the other beacons stay `healthy` in every
+scenario, on all 100 seeds:
+
+| walk | verdicts, seeds 1–100 | verdicts, seeds 101–200 |
+|---|---|---|
+| D steady -6 dB offset | `uncertain` 100 (was `uncertain` 98, `battery-sag` 2) | `uncertain` 99, `battery-sag` 1 (was `uncertain` 97, `battery-sag` 3) |
+| D fast sag, 1.2/hr | `battery-sag` 49, `healthy` 30, `noisy` 20, `uncertain` 1 (was `battery-sag` 50, `healthy` 29) | `battery-sag` 61, `healthy` 21, `uncertain` 5, `noisy` 13 — unchanged |
+| D slow sag, 0.3/hr | `battery-sag` 1, `healthy` 99 — unchanged | `battery-sag` 3, `healthy` 95, `uncertain` 2 (was `battery-sag` 4, `healthy` 94) |
+
+The gate's cost is two true sags, both on the single-loop
+fallback path: seed 87's fast sag reads `healthy` in-sample
+(its long slope is -0.097 dB per reading and its long half
+-0.48 dB, so the fallback stays silent — its drop of
+-2.46 dB still clears the level gate, so the long trend is
+the only thing vetoing it), and seed 185's slow sag reads
+`healthy` out-of-sample (long slope -0.069, long half
+-1.37 dB, 0.13 dB above the half gate). Four offset
+misreads repaired against two true sags lost, and the
+three-loop tallies are unchanged — the gate only touches
+the no-revisit fallback, which never fires once revisits
+exist. The next item is the late cliffs themselves, which
+no statistic on this evidence separates, and the
+single-loop slow sag, still barely detected (1/100
+in-sample) — the fallback's own limit, not a gate to tune.
+The roadmap grows as new needs surface — the longer
+history alone carrying the fallback's trend is the latest
+addition.

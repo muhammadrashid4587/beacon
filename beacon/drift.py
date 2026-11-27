@@ -123,11 +123,16 @@ from one side of the ward to the other as the battery drains), so
 a declining residual could be either. Walk the loop twice and the
 two come apart — the same spot, an hour later, reads weaker only
 if the battery is draining. Without revisits the classifier falls
-back to the within-window trend (a strong monotonic decline, or a
-second half of the window much weaker than the first), read from
-the window and from the longer history, which catches a fast sag
-about half the time on a single pass (50/100 seeds) but cannot
-rule a move out; the verdict's reason says which evidence was used. The fallback
+back to the trend over the longer history (a strong monotonic
+decline, or a second half of the history much weaker than the
+first), which catches a fast sag about half the time on a single
+pass (50/100 seeds) but cannot rule a move out; the verdict's
+reason says which evidence was used. The trend used to be read
+from the 20-reading window as well, but a noise fluke in the
+tail can clear the window's trend while the 40-reading history
+stays flat, so the window's trend on its own is not evidence of
+a process — the fallback reads the longer history alone now
+(see the v0.71.0 notes at the end). The fallback
 needs the level to have fallen across the walk too — the same
 -1.0 dB, 1.5-standard-error drop gate as the revisit path —
 since a steady offset's within-window slope can fluke below the
@@ -1002,9 +1007,6 @@ class DriftMonitor:
         steps = list(range(samples))
         slope = _slope(steps, residuals)
         correlation = _correlation(steps, residuals)
-        half = samples // 2
-        half_delta = (_mean(residuals[half:]) - _mean(residuals[:half])
-                      if half else 0.0)
         delta, delta_se, pairs = self._revisit_delta(beacon_id, floor,
                                                      window)
         # The level drop across the floor's long history — the
@@ -1029,18 +1031,20 @@ class DriftMonitor:
 
         # The trend over the floor's long history — the same
         # readings as the rolling window, kept longer. The
-        # fallback's trend gate used to read the 20-reading
-        # window alone, and a real decline can hide in it while
-        # showing across the full history: on a single loop the
-        # long window holds all 40 readings (24 when the beacon
-        # goes dark mid-walk) against the short window's 20, so
-        # the long trend is a real second opinion, not the same
-        # readings twice — the same design as the level drop,
-        # which already reads the long window. The reported mean,
-        # slope, delta and pair count stay the short window's —
-        # the same convention as the long-history sag and moved
-        # verdicts — and the reason says which history the trend
-        # rests on.
+        # fallback's trend gate reads it, not the 20-reading
+        # window alone: a real decline can hide in the window
+        # while showing across the full history, and a noise
+        # fluke in the last 20 readings can clear the window's
+        # trend while the 40-reading history stays flat — on a
+        # single loop the long window holds all 40 readings
+        # (24 when the beacon goes dark mid-walk) against the
+        # short window's 20, so the long trend is a real second
+        # opinion, not the same readings twice — the same design
+        # as the level drop, which already reads the long
+        # window. The reported mean, slope, delta and pair count
+        # stay the short window's — the same convention as the
+        # long-history sag and moved verdicts — and the reason
+        # says the trend rests on the longer history.
         long_trend_residuals = [entry[4] for entry in long_window]
         long_slope = _slope(list(range(len(long_trend_residuals))),
                             long_trend_residuals)
@@ -1068,12 +1072,21 @@ class DriftMonitor:
 
         # Battery sag: weaker overall, and falling at the same spot.
         # With revisits the delta is the evidence; without them the
-        # trend has to carry it — read from the window and from the
-        # longer history, since a real decline can hide in the
-        # 20-reading window while showing across the full history
-        # (on a single loop the long window holds all 40 readings
-        # against the short window's 20) — and a move cannot be
-        # ruled out, so the reason says so. Either way the level
+        # trend has to carry it — read from the longer history
+        # alone, at the same gates the window used to be judged
+        # by. A noise fluke in the last 20 readings can clear
+        # the window's trend while the 40-reading history stays
+        # flat — a steady offset's short slope flukes to -0.167
+        # and -0.155 dB per reading on seeds 57 and 84 while its
+        # long slope sits at -0.026 and -0.052 — so the window's
+        # trend on its own is not evidence of a process. Requiring
+        # the window's trend too was measured and rejected: it
+        # costs the sags that only show across the full history —
+        # three fast sags in-sample that fire through the long
+        # terms alone, and two more slow sags out of sample — for
+        # one more offset repair (seed 144), so the gate is the
+        # long trend, not both. A move cannot be ruled out, so
+        # the reason says so. Either way the level
         # must actually have fallen across the walk: the revisit
         # delta alone can be faked by a noise excursion in the
         # tail of the walk (the steady-offset seed 11, whose
@@ -1131,30 +1144,20 @@ class DriftMonitor:
                         f"{late_decline:.2f} dB in the late interval "
                         f"— the beacon reads weaker at the same place "
                         "over time, and keeps falling")
-            elif ((slope <= SAG_SLOPE_MAX_DB_PER_STEP
-                    or half_delta <= SAG_HALF_DELTA_MAX_DB
-                    or long_slope <= SAG_SLOPE_MAX_DB_PER_STEP
+            elif ((long_slope <= SAG_SLOPE_MAX_DB_PER_STEP
                     or long_half_delta <= SAG_HALF_DELTA_MAX_DB)
                     and drop is not None and drop_se is not None
                     and drop < SAG_DROP_MAX_DB
                     and drop < SAG_DROP_MIN_T * drop_se):
-                if (slope <= SAG_SLOPE_MAX_DB_PER_STEP
-                        or half_delta <= SAG_HALF_DELTA_MAX_DB):
-                    trend_scope = "within the window"
-                    trend_slope = slope
-                else:
-                    trend_scope = (
-                        f"over the longer "
-                        f"{len(long_window)}-reading history")
-                    trend_slope = long_slope
                 return result(
                     "battery-sag",
                     f"mean residual {mean:.2f} dB and the residual "
-                    f"falls {trend_slope:.2f} dB per reading "
-                    f"{trend_scope} and the level fell {drop:.2f} dB "
-                    f"from the first quarter to the last quarter of "
-                    f"the history — no revisits to confirm against, "
-                    f"so a move cannot be ruled out")
+                    f"falls {long_slope:.2f} dB per reading over the "
+                    f"longer {len(long_window)}-reading history and "
+                    f"the level fell {drop:.2f} dB from the first "
+                    f"quarter to the last quarter of the history — "
+                    f"no revisits to confirm against, so a move "
+                    f"cannot be ruled out")
 
         # The long window was already read above, for the level
         # drop — the same readings as the rolling window, kept

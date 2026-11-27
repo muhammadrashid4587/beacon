@@ -116,7 +116,7 @@ def run_drift_classify(args: argparse.Namespace) -> int:
     where the long window's spread settles above the moved gate
     that the short window's estimate just misses. One
     loop has no revisits, so the classifier falls back to the
-    within-window trend and cannot rule a move out.
+    trend over the longer history and cannot rule a move out.
     """
     loops = args.loops if args.loops is not None else 2
     if loops < 1:
