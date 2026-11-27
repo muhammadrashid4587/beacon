@@ -142,14 +142,16 @@ default the full history — and the sag check consults it: a
 strongly negative revisit delta over the long window, with the
 beacon reading weaker overall across that history, is a sag even
 when the short window's mean is above the gate. The long window
-is consulted for the sag only, never for a move — a move's
-signature is positional, not temporal, and the short window
-already carries it — and the noisy check runs after it, so a
-proven decline is named for the decline even when the window
-spreads wide: a dying battery gets noisier as it drains, so the
-spread is the sag's own noise, and what keeps a genuinely noisy
-beacon out of the sag route is its long mean sitting near zero,
-not the ordering. Fast
+is consulted for the move too: the same moved gates read off the
+longer history when the short window's spread misses them. And
+the noisy check runs after both long-history checks, so a proven
+decline or a proven move is named for itself first even when the
+window spreads wide: a dying battery gets noisier as it drains
+and a moved beacon's residuals spread with position, so the
+spread is the fault's own noise in both cases. What keeps a
+genuinely noisy beacon out of the sag route is its long mean
+sitting near zero, not the ordering — and out of the move route,
+its long spread sitting past the noisy gate, not the ordering. Fast
 detection still rests on the short window: the alarm, the moved
 and noisy verdicts, and the fast-sag fallback all read the short
 window exactly as before.
@@ -172,8 +174,12 @@ zero — and the offset's level only falls 0.75 dB, so it stays
 uncertain. That margin is thin too (0.25 dB on the magnitude gate,
 and the drop's t is -1.46 against a -1.5 gate), and it is reported
 as such: a noise excursion that happened to span the whole walk
-would still fake a sag, and only more history — a third loop —
-would settle it.
+would still fake a sag. More history was thought to settle it —
+a third loop — but measured across seeds 1–100 it does not: the
+steady offset reads ``battery-sag`` on 2 of the 100 seeds over
+three loops, and a noisy beacon on 6, both from a short-window
+decline the long history contradicts only weakly (see the README
+v0.68.0 notes).
 the same slow drain is called battery-sag on 2/5 seeds (1 and
 11) through the long history — seeds 2, 3 and 7 lack the signal
 in the revisit pairs (-0.87, -0.19 and -0.48 dB), so the
@@ -1020,11 +1026,59 @@ class DriftMonitor:
                     f"shows across the full history, not in the "
                     f"{samples}-reading window")
 
+        # Moved, over the longer history: the short window's spread
+        # is an estimate from few readings, and a move whose spread
+        # lands just under the gate is not a sharper threshold away
+        # from being caught — it is more history away. When the
+        # long window holds more readings than the short one, the
+        # same moved gates are read off it instead: the same spread
+        # above 2.5 dB, the same mean beyond 1.5 dB, the same
+        # stable revisit (delta within 1.0 dB) — a longer history,
+        # not a sharper threshold. It runs before the noisy check
+        # below, so a proven move is named for the move even when
+        # the short window's spread flukes wide: a moved beacon's
+        # residuals spread with position, and on a longer walk the
+        # final window can spread past the noisy gate on noise
+        # alone (a 7 m move reads noisy on 4/100 seeds over three
+        # loops, with a long spread of 2.8 to 3.2 dB around a
+        # 4 dB mean and a stable revisit delta over 81 pairs).
+        # What keeps a genuinely noisy beacon out of this route is
+        # the mean gate below, not the ordering: its long mean sits
+        # near zero, not 1.5 dB from it — and a sagging beacon's
+        # revisit delta is strongly negative, so it cannot borrow
+        # this route either. The long spread must also sit below
+        # the noisy gate (twice the expected noise): a move's
+        # spread is a position pattern on top of the noise, 2.5 to
+        # about 3.5 dB, while a noisy beacon's long history spreads
+        # past 4 dB — without this cap the mean gate alone lets a
+        # noisy beacon borrow the move route when its long mean
+        # flukes past 1.5 dB (2/100 noisy seeds read moved on two
+        # loops). When the long window holds no more readings than
+        # the short one, it says nothing the short window has not
+        # already said, and this check stays silent.
+        if (len(long_window) > samples
+                and long_std > MOVED_STD_MIN_DB
+                and long_std < 2.0 * self._noise_db
+                and abs(long_mean) > MOVED_MEAN_MIN_DB
+                and long_pairs >= 5
+                and long_delta is not None
+                and abs(long_delta) < 1.0):
+            return result(
+                "moved",
+                f"over the longer {len(long_window)}-reading "
+                f"history on floor {floor} the residual at "
+                f"revisited spots is stable ({long_delta:+.2f} dB "
+                f"over {long_pairs} pairs) but the history spreads "
+                f"{long_std:.2f} dB around a {long_mean:+.2f} dB "
+                f"mean — the geometry is wrong, not the power")
+
         # Noise: spread more than twice the expected RSSI noise,
         # with no coherent decline. It runs after the long-history
-        # sag check above, so a proven decline is named for the
-        # decline first — a dying battery gets noisier as it
-        # drains, and its window spread is the sag's own noise.
+        # sag and moved checks above, so a proven decline or a
+        # proven move is named for itself first — a dying battery
+        # gets noisier as it drains, and a moved beacon's
+        # residuals spread with position, so the spread is the
+        # fault's own noise in both cases, not a second fault.
         if std > 2.0 * self._noise_db:
             return result(
                 "noisy",
@@ -1092,36 +1146,6 @@ class DriftMonitor:
                             f"spreads {long_std:.2f} dB, above the "
                             f"{self._noise_db:.2f} dB noise")
                     return result("moved", reason)
-
-        # Moved, over the longer history: the short window's spread
-        # is an estimate from few readings, and a move whose spread
-        # lands just under the gate is not a sharper threshold away
-        # from being caught — it is more history away. When the
-        # long window holds more readings than the short one, the
-        # same moved gates are read off it instead: the same spread
-        # above 2.5 dB, the same mean beyond 1.5 dB, the same
-        # stable revisit (delta within 1.0 dB) — a longer history,
-        # not a sharper threshold. The noisy check above runs
-        # first, so a noisy beacon whose long spread is wide stays
-        # noisy, and a sagging beacon's revisit delta is strongly
-        # negative, so it cannot borrow this route either. When
-        # the long window holds no more readings than the short
-        # one, it says nothing the short window has not already
-        # said, and this check stays silent.
-        if (len(long_window) > samples
-                and long_std > MOVED_STD_MIN_DB
-                and abs(long_mean) > MOVED_MEAN_MIN_DB
-                and long_pairs >= 5
-                and long_delta is not None
-                and abs(long_delta) < 1.0):
-            return result(
-                "moved",
-                f"over the longer {len(long_window)}-reading "
-                f"history on floor {floor} the residual at "
-                f"revisited spots is stable ({long_delta:+.2f} dB "
-                f"over {long_pairs} pairs) but the history spreads "
-                f"{long_std:.2f} dB around a {long_mean:+.2f} dB "
-                f"mean — the geometry is wrong, not the power")
 
         # Off calibration, but no signature fits — say so.
         se_mean = std / math.sqrt(samples) if samples else 0.0

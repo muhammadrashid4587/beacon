@@ -4248,3 +4248,88 @@ history — a third loop — would settle it.
 The roadmap grows as new needs surface — the fallback trend
 reading the longer history, and the noisy check yielding to a
 proven sag, are the latest additions.
+
+## The third loop settles the slow sag, not the knife-edges
+
+The v0.67.0 notes left two knife-edges for a third loop: the
+moved beacon's spread gate (seeds 23 and 73) and the
+single-pass fast-sag rate (50/100). Swept over seeds 1–100
+on three loops (120 readings) instead of two, the third loop
+settles neither of the named ones — and it helps somewhere
+else entirely. The slow sag reads `battery-sag` on 98 of
+100, up from 84, because the extra loop's drained readings
+pull the long mean and the long revisit delta past their
+gates. The 7 m move reads `moved` on 97, down from 98: seed
+23 is rescued, but seeds 64 and 74 flip the other way, their
+long spreads settling at 2.46 and 2.42 dB, just under the 2.5
+dB gate, and seed 73 still misses at 2.47 dB. More history
+tightens the spread estimate around a value the gate does not
+accept; no threshold change fixes that without also letting
+steady offsets through. The 1.4 m move reads `moved` on 24,
+up from 18 — but the same 24 on the out-of-sample seeds
+101–200, where two loops already read 24, so the bump is the
+final window's noise draw, not a systematic effect — and
+seeds 23 and 73 still miss there too, their settled long
+spreads sitting at 2.32 dB. The single-pass fast sag is
+identical on one, two and three loops (50/100): the beacon
+goes dark at step 24, so the extra loops add no readings at
+all, and one pass cannot reliably catch a fast sag, full
+stop.
+
+The third loop also opens two small misreads the other way:
+the steady -6 dB offset reads `battery-sag` on 2 of 100
+seeds (was 0) and the noisy beacon on 6 (was 0), both from a
+short-window decline the long history contradicts only
+weakly — a noise excursion in the tail, not a sharper
+threshold away from being caught. One alternative was
+measured and rejected: requiring the long revisit delta to
+agree with the short one on the sag route. It repairs the
+offset (2 to 0) and half the noisy misreads (6 to 3), but it
+costs 3 true slow sags on two loops (84 to 81) — battery
+loss is quadratic, so the long delta dilutes the late, steep
+decline the short delta measures, and the agreement
+requirement assumes a linear decline. The short route stays
+as it is.
+
+The one real fix the measurement found is the order of the
+noisy check. On three loops the 7 m move reads `noisy` on
+4/100 seeds — the final 20-reading window's spread flukes
+past the 4 dB noisy gate on noise alone, even though the
+120-reading history proves a move (long spread 2.82 to 3.24
+dB around a 3.92 to 4.10 dB mean, stable revisit delta over
+81 pairs). The long-history moved check now runs before the
+noisy check, the same way the long-history sag check already
+did: a proven move is named for the move first. What keeps a
+genuinely noisy beacon out of the move route is not the
+ordering alone — the mean gate lets 2/100 noisy seeds
+through, their long means fluking past 1.5 dB — so the long
+spread must also sit below the noisy gate itself: a move's
+spread is a position pattern, 2.5 to about 3.5 dB, while a
+noisy beacon's long history spreads past 4 dB. Seeds 68 and
+78 are the pins for that cap: their long means are -1.81 and
++1.52 dB with stable revisit deltas, but their long histories
+spread 5.68 dB, so they stay `noisy`.
+
+Measured behaviour (v0.68.0): 2 dB RSSI noise, beacon D,
+seeds 1–100 — the other beacons stay `healthy` in every
+three-loop scenario, on all 100 seeds, and every two-loop
+tally from v0.67.0 is unchanged:
+
+| walk | verdicts |
+|---|---|
+| three-loop, healthy | `healthy` 100/100 |
+| three-loop, D slow sag 0.3/hr | `battery-sag` 98, `noisy` 2 |
+| three-loop, D moved (0, 12) to (5, 7) | `moved` 97, `uncertain` 3 |
+| three-loop, D moved 1.4 m, to (1, 11) | `moved` 24, `uncertain` 51, `healthy` 25 |
+| three-loop, D with 5 dB extra noise | `noisy` 85, `battery-sag` 6, `healthy` 9 |
+| three-loop, D steady -6 dB offset | `uncertain` 97, `battery-sag` 2, `moved` 1 |
+| three-loop, D steady +6 dB offset | `uncertain` 99, `moved` 1 |
+
+Out-of-sample, seeds 101–200: the slow sag reads
+`battery-sag` on 99, the 7 m move reads `moved` on 100, the
+1.4 m move reads `moved` on 24, and the steady -6 dB offset
+reads `battery-sag` on 2 — the third loop's slow-sag gain
+holds, the 1.4 m move's does not, and the offset's small
+sag-misread rate is the same out of sample as in it.
+The roadmap grows as new needs surface — the noisy check
+yielding to a proven move is the latest addition.

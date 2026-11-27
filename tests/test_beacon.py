@@ -1535,6 +1535,29 @@ class TestDriftClassification(unittest.TestCase):
             monitor.feed(step)
         return monitor
 
+    def _three_loops(self, seed, **kwargs):
+        """Three loops of the default walk, fed to a fresh monitor
+        — 120 readings, so the long history holds a full extra
+        loop over the two-loop walk."""
+        loop = rectangular_walk(20.0, 12.0, 10)
+        steps = simulate_walk(loop + loop + loop, BEACONS,
+                              noise_db=2.0, seed=seed, **kwargs)
+        monitor = DriftMonitor(BEACONS)
+        for step in steps:
+            monitor.feed(step)
+        return monitor
+
+    def _three_loops_with(self, seed, beacons, **kwargs):
+        """Three loops simulated with ``beacons`` but monitored
+        against the calibrated ``BEACONS``."""
+        loop = rectangular_walk(20.0, 12.0, 10)
+        steps = simulate_walk(loop + loop + loop, beacons,
+                              noise_db=2.0, seed=seed, **kwargs)
+        monitor = DriftMonitor(BEACONS)
+        for step in steps:
+            monitor.feed(step)
+        return monitor
+
     def test_healthy_walk_classifies_healthy(self):
         for seed in (1, 2, 3, 7, 11):
             monitor = self._two_loops(seed)
@@ -1994,6 +2017,150 @@ class TestDriftClassification(unittest.TestCase):
         self.assertEqual(
             tally(lambda s: offset(s, 6.0, loops=1)),
             {"uncertain": 100})
+
+    def test_three_loop_sweep_pins_verdict_counts(self):
+        # The v0.68.0 measurement: the same scenarios swept over
+        # seeds 1-100 on three loops (120 readings) instead of
+        # two. The third loop settles the slow sag — 84 to 98 —
+        # because the extra loop's drained readings pull the long
+        # mean and the long revisit delta past their gates, and it
+        # rescues the 7 m move's seed 23 the same way. It does not
+        # settle the named knife-edges: the 1.4 m move reads moved
+        # on 24, up from 18, but the same count on the
+        # out-of-sample seeds 101-200, where two loops already
+        # read 24 — the bump is the final window's noise draw, not
+        # a systematic effect — and seeds 23 and 73 still miss on
+        # spread, their settled long spreads sitting at 2.32 dB
+        # against the 2.5 dB gate. The single-pass fast sag is
+        # identical on one, two and three loops (50/100): the
+        # beacon goes dark at step 24, so the extra loops add no
+        # readings at all. And the third loop opens two small
+        # misreads the other way: the steady offset reads
+        # battery-sag on 2 seeds and the noisy beacon on 6, both
+        # from a short-window decline the long history contradicts
+        # only weakly — a noise excursion in the tail, not a
+        # sharper threshold away from being caught. A future
+        # change that shifts these counts must update this test
+        # and the README deliberately, not silently.
+        moved = [Beacon(b.id, b.x, b.y) for b in BEACONS]
+        moved[3] = Beacon("D", 5.0, 7.0)
+        small_moved = [Beacon(b.id, b.x, b.y) for b in BEACONS]
+        small_moved[3] = Beacon("D", 1.0, 11.0)
+
+        def tally(build, seeds=range(1, 101)):
+            counts = {}
+            for seed in seeds:
+                verdict = build(seed).classify("D").verdict
+                counts[verdict] = counts.get(verdict, 0) + 1
+            return counts
+
+        def offset(seed, delta_db):
+            loop = rectangular_walk(20.0, 12.0, 10)
+            steps = simulate_walk(loop + loop + loop, BEACONS,
+                                  noise_db=2.0, seed=seed)
+            for step in steps:
+                step["rssi"]["D"] += delta_db
+            monitor = DriftMonitor(BEACONS)
+            for step in steps:
+                monitor.feed(step)
+            return monitor
+
+        def noisy(seed):
+            loop = rectangular_walk(20.0, 12.0, 10)
+            steps = simulate_walk(loop + loop + loop, BEACONS,
+                                  noise_db=2.0, seed=seed)
+            rng = random.Random(seed + 1000)
+            for step in steps:
+                step["rssi"]["D"] += rng.gauss(0.0, 5.0)
+            monitor = DriftMonitor(BEACONS)
+            for step in steps:
+                monitor.feed(step)
+            return monitor
+
+        slow_sag = {"D": BatteryModel(drain_rate_per_hour=0.3)}
+        self.assertEqual(
+            tally(lambda s: self._three_loops(s)), {"healthy": 100})
+        self.assertEqual(
+            tally(lambda s: self._three_loops(
+                s, batteries=slow_sag, step_seconds=120.0)),
+            {"battery-sag": 98, "noisy": 2})
+        self.assertEqual(
+            tally(lambda s: self._three_loops_with(s, moved)),
+            {"moved": 97, "uncertain": 3})
+        self.assertEqual(
+            tally(lambda s: self._three_loops_with(s, small_moved)),
+            {"moved": 24, "uncertain": 51, "healthy": 25})
+        self.assertEqual(tally(noisy),
+                         {"noisy": 85, "battery-sag": 6, "healthy": 9})
+        self.assertEqual(
+            tally(lambda s: offset(s, -6.0)),
+            {"uncertain": 97, "battery-sag": 2, "moved": 1})
+        self.assertEqual(
+            tally(lambda s: offset(s, 6.0)),
+            {"uncertain": 99, "moved": 1})
+        # Out-of-sample: seeds 101-200, never used to tune the
+        # gates. The third loop's slow-sag gain holds (99) and
+        # the 7 m move reads moved on all 100; the 1.4 m move
+        # reads moved on the same 24 as two loops there, and the
+        # offset's sag misreads stay at 2.
+        self.assertEqual(
+            tally(lambda s: self._three_loops(
+                s, batteries=slow_sag, step_seconds=120.0),
+                seeds=range(101, 201)),
+            {"battery-sag": 99, "noisy": 1})
+        self.assertEqual(
+            tally(lambda s: self._three_loops_with(s, moved),
+                  seeds=range(101, 201)),
+            {"moved": 100})
+        self.assertEqual(
+            tally(lambda s: self._three_loops_with(s, small_moved),
+                  seeds=range(101, 201)),
+            {"moved": 24, "uncertain": 53, "healthy": 23})
+        self.assertEqual(
+            tally(lambda s: offset(s, -6.0), seeds=range(101, 201)),
+            {"uncertain": 98, "battery-sag": 2})
+
+    def test_long_moved_beats_noisy_on_three_loops(self):
+        # The reorder's rescue, pinned by seed: on three loops
+        # the 7 m move's final 20-reading window spreads past
+        # the 4 dB noisy gate on seeds 2, 29, 52 and 97, so
+        # without the reorder they read noisy even though the
+        # 120-reading history proves a move (long spread 2.82 to
+        # 3.24 dB around a 3.92 to 4.10 dB mean, stable revisit
+        # delta over 81 pairs). The long-history moved check now
+        # runs before the noisy check, so they read moved, and
+        # the reason cites the longer history it rests on.
+        moved = [Beacon(b.id, b.x, b.y) for b in BEACONS]
+        moved[3] = Beacon("D", 5.0, 7.0)
+        for seed in (2, 29, 52, 97):
+            monitor = self._three_loops_with(seed, moved)
+            result = monitor.classify("D")
+            self.assertEqual(result.verdict, "moved", seed)
+            self.assertGreater(result.residual_std_db, 4.0, seed)
+            self.assertIn("longer", result.reason, seed)
+
+    def test_noisy_long_history_cannot_borrow_moved_route(self):
+        # The cap's guard, pinned by seed: on two loops the noisy
+        # beacon's long mean flukes past the 1.5 dB moved gate on
+        # seeds 68 (-1.81 dB) and 78 (+1.52 dB) with a stable
+        # revisit delta (0.37 and 0.23 dB) — without the cap the
+        # long-history moved check would call them moved. But
+        # their long history spreads 5.68 dB, past the 4 dB noisy
+        # gate itself, so the cap keeps them noisy: a move's
+        # spread is a position pattern, a noisy beacon's spread
+        # is noise.
+        for seed in (68, 78):
+            loop = rectangular_walk(20.0, 12.0, 10)
+            steps = simulate_walk(loop + loop, BEACONS,
+                                  noise_db=2.0, seed=seed)
+            rng = random.Random(seed + 1000)
+            for step in steps:
+                step["rssi"]["D"] += rng.gauss(0.0, 5.0)
+            monitor = DriftMonitor(BEACONS)
+            for step in steps:
+                monitor.feed(step)
+            result = monitor.classify("D")
+            self.assertEqual(result.verdict, "noisy", seed)
 
     def test_other_beacons_stay_healthy_across_hundred_seeds(self):
         # Whatever D does on any seed, the other three beacons
