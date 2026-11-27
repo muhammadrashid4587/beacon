@@ -183,6 +183,33 @@ class MultifloorDriftMonitorTest(unittest.TestCase):
             self.assertTrue(all(c.verdict == "healthy" for c in others),
                             f"seed {seed}")
 
+    def test_three_loops_catch_the_moved_beacon_on_every_seed(self):
+        # The seed-2 near-miss the v0.61.0 notes left: on the
+        # tripled two-floor walk the short window's spread is 2.48
+        # dB, 0.02 dB under the moved threshold, so the short
+        # window calls it uncertain — but the long window holds
+        # 120 readings, and over them the spread settles to
+        # 2.57 dB around a +4.29 dB mean with a stable revisit
+        # delta of +0.38 dB over 81 pairs, so the moved call fires
+        # from the longer history instead. Same thresholds, more
+        # readings — no gate was moved. The other seven beacons
+        # stay healthy, and seed 2's verdict says which evidence
+        # it rests on.
+        for seed in SEEDS:
+            monitor = DriftMonitor(BEACONS, window=CYCLE_WINDOW)
+            for step in _walk(seed, "move", loops=3):
+                monitor.feed(step)
+            result = monitor.classify("D")
+            self.assertEqual(result.verdict, "moved", f"seed {seed}")
+            others = [c for c in monitor.classifications()
+                      if c.id != "D"]
+            self.assertTrue(all(c.verdict == "healthy" for c in others),
+                            f"seed {seed}")
+        monitor = DriftMonitor(BEACONS, window=CYCLE_WINDOW)
+        for step in _walk(2, "move", loops=3):
+            monitor.feed(step)
+        self.assertIn("longer", monitor.classify("D").reason)
+
     def test_long_window_is_validated(self):
         with self.assertRaises(ValueError):
             DriftMonitor(BEACONS, long_window=0)
@@ -251,10 +278,15 @@ class MultifloorDriftMonitorTest(unittest.TestCase):
         # signature, and the beacon read uncertain on 4 of 5 seeds.
         # The window is per floor now, so the default window holds
         # the last 20 readings on the beacon's own floor, and the
-        # moved beacon reads "moved" on 4 of 5 seeds — seed 3 is
-        # the miss (its revisit delta is +1.20 dB, so the moved
-        # call, which needs a stable revisit, does not fire).
-        expected = {1: "moved", 2: "moved", 3: "uncertain",
+        # moved beacon reads "moved" on 4 of 5 seeds from the short
+        # window alone — seed 3 is the short-window miss (its
+        # revisit delta is +1.20 dB, so the moved call, which needs
+        # a stable revisit, does not fire there) — and on 5/5 with
+        # the longer history consulted too: over 41 pairs the
+        # delta settles to +0.80 dB and the spread over the same
+        # history is 2.91 dB, so the moved call fires from the long
+        # window.
+        expected = {1: "moved", 2: "moved", 3: "moved",
                     7: "moved", 11: "moved"}
         for seed in SEEDS:
             monitor = _classify(seed, "move", window=20)
@@ -273,7 +305,7 @@ class MultifloorDriftMonitorTest(unittest.TestCase):
         # mid-walk, on every seed — at the default window and at
         # the demo window alike.
         expected = {
-            20: {1: "moved", 2: "moved", 3: "uncertain",
+            20: {1: "moved", 2: "moved", 3: "moved",
                  7: "moved", 11: "moved"},
             CYCLE_WINDOW: {1: "uncertain", 2: "uncertain",
                            3: "moved", 7: "moved", 11: "moved"},

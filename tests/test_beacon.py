@@ -1575,11 +1575,19 @@ class TestDriftClassification(unittest.TestCase):
             self.assertGreater(result.mean_residual_db, 1.5)
             self.assertGreater(result.residual_std_db, 2.5)
             self.assertLess(abs(result.revisit_delta_db), 1.0)
-        # Seed 11 is the honest miss: the noise itself drifts down
-        # over the walk (revisit delta -1.84 dB), so the monitor
-        # cannot rule a decline out and says uncertain instead.
+        # Seed 11 used to be the honest miss: the noise itself
+        # drifts down over the walk (short-window revisit delta
+        # -1.84 dB), so the short window cannot rule a decline out
+        # and the moved call does not fire there. Over the longer
+        # history the delta settles to -1.00 dB over 41 pairs —
+        # inside the same 1.0 dB gate by 0.004 dB, a knife-edge,
+        # not a comfortable margin — and the spread over the same
+        # history is 2.90 dB around a +3.97 dB mean, so the moved
+        # call fires from the long window instead.
         monitor = self._two_loops_with(11, moved)
-        self.assertEqual(monitor.classify("D").verdict, "uncertain")
+        result = monitor.classify("D")
+        self.assertEqual(result.verdict, "moved")
+        self.assertIn("longer", result.reason)
 
     def test_noisy_beacon_classifies_as_noisy(self):
         for seed in (1, 2, 3, 7, 11):

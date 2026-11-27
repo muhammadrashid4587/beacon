@@ -585,7 +585,7 @@ stay `healthy` in every scenario):
 |---|---|
 | healthy | `healthy` 5/5 (mean -0.90 to +0.38 dB) |
 | D draining, 0.3/hr | `battery-sag` 5/5 (mean -2.17 to -4.73 dB, revisit delta -1.97 to -5.50 dB) |
-| D moved (0, 12) to (5, 7) | `moved` 4/5 (mean +3.12 to +4.21 dB, spread 2.60 to 3.23 dB, revisit delta near zero); seed 11 `uncertain` |
+| D moved (0, 12) to (5, 7) | `moved` 5/5 (mean +2.92 to +4.21 dB, spread 2.60 to 3.38 dB; seed 11 through the longer history — its short-window revisit delta is -1.84 dB, but over 41 pairs it settles to -1.00 dB) |
 | D moved 1.4 m, to (1, 11) | `uncertain` 3/5, `healthy` 2/5 — never `moved` or `battery-sag` |
 | D with 5 dB extra noise | `noisy` 5/5 (spread 4.33 to 6.68 dB) |
 | D steady -6 dB offset | `uncertain` 4/5; seed 11 misread as `battery-sag` |
@@ -598,11 +598,15 @@ classifier catches it through the revisits. A move under about
 than the noise, so the classifier calls it `healthy` or
 `uncertain` rather than inventing a cause. And a steady offset
 on seed 11 is misread as a sag because the noise itself drifts
-down -1.84 dB over that walk — the same noise fluke also turns
+down -1.84 dB over that walk. The same noise fluke used to turn
 the moved beacon's seed-11 verdict `uncertain`, since the
-monitor cannot rule a decline out. No statistic in the window
-can tell a real decline from that fluke; the fix is a longer
-history (more loops), not a sharper threshold. On a single pass
+monitor could not rule a decline out from the short window
+alone — the longer history fixes that one (see the v0.62.0 notes
+at the end): over 41 pairs the delta settles to -1.00 dB,
+inside the same 1.0 dB gate by 0.004 dB, which is a knife-edge,
+not a comfortable margin. No statistic in the window can tell a
+real decline from that fluke; the fix is a longer history (more
+loops), not a sharper threshold. On a single pass
 with no revisits, the fallback catches the fast 1.2-per-hour sag
 on 4/5 seeds (seed 11's decline is buried in the noise: slope
 -0.05 dB per reading) and a beacon moved away from the ward
@@ -3699,3 +3703,57 @@ to -5.12 dB, revisit delta -2.72 to -5.16 dB, 20 pairs — the
 `healthy` 4/4.
 The roadmap grows as new needs surface — the third loop for
 drift classification is the latest addition.
+
+## A longer history for the moved-beacon call
+
+The third loop left one near-miss on the table: the moved
+beacon on the tripled two-floor walk reads `moved` on 4/5
+seeds, and seed 2 stays `uncertain` because its spread is
+2.48 dB — 0.02 dB under the 2.5 dB moved threshold. The
+threshold is not the problem: the spread in an 80-reading
+window is an estimate, and it wobbles around the true value
+by about that much from seed to seed. The fix is the same one
+that caught the slow sag — consult the longer history the
+monitor already keeps. `classify` now reads the moved gates
+off the long window too, when it holds more readings than the
+short one: the same spread above 2.5 dB, the same mean beyond
+1.5 dB, the same stable revisit (delta within 1.0 dB over at
+least 5 pairs) — a longer history, not a sharper threshold.
+The noisy check still runs first, so a noisy beacon whose
+long spread is wide stays `noisy`, and a sagging beacon's
+revisit delta is strongly negative, so it cannot borrow the
+moved route. The verdict's reason says which history it rests
+on, and the reported mean, spread, delta and pair count stay
+the short window's — the same convention as the long-history
+sag verdict.
+
+```sh
+python3 -m beacon.cli --drift-classify --multifloor --seed 2 --move-beacon D:5,-5 --loops 3
+python3 -m beacon.cli --drift-classify --seed 11 --move-beacon D:5,-5
+```
+
+Measured behaviour (v0.62.0): 2 dB RSSI noise, beacon D,
+seeds 1, 2, 3, 7, 11 — the other beacons stay `healthy` in
+every scenario:
+
+| walk | verdicts |
+|---|---|
+| single-floor, D moved (0, 12) to (5, 7) | `moved` 5/5 (was 4/5 — seed 11 now `moved` from the longer history: short-window delta -1.84 dB over 20 pairs, long-window delta -1.00 dB over 41 pairs, inside the same 1.0 dB gate by 0.004 dB) |
+| two-floor, D moved, `--loops 3` | `moved` 5/5 (was 4/5 — seed 2 now `moved` from the longer history: short-window spread 2.48 dB, long-window spread 2.57 dB over 120 readings, revisit delta +0.38 dB over 81 pairs) |
+| two-floor, D moved, two loops | `moved` 3/5, unchanged — seeds 1 and 2 stay `uncertain` (spreads 2.47 and 2.50 dB), because the short window already holds the whole per-floor history there, so no longer history exists to consult; the fix is a third loop, not a sharper threshold |
+| two-floor, D moved, default 20-reading window | `moved` 5/5 (was 4/5 — seed 3 now `moved` from the longer history: short-window delta +1.20 dB over 20 pairs, long-window delta +0.80 dB over 41 pairs) |
+| two-floor, D draining 0.3/hr, `--loops 3` | `battery-sag` 5/5, unchanged |
+| two-floor, healthy, `--loops 3` | `healthy` 5/5, unchanged |
+
+The seed-11 single-floor call is honest about its margin:
+the long-window delta clears the gate by 0.004 dB, so the
+verdict is right but barely so — a different noise draw could
+put it back to `uncertain`, and the reason cites the longer
+history it was taken from, so the thinness is visible. The
+two-loop two-floor miss is the remaining honest limit: with
+only two loops the long window and the short window hold the
+same 80 readings per floor, so there is no more history to
+consult, and the verdict stays `uncertain` rather than
+inventing a cause.
+The roadmap grows as new needs surface — the longer history
+for the moved-beacon call is the latest addition.

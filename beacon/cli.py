@@ -111,7 +111,10 @@ def run_drift_classify(args: argparse.Namespace) -> int:
     catches a slow battery sag on a multi-floor walk, where two
     loops leave the decline buried in the noise on three of five
     seeds — the extra loop fills the long window with drained
-    readings until its mean crosses the sag gate on its own. One
+    readings until its mean crosses the sag gate on its own — and
+    it is what catches the moved beacon on the fifth seed too,
+    where the long window's spread settles above the moved gate
+    that the short window's estimate just misses. One
     loop has no revisits, so the classifier falls back to the
     within-window trend and cannot rule a move out.
     """

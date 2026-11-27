@@ -58,7 +58,14 @@ signatures in the residuals, so ``classify`` names the cause:
   around a shifted mean (beyond 1.5 dB). A beacon moved *towards*
   the walked area reads louder on average, which is what the
   no-revisit fallback looks for; a beacon moved away reads like a
-  steady offset and is honestly called ``uncertain`` there.
+  steady offset and is honestly called ``uncertain`` there. The
+  spread in a short window is a noisy estimate — a move whose
+  spread lands just under the gate is not a sharper threshold
+  away from being caught, it is more history away — so when the
+  short window's spread misses the gate, the classifier consults
+  the longer history too: the same spread and mean gates, the
+  same stable-revisit requirement, over the long window's
+  readings, where the spread estimate has settled.
 - **noisy**: the residual spread is more than twice the expected
   RSSI noise (``noise_db``, 2 dB by default, so above 4 dB) with
   no coherent time trend — the beacon is still roughly calibrated
@@ -121,20 +128,30 @@ Measured behaviour (simulator, 2 dB RSSI noise, two-loop ward
 walk, seeds 1, 2, 3, 7, 11 — see the README for the full table):
 a slowly draining beacon (0.3 per hour, 120 s steps) is called
 battery-sag on 5/5 seeds, a beacon moved 7 m across the ward is
-called moved on 4/5 (seed 11 comes back uncertain — the same
-noise fluke that fakes a decline also blocks the moved call), a
-beacon with 5 dB of extra noise is called noisy on 5/5, and a
-steady -6 dB offset is called uncertain on 4/5 and misread as
-battery-sag on seed 11, where the noise itself drifts down over
-the walk. On the doubled two-floor walk the same slow drain is
-called battery-sag on 2/5 seeds (1 and 11) through the long
-history — seeds 2, 3 and 7 lack the signal in the revisit pairs
-(-0.87, -0.19 and -0.48 dB), so the classifier stays honest and
-says healthy rather than inventing a decline — and with a third
-loop, a longer history still, it is called battery-sag on 5/5.
-A move under about 2 m is invisible at 2 dB noise and
-is called healthy or uncertain, which is a limit of the data, not
-a bug in the classifier.
+called moved on 5/5 — seed 11 through the longer history, where
+its revisit delta settles to -1.00 dB over 41 pairs, inside the
+same 1.0 dB gate by 0.004 dB, which is a knife-edge, not a
+comfortable margin — a beacon with 5 dB of extra noise is called
+noisy on 5/5, and a steady -6 dB offset is called uncertain on
+4/5 and misread as battery-sag on seed 11, where the noise
+itself drifts down over the walk. On the doubled two-floor walk
+the same slow drain is called battery-sag on 2/5 seeds (1 and
+11) through the long history — seeds 2, 3 and 7 lack the signal
+in the revisit pairs (-0.87, -0.19 and -0.48 dB), so the
+classifier stays honest and says healthy rather than inventing
+a decline — and with a third loop, a longer history still, it
+is called battery-sag on 5/5, and the moved beacon is called
+moved on 5/5 too: seed 2's spread is 2.48 dB in the short
+window, 0.02 dB under the gate, but 2.57 dB over the long
+window's 120 readings, with a stable revisit delta of +0.38 dB
+over 81 pairs. At two loops the moved beacon stays moved on
+only 3/5 on the two-floor walk — seeds 1 and 2, spreads 2.47
+and 2.50 dB — because the short window already holds the whole
+per-floor history there, so no longer history exists to consult;
+the fix is a third loop, not a sharper threshold. A move under
+about 2 m is invisible at 2 dB noise and is called healthy or
+uncertain, which is a limit of the data, not a bug in the
+classifier.
 """
 
 import math
@@ -346,9 +363,10 @@ class DriftMonitor:
     ``long_window`` is how many recent readings per beacon per
     floor the long history covers (the full history by default):
     the sag check consults it for a slow drain the short window's
-    mean cannot see, while the alarm and the moved and noisy
-    verdicts keep reading the short window. It must be at least
-    ``window`` and at most ``history``.
+    mean cannot see, and the moved check consults it for a spread
+    the short window's readings cannot settle, while the alarm and
+    the noisy verdict keep reading the short window. It must be at
+    least ``window`` and at most ``history``.
     """
 
     def __init__(self, beacons: list[Beacon],
@@ -721,6 +739,24 @@ class DriftMonitor:
                 f"no steady decline — the beacon is unreliable, "
                 "not miscalibrated")
 
+        # The long window, computed once and shared by the two
+        # long-history checks below: the same readings as the
+        # rolling window, kept longer, so a signature spread over
+        # several loops is still measurable after the short window
+        # has forgotten the readings it started from. Empty (or
+        # shorter than the short window) when the walk is too short
+        # for a longer history to exist — then the long checks add
+        # nothing and stay silent.
+        long_window = list(self._long_window_for(beacon_id, floor))
+        long_residuals = [entry[4] for entry in long_window]
+        long_mean = _mean(long_residuals) if long_residuals else 0.0
+        long_std = _stdev(long_residuals) if long_residuals else 0.0
+        long_delta, long_delta_se, long_pairs = (
+            self._revisit_delta(beacon_id, floor, long_window)
+            if long_window else (None, None, 0))
+        long_se_mean = (long_std / math.sqrt(len(long_window))
+                        if long_window else 0.0)
+
         # Slow battery sag, over the longer history: the short
         # window's mean never reaches the sag gate on a slow drain
         # — on the two-floor walk the own-floor window averages a
@@ -739,15 +775,7 @@ class DriftMonitor:
         # a noisy beacon whose revisit delta flukes negative stays
         # noisy, and a moved beacon's revisit delta is near zero,
         # so it cannot borrow this route either.
-        long_window = list(self._long_window_for(beacon_id, floor))
         if len(long_window) >= self._min_samples:
-            long_residuals = [entry[4] for entry in long_window]
-            long_mean = _mean(long_residuals)
-            long_std = _stdev(long_residuals)
-            long_delta, long_delta_se, long_pairs = (
-                self._revisit_delta(beacon_id, floor, long_window))
-            long_se_mean = (long_std / math.sqrt(len(long_window))
-                            if long_window else 0.0)
             if (long_pairs >= 5
                     and long_delta is not None
                     and long_delta_se is not None
@@ -786,6 +814,36 @@ class DriftMonitor:
                     f"{mean:+.2f} dB mean with no steady decline "
                     "— no revisits to confirm against, so a "
                     "power change cannot be ruled out")
+
+        # Moved, over the longer history: the short window's spread
+        # is an estimate from few readings, and a move whose spread
+        # lands just under the gate is not a sharper threshold away
+        # from being caught — it is more history away. When the
+        # long window holds more readings than the short one, the
+        # same moved gates are read off it instead: the same spread
+        # above 2.5 dB, the same mean beyond 1.5 dB, the same
+        # stable revisit (delta within 1.0 dB) — a longer history,
+        # not a sharper threshold. The noisy check above runs
+        # first, so a noisy beacon whose long spread is wide stays
+        # noisy, and a sagging beacon's revisit delta is strongly
+        # negative, so it cannot borrow this route either. When
+        # the long window holds no more readings than the short
+        # one, it says nothing the short window has not already
+        # said, and this check stays silent.
+        if (len(long_window) > samples
+                and long_std > MOVED_STD_MIN_DB
+                and abs(long_mean) > MOVED_MEAN_MIN_DB
+                and long_pairs >= 5
+                and long_delta is not None
+                and abs(long_delta) < 1.0):
+            return result(
+                "moved",
+                f"over the longer {len(long_window)}-reading "
+                f"history on floor {floor} the residual at "
+                f"revisited spots is stable ({long_delta:+.2f} dB "
+                f"over {long_pairs} pairs) but the history spreads "
+                f"{long_std:.2f} dB around a {long_mean:+.2f} dB "
+                f"mean — the geometry is wrong, not the power")
 
         # Off calibration, but no signature fits — say so.
         se_mean = std / math.sqrt(samples) if samples else 0.0
