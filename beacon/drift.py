@@ -208,16 +208,24 @@ fake, so the offset reads ``battery-sag`` on 0 of 100 seeds over
 three loops and the noisy beacon on 3, while the slow sag stays
 at 98 and the two-loop tallies on seeds 1–100 do not move at
 all. Two of the three
-noisy seeds that still misread are the honest limit: their
+noisy seeds that still misread are late cliffs — their
 excursion is a late cliff, which a quadratic sag's late
-acceleration also produces, so no statistic on this evidence
-tells them apart. The third (seed 12) is repaired by the
+acceleration also produces — and they are repaired by the
+early-delta gate (see the README v0.73.0 notes): a sag
+declines from the start, so the beacon must read weaker at
+revisited spots before the late interval too, and seeds 33
+and 97 read stronger early (+0.06 and +0.23 dB over 41
+pairs), so the short-window sag call is vetoed and they read
+``noisy`` and ``healthy`` instead. The third (seed 12) is repaired by the
 spread-growth gate (see the README v0.72.0 notes): its
 excursion spans the whole walk, so it clears the delta, mean
 and drop gates through the longer history — but its spread
 shrinks across the walk (-0.12 dB from the first third to the
 last), while a dying battery's spread grows, so the
 long-history call is vetoed and it reads ``noisy`` instead.
+One late cliff remains, out of sample (seed 124): its
+excursion started early (-1.57 dB) and kept falling, so no
+statistic on this evidence tells it from a sag.
 the same slow drain is called battery-sag on 2/5 seeds (1 and
 11) through the long history — seeds 2, 3 and 7 lack the signal
 in the revisit pairs (-0.87, -0.19 and -0.48 dB), so the
@@ -397,6 +405,46 @@ SAG_LATE_DECLINE_MAX_DB = -1.0
 # misread (seed 12 at -0.13 standard errors, seed 124 at
 # -1.10) while the magnitude leg repairs one of them.
 SAG_SPREAD_GROWTH_MIN_READINGS = 60
+
+# A sag is a process: the battery drains from the first reading, so
+# the decline is there from the start, not only late — the residual
+# at revisited spots falls between the first pass over the ward and
+# the second, before the late interval even begins. A late cliff
+# shows nothing until the last loop: the noise excursion that fakes
+# the decline sits in the tail, so the early revisits read the same
+# level twice. The short-window sag route is vetoed when the early
+# revisit delta — the mean paired delta over the first two-thirds
+# of the floor's long history, the part before the late interval —
+# is positive: the beacon read stronger at revisited spots early
+# in the walk, which a draining battery cannot do. The gate is a
+# sign test at 0.0 — the natural boundary, not a tuned threshold —
+# and it needs enough early pairs to trust the sign (at least 30):
+# a full revisit round on the default walk is 40 pairs, and the
+# sign of a true sag's early decline (-1.9 dB on average, standard
+# error about 0.6 dB over 40 pairs) sits 3 standard errors from
+# zero, while a subset of the round is both smaller and noisier —
+# the first half of the round expects only about -1.3 dB, so a
+# veto on 20 pairs would cost true sags on two loops (measured:
+# seeds 80 and 81 in-sample, 157 out-of-sample, whose long route
+# cannot rescue them there). With the 30-pair minimum the gate
+# stays silent on two loops (14 early pairs) and for a beacon
+# that went dark mid-walk (25), and vetoes no short-route true
+# slow sag on three loops on either sample. A sag blocked here
+# falls through to the long-history check below, whose own gates
+# still fire for a real decline, so the cost of the gate is the
+# verdict's route, not the verdict itself — the same design as
+# the late-decline gate. Measured on three loops, seeds 1-100:
+# the two remaining late cliffs read stronger early (+0.06 and
+# +0.23 dB) and are repaired, while no short-route true slow
+# sag's early delta is positive; the out-of-sample cliff (seed
+# 124) declined early (-1.57 dB) and still reads battery-sag —
+# a noise excursion that starts early and keeps falling is, on
+# this evidence, a sag (see the README v0.73.0 notes). The
+# first-round revisit delta as a blanket requirement was measured
+# and rejected in v0.71.0: it costs true sags out of sample when
+# it blocks both routes — this gate vetoes the short route only,
+# with the long route still open underneath.
+SAG_EARLY_DELTA_MIN_PAIRS = 30
 
 # A moved beacon's residuals spread out (geometry wrong in
 # different directions) around a shifted mean.
@@ -685,7 +733,13 @@ class DriftClassification:
     the check that keeps a whole-walk noise excursion from
     reading as a sag through the longer history, since a dying
     battery gets noisier as it drains and an excursion does not;
-    ``samples`` is the window size; ``reason`` says in words why
+    ``early_revisit_delta_db`` is the mean change in residual at
+    revisited spots over the first two-thirds of the floor's long
+    history — the decline before the late interval (None when
+    fewer than five pairs match there) — the check that keeps a
+    late cliff from reading as a sag through the short window,
+    since a sag declines from the start and a cliff only declines
+    late; ``samples`` is the window size; ``reason`` says in words why
     this verdict was reached.
     """
 
@@ -703,6 +757,7 @@ class DriftClassification:
     level_drop_db: float | None = None
     late_decline_db: float | None = None
     spread_growth_db: float | None = None
+    early_revisit_delta_db: float | None = None
 
     def to_dict(self) -> dict:
         """JSON-friendly form, for the stream output, the exported
@@ -712,7 +767,9 @@ class DriftClassification:
         was too short to split into quarters, and
         ``late_decline_db`` is null when it was too short to
         split into thirds, and ``spread_growth_db`` is null when
-        it was too short to estimate a spread per third."""
+        it was too short to estimate a spread per third, and
+        ``early_revisit_delta_db`` is null when fewer than five
+        pairs match in the first two-thirds of the history."""
         return {
             "id": self.id,
             "floor": self.floor,
@@ -728,6 +785,7 @@ class DriftClassification:
             "level_drop_db": self.level_drop_db,
             "late_decline_db": self.late_decline_db,
             "spread_growth_db": self.spread_growth_db,
+            "early_revisit_delta_db": self.early_revisit_delta_db,
         }
 
 
@@ -1114,6 +1172,23 @@ class DriftMonitor:
         # significance test on a spread difference would punish
         # the sag for the very noise growth it measures.
         spread_growth, _growth_se = _spread_growth(long_window)
+        # The early revisit delta across the floor's long history —
+        # the mean paired delta over the first two-thirds of the
+        # history, the part before the late interval, measured once
+        # and shared by the short-window sag check below. A sag
+        # declines from the start, so its early revisits already
+        # read weaker; a late cliff's excursion sits in the tail,
+        # so its early revisits read the same level twice. The
+        # standard error rides along for inspection (and for
+        # tests) — the gate itself is the sign, since the question
+        # is only whether the beacon read stronger early, not by
+        # how much. The pair count rides along too: the gate needs
+        # enough early pairs to trust the sign, and stays silent
+        # when the early history holds too few.
+        early_window = long_window[:2 * len(long_window) // 3]
+        (early_delta, _early_se,
+         early_pairs) = self._revisit_delta(beacon_id, floor,
+                                            early_window)
 
         # The trend over the floor's long history — the same
         # readings as the rolling window, kept longer. The
@@ -1149,7 +1224,8 @@ class DriftMonitor:
                 revisit_delta_db=delta, revisit_pairs=pairs,
                 samples=samples, reason=reason,
                 level_drop_db=drop, late_decline_db=late_decline,
-                spread_growth_db=spread_growth)
+                spread_growth_db=spread_growth,
+                early_revisit_delta_db=early_delta)
 
         if samples < self._min_samples:
             return result(
@@ -1210,7 +1286,21 @@ class DriftMonitor:
         # the late steep one and so dilutes it, which is what
         # cost true sags when it was tried; the late decline
         # measures the late interval directly, where the sag is
-        # strongest.
+        # strongest. And the decline must be there early as
+        # well: the short-window call is vetoed when the beacon
+        # read stronger at revisited spots over the first
+        # two-thirds of the history — a sag declines from the
+        # start, so its early revisits already read weaker,
+        # while a late cliff's excursion sits in the tail and
+        # its early revisits read the same level twice. The
+        # veto is the sign of the early revisit delta (positive
+        # means stronger early, which a draining battery cannot
+        # do) and it needs at least 30 early pairs to trust
+        # that sign, so it stays silent on a short history
+        # (two loops hold 14 early pairs) and for a beacon
+        # that went dark mid-walk (25). A sag blocked here
+        # falls through to the long-history check below, the
+        # same as a sag blocked by the late-decline gate.
         if mean < SAG_MEAN_MAX_DB:
             if pairs >= 5:
                 if (delta is not None and delta_se is not None
@@ -1220,7 +1310,11 @@ class DriftMonitor:
                         and drop < SAG_DROP_MAX_DB
                         and drop < SAG_DROP_MIN_T * drop_se
                         and late_decline is not None
-                        and late_decline < SAG_LATE_DECLINE_MAX_DB):
+                        and late_decline < SAG_LATE_DECLINE_MAX_DB
+                        and not (early_delta is not None
+                                 and early_pairs
+                                 >= SAG_EARLY_DELTA_MIN_PAIRS
+                                 and early_delta > 0.0)):
                     return result(
                         "battery-sag",
                         f"mean residual {mean:.2f} dB and the residual "

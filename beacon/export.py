@@ -628,7 +628,11 @@ def _drift_classifications_from_dict(raw) -> list[dict]:
     and ``spread_growth_db`` is null when the history was too
     short to estimate a spread per third — a file written
     before v0.72.0 carries no spread growth at all, so it
-    defaults to null there too.
+    defaults to null there too — and ``early_revisit_delta_db``
+    is null when fewer than five pairs matched in the first
+    two-thirds of the history — a file written before v0.73.0
+    carries no early revisit delta at all, so it defaults to
+    null there too.
     """
     if raw is None:
         return []
@@ -660,6 +664,9 @@ def _drift_classifications_from_dict(raw) -> list[dict]:
             "spread_growth_db": (
                 None if c.get("spread_growth_db") is None
                 else float(c["spread_growth_db"])),
+            "early_revisit_delta_db": (
+                None if c.get("early_revisit_delta_db") is None
+                else float(c["early_revisit_delta_db"])),
         }
         for c in raw
     ]

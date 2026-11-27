@@ -1891,14 +1891,17 @@ class TestDriftClassification(unittest.TestCase):
     def test_late_cliff_misread_out_of_sample_seed(self):
         # The honest limit, pinned out of sample: seed 124's
         # noisy beacon reads battery-sag on three loops, the
-        # same late-cliff shape as in-sample seeds 33 and 97 —
-        # its late decline is -2.41 dB, past the -1.0 dB gate,
-        # its revisit delta -3.62 dB over 20 pairs, and its
-        # level fell -2.39 dB — every number a true slow sag
-        # also produces, so no gate on this evidence repairs it
-        # without costing real detections (see the README
-        # v0.71.0 notes for the eight discriminators measured
-        # and rejected). It fires through the short-window route,
+        # same late-cliff shape as in-sample seeds 33 and 97
+        # used to be — its late decline is -2.41 dB, past the
+        # -1.0 dB gate, its revisit delta -3.62 dB over 20
+        # pairs, and its level fell -2.39 dB — every number a
+        # true slow sag also produces. The early-delta gate
+        # (v0.73.0) repairs 33 and 97, whose early revisits
+        # read stronger, but 124 declined early too (-1.57 dB
+        # over 41 pairs), so no gate on this evidence repairs
+        # it without costing real detections (see the README
+        # v0.73.0 notes for the discriminators measured and
+        # rejected). It fires through the short-window route,
         # not the longer history.
         loop = rectangular_walk(20.0, 12.0, 10)
         steps = simulate_walk(loop + loop + loop, BEACONS,
@@ -1917,6 +1920,10 @@ class TestDriftClassification(unittest.TestCase):
         self.assertLess(result.late_decline_db, -1.0)
         self.assertAlmostEqual(result.revisit_delta_db, -3.62,
                                places=1)
+        self.assertIsNotNone(result.early_revisit_delta_db)
+        self.assertAlmostEqual(result.early_revisit_delta_db, -1.57,
+                               places=1)
+        self.assertLess(result.early_revisit_delta_db, 0.0)
         self.assertEqual(result.revisit_pairs, 20)
 
     def test_single_loop_out_of_sample_tallies(self):
@@ -2238,7 +2245,20 @@ class TestDriftClassification(unittest.TestCase):
         # shrinks across the walk (-0.12 dB), so the long-history
         # call is vetoed and it reads noisy — the noisy beacon
         # is on 2 now, seeds 33 and 97, the two late cliffs
-        # whose spreads happened to grow. A future change that
+        # whose spreads happened to grow. The early-delta gate
+        # (v0.73.0) repairs both of those: a sag declines from
+        # the start, so the beacon must read weaker at revisited
+        # spots before the late interval too — seeds 33 and 97
+        # read stronger early (+0.06 and +0.23 dB over 41
+        # pairs), so the short-window sag call is vetoed and
+        # they fall through to noisy (seed 33, short spread
+        # 5.72 dB) and healthy (seed 97, short spread 3.86 dB,
+        # under the 4 dB noisy gate — the same miss the other
+        # healthy-reading noisy seeds already have). The noisy
+        # beacon reads battery-sag on 0 seeds in-sample now;
+        # out of sample the one remaining cliff, seed 124,
+        # declined early (-1.57 dB) and still reads battery-sag.
+        # A future change that
         # shifts these counts must
         # update this test and the README deliberately, not
         # silently.
@@ -2291,7 +2311,7 @@ class TestDriftClassification(unittest.TestCase):
             tally(lambda s: self._three_loops_with(s, small_moved)),
             {"moved": 35, "uncertain": 41, "healthy": 24})
         self.assertEqual(tally(noisy),
-                         {"noisy": 89, "battery-sag": 2, "healthy": 9})
+                         {"noisy": 90, "healthy": 10})
         self.assertEqual(
             tally(lambda s: offset(s, -6.0)),
             {"uncertain": 99, "moved": 1})
@@ -2392,24 +2412,25 @@ class TestDriftClassification(unittest.TestCase):
         self.assertIsNotNone(result.late_decline_db)
         self.assertGreater(result.late_decline_db, -1.0)
 
-    def test_late_decline_gate_remaining_misreads_are_late_cliffs(self):
-        # The honest limit, pinned by seed: the two noisy seeds
-        # the gate does not repair. Seeds 33 and 97 are late
-        # cliffs — their late declines are -3.81 and -2.15 dB, so
-        # the gate passes and the short-window sag call fires.
-        # A late cliff is what a quadratic sag's late
-        # acceleration also produces, so no statistic on this
-        # evidence tells them apart. Seed 12 used to be the
-        # third: its excursion is in the short window, not the
-        # late interval, so the gate blocks the short route —
-        # but its long revisit delta (-2.87 dB) and drop
-        # (-3.45 dB) cleared the long route's gates, so it read
-        # battery-sag from the longer history. The spread-growth
-        # gate (v0.72.0) repairs it: its spread shrinks -0.12 dB
-        # across the walk, so the long-history call is vetoed
-        # and it reads noisy now — see
-        # test_spread_growth_gate_repairs_whole_walk_excursion.
-        for seed, decline in ((33, -3.81), (97, -2.15)):
+    def test_early_delta_gate_repairs_late_cliffs(self):
+        # The v0.73.0 fix, pinned by seed: on three loops the two
+        # remaining late cliffs, seeds 33 and 97, read
+        # battery-sag through the short window — their late
+        # declines are -3.81 and -2.15 dB, so the late-decline
+        # gate passes — but a sag declines from the start, and
+        # their early revisits read stronger, not weaker: the
+        # mean paired delta over the first two-thirds of the
+        # history is +0.06 and +0.23 dB over 41 pairs, so the
+        # short-window sag call is vetoed and they fall through.
+        # Seed 33 reads noisy (its short window spreads 5.72
+        # dB, past the 4 dB gate); seed 97 reads healthy (its
+        # short spread is 3.86 dB, under the noisy gate, and its
+        # mean of -2.05 dB is inside the uncertain gates — the
+        # same miss the other healthy-reading noisy seeds
+        # already have, not a new one). The margins are thin:
+        # +0.06 dB is a sign test, not a comfortable gap.
+        for seed, verdict, early in ((33, "noisy", 0.06),
+                                     (97, "healthy", 0.23)):
             loop = rectangular_walk(20.0, 12.0, 10)
             steps = simulate_walk(loop + loop + loop, BEACONS,
                                   noise_db=2.0, seed=seed)
@@ -2420,10 +2441,95 @@ class TestDriftClassification(unittest.TestCase):
             for step in steps:
                 monitor.feed(step)
             result = monitor.classify("D")
-            self.assertEqual(result.verdict, "battery-sag", seed)
-            self.assertAlmostEqual(result.late_decline_db, decline,
-                                   places=1, msg=seed)
-            self.assertLess(result.late_decline_db, -1.0, seed)
+            self.assertEqual(result.verdict, verdict, seed)
+            self.assertIsNotNone(result.early_revisit_delta_db, seed)
+            self.assertAlmostEqual(result.early_revisit_delta_db,
+                                   early, places=1, msg=seed)
+            self.assertGreater(result.early_revisit_delta_db, 0.0,
+                               seed)
+
+    def test_early_delta_gate_leaves_last_late_cliff(self):
+        # The honest limit, pinned by seed: the out-of-sample
+        # late cliff, seed 124, declined early (-1.57 dB over
+        # 41 pairs) as well as late (-2.41 dB), so the
+        # early-delta gate passes and it still reads
+        # battery-sag. A noise excursion that starts early and
+        # keeps falling is, on this evidence, a sag — no
+        # statistic on the walk separates it from one. The
+        # mid-first spread growth would repair it (its spread
+        # shrinks -1.40 dB from the first third to the middle),
+        # but that gate costs true slow sags on two loops
+        # (seeds 31, 81, 92 and 94 in-sample, 121, 154 and 157
+        # out-of-sample, whose long route cannot rescue them
+        # there), so it stays unshipped — see the README
+        # v0.73.0 notes.
+        loop = rectangular_walk(20.0, 12.0, 10)
+        steps = simulate_walk(loop + loop + loop, BEACONS,
+                              noise_db=2.0, seed=124)
+        rng = random.Random(124 + 1000)
+        for step in steps:
+            step["rssi"]["D"] += rng.gauss(0.0, 5.0)
+        monitor = DriftMonitor(BEACONS)
+        for step in steps:
+            monitor.feed(step)
+        result = monitor.classify("D")
+        self.assertEqual(result.verdict, "battery-sag")
+        self.assertIsNotNone(result.early_revisit_delta_db)
+        self.assertAlmostEqual(result.early_revisit_delta_db, -1.57,
+                               places=1)
+        self.assertLess(result.early_revisit_delta_db, 0.0)
+
+    def test_early_delta_gate_keeps_true_sag_on_thin_early_evidence(self):
+        # The pair-count minimum, pinned by seed: the true slow
+        # sag on seed 105 (out of sample) has a POSITIVE early
+        # revisit delta, +0.69 dB — the sign test alone would
+        # veto a real sag — but it rests on only 25 early
+        # pairs, under the 30-pair minimum, because the beacon
+        # went dark mid-walk and the early history holds no full
+        # revisit round. The gate stays silent on thin evidence,
+        # so the sag still reads battery-sag through the short
+        # window. The margin is in the pair count, not the
+        # delta: over a full revisit round (40 pairs, measured
+        # loop-aware) no true sag's early delta is positive on
+        # either sample (weakest -0.17 dB out of sample), while
+        # the thin 25-pair window this sag's delta rests on
+        # flukes to +0.69 dB — which is why the gate needs the
+        # 30-pair minimum before it trusts the sign.
+        monitor = self._three_loops(
+            105, batteries={"D": BatteryModel(
+                drain_rate_per_hour=0.3)}, step_seconds=120.0)
+        result = monitor.classify("D")
+        self.assertEqual(result.verdict, "battery-sag")
+        self.assertNotIn("longer", result.reason)
+        self.assertIsNotNone(result.early_revisit_delta_db)
+        self.assertAlmostEqual(result.early_revisit_delta_db, 0.69,
+                               places=1)
+        self.assertGreater(result.early_revisit_delta_db, 0.0)
+
+    def test_early_revisit_delta_db_round_trips_through_export(self):
+        # The classification's early revisit delta rides the
+        # export rows like the spread growth does, and a file
+        # written before v0.73.0 — with no
+        # early_revisit_delta_db key at all — loads with it null
+        # instead of failing.
+        loop = rectangular_walk(20.0, 12.0, 10)
+        steps = simulate_walk(loop + loop + loop, BEACONS,
+                              noise_db=2.0, seed=33)
+        rng = random.Random(33 + 1000)
+        for step in steps:
+            step["rssi"]["D"] += rng.gauss(0.0, 5.0)
+        monitor = DriftMonitor(BEACONS)
+        for step in steps:
+            monitor.feed(step)
+        raw = [monitor.classify("D").to_dict()]
+        loaded = _drift_classifications_from_dict(raw)
+        self.assertEqual(len(loaded), 1)
+        self.assertAlmostEqual(loaded[0]["early_revisit_delta_db"],
+                               raw[0]["early_revisit_delta_db"])
+        old = [dict(raw[0])]
+        del old[0]["early_revisit_delta_db"]
+        loaded_old = _drift_classifications_from_dict(old)
+        self.assertIsNone(loaded_old[0]["early_revisit_delta_db"])
 
     def test_spread_growth_gate_repairs_whole_walk_excursion(self):
         # The v0.72.0 fix, pinned by seed: on three loops the

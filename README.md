@@ -4751,3 +4751,107 @@ are the two remaining late cliffs and the single-loop slow
 sag, both measured limits of this evidence. The roadmap
 grows as new needs surface — a dying battery getting
 noisier as it drains is the latest addition.
+
+## The decline has to be there early, not just late
+
+The v0.72.0 notes left the two remaining late cliffs (seeds
+33, 97, plus out-of-sample 124) and the single-loop slow sag.
+Two of the three cliffs have a fix, and it is the mirror image
+of the late-decline gate: a sag declines from the start, so the
+decline must be there early as well as late. The discriminator
+is the early revisit delta — the mean paired delta over the
+first two-thirds of the floor's long history, the part before
+the late interval. A draining battery reads weaker at revisited
+spots between the first pass over the ward and the second; a
+late cliff's excursion sits in the tail, so its early revisits
+read the same level twice. Seeds 33 and 97 read stronger
+early (+0.06 and +0.23 dB over 41 pairs) — the opposite of a
+drain — so the short-window sag call is vetoed and they fall
+through: seed 33 reads `noisy` (its short window spreads
+5.72 dB, past the 4 dB gate) and seed 97 reads `healthy` (its
+short spread is 3.86 dB, under the noisy gate, and its mean of
+-2.05 dB is inside the uncertain gates — the same miss the
+other healthy-reading noisy seeds already have, not a new
+one).
+
+The gate is a sign test at 0.0 — the natural boundary (a
+draining battery cannot read stronger), not a tuned threshold
+— and it needs at least 30 early pairs to trust the sign. The
+pair count is what makes the gate safe: a full revisit round on
+the default walk is 40 pairs, and a true sag's early decline
+over a full round (-1.9 dB on average, standard error about
+0.6 dB) sits 3 standard errors from zero — but a subset of the
+round is both smaller and noisier, and the first half of the
+round expects only about -1.3 dB. With the 30-pair minimum the
+gate stays silent on two loops (14 early pairs) and for a
+beacon that went dark mid-walk (25 pairs), and vetoes no
+short-route true slow sag on three loops on either sample. A
+sag blocked here falls through to the long-history check,
+whose own gates still fire for a real decline, so the cost of
+the gate is the verdict's route, not the verdict itself — the
+same design as the late-decline gate.
+
+Four other formulations were measured and rejected before it,
+in-sample and out-of-sample on the pinned seed sweeps:
+
+- The earliest half of the revisit pairs: repairs both
+  cliffs on three loops, but costs true slow sags on two
+  loops (seeds 80 and 81 in-sample, 157 out-of-sample, whose
+  long route cannot rescue them there) — the subset's
+  expected decline is only about -1.0 dB, so the sign flukes.
+- The middle-third pairs: the same cost (seeds 1, 80 and 81
+  in-sample, 157 out-of-sample), for the same reason.
+- The revisit delta over the first half of the long window:
+  repairs only seed 97 — seed 33's is -0.52 dB, a hair under
+  the 0.0 gate — and moves 23 short-route sags to the long
+  route on three loops in-sample (including canonical seed
+  1), since the window holds only 21 pairs and the statistic
+  is noisier than the full round.
+- The mid-first spread-growth veto (the spread of the middle
+  third minus that of the first): repairs seeds 33 and 124
+  on three loops, but costs true slow sags on two loops
+  (seeds 31, 81, 92 and 94 in-sample, 121, 154 and 157
+  out-of-sample) — the same two-loop cost that kept the
+  spread-growth gate off the short route in v0.72.0.
+
+The first-round revisit delta as a blanket requirement was
+measured and rejected in v0.71.0: it costs 4 true sags
+out-of-sample when it blocks both routes. This gate vetoes
+the short route only, with the long route still open
+underneath — the placement is the new part, not the
+statistic.
+
+Measured behaviour (v0.73.0): 2 dB RSSI noise, beacon D,
+three loops — the other beacons stay `healthy` in every
+scenario, on all 100 seeds:
+
+| walk | verdicts, seeds 1–100 | verdicts, seeds 101–200 |
+|---|---|---|
+| three-loop, D with 5 dB extra noise | `noisy` 90, `healthy` 10 (was `noisy` 89, `battery-sag` 2, `healthy` 9) | `noisy` 89, `uncertain` 1, `healthy` 9, `battery-sag` 1 — unchanged |
+| three-loop, D draining, 0.3/hr | `battery-sag` 98, `noisy` 2 — unchanged | `battery-sag` 99, `noisy` 1 — unchanged |
+| two-loop, every scenario | unchanged | unchanged |
+| single-loop, every scenario | unchanged — the gate needs 30 early pairs, and a single loop holds none |
+
+The fix is honest about what it does not repair. Seed 124
+out of sample still reads `battery-sag`: its excursion
+started early (-1.57 dB over 41 pairs before the late
+interval) and kept falling (-2.41 dB late), so no statistic
+on this evidence tells it from a sag. Seed 97 reads
+`healthy`, not `noisy`: its short-window spread sits 0.14 dB
+under the noisy gate, so with the sag call vetoed there is
+no verdict left that fits — the long window's spread
+(5.03 dB) would fit one, but the noisy verdict reads
+the short window by design. And the margins are thin in a
+new place: seed 33's early delta is +0.06 dB, a sign test,
+not a comfortable gap, and the closest true sag's early
+delta is +0.69 dB (seed 105, out of sample) — the sign test
+alone would veto a real sag — but it rests on 25 pairs,
+under the 30-pair minimum, so the gate stays silent. The
+margin is in the pair count, not the delta. The
+classification carries the evidence as
+`early_revisit_delta_db`, and the export round-trips it (a
+file written before v0.73.0 loads with it null). The next
+items are the last late cliff (seed 124) and the
+single-loop slow sag, both measured limits of this evidence.
+The roadmap grows as new needs surface — the decline having
+to be there early is the latest addition.
