@@ -326,6 +326,68 @@ class MultifloorDriftMonitorTest(unittest.TestCase):
             self.assertEqual(monitor.classify("D").verdict,
                              expected[seed], f"seed {seed}")
 
+    def test_three_loops_steady_offset_is_uncertain_at_default_window(self):
+        # The v0.64.0 fix: on the tripled two-floor walk at the
+        # default 20-reading window the steady offset read "moved"
+        # on seed 1 — its short window's spread flukes to 2.70 dB,
+        # 0.20 dB over the moved gate, around a -5.96 dB mean with a
+        # stable revisit delta. The moved call now needs the longer
+        # history to agree that the spread is real excess over the
+        # 2 dB noise, and the offset's 120-reading history spreads
+        # only 2.09 dB, so the verdict falls through to uncertain
+        # instead. The short spread stays above the gate — the test
+        # pins the fluke, not just the verdict, so it fails without
+        # the fix.
+        for seed in SEEDS:
+            monitor = DriftMonitor(BEACONS, window=20)
+            for step in _walk(seed, "offset", loops=3):
+                monitor.feed(step)
+            result = monitor.classify("D")
+            self.assertEqual(result.verdict, "uncertain", f"seed {seed}")
+            self.assertEqual([a.id for a in monitor.alarms()], ["D"],
+                             f"seed {seed}")
+            others = [c for c in monitor.classifications()
+                      if c.id != "D"]
+            self.assertTrue(all(c.verdict == "healthy" for c in others),
+                            f"seed {seed}")
+        monitor = DriftMonitor(BEACONS, window=20)
+        for step in _walk(1, "offset", loops=3):
+            monitor.feed(step)
+        result = monitor.classify("D")
+        self.assertGreater(result.residual_std_db, 2.5)
+        self.assertAlmostEqual(result.mean_residual_db, -5.96, places=1)
+
+    def test_three_loops_moved_is_moved_at_default_window(self):
+        # The guard for the v0.64.0 fix: the moved beacon must
+        # still read "moved" on every seed at the default window —
+        # the confirmation must not cost real moves. Its long
+        # spread is 2.57 to 2.95 dB over 120 readings, 4.4 to 7.4
+        # standard errors above the 2 dB noise, so the longer
+        # history agrees and the reason says so.
+        for seed in SEEDS:
+            monitor = DriftMonitor(BEACONS, window=20)
+            for step in _walk(seed, "move", loops=3):
+                monitor.feed(step)
+            result = monitor.classify("D")
+            self.assertEqual(result.verdict, "moved", f"seed {seed}")
+            self.assertIn("longer 120-reading history", result.reason,
+                          f"seed {seed}")
+            others = [c for c in monitor.classifications()
+                      if c.id != "D"]
+            self.assertTrue(all(c.verdict == "healthy" for c in others),
+                            f"seed {seed}")
+
+    def test_spread_above_noise_needs_significance(self):
+        # The confirmation's arithmetic, pinned at the boundary:
+        # 2.09 dB over 120 readings is 0.70 standard errors above
+        # 2 dB noise (the offset's settled spread), 2.57 dB is 4.4
+        # (the moved beacon's) — one fails the 1.5-SE gate, one
+        # clears it.
+        from beacon.drift import _spread_above_noise
+        self.assertFalse(_spread_above_noise(2.09, 120, 2.0))
+        self.assertTrue(_spread_above_noise(2.57, 120, 2.0))
+        self.assertFalse(_spread_above_noise(2.0, 120, 2.0))
+
     def test_moved_verdict_is_the_same_mid_walk_and_at_the_end(self):
         # The verdict used to follow the window: classified halfway
         # through the walk — at the end of the floor-0 pass, with

@@ -2667,16 +2667,31 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   on A names tag-1 only, `tag-1: A +8.5 dB (uncertain);
   tag-2: none`, with a single-device overlay byte-identical
   to v0.43.0.
-- Steady-offset misread as a moved beacon (next): on the tripled
-  two-floor walk at the default 20-reading window, a steady -6 dB
-  offset reads `moved` on seed 1 — the short window's spread is
-  2.70 dB, 0.20 dB over the moved gate, around a -5.96 dB mean
-  with a stable revisit delta — a noise-inflated spread, not a
-  position-dependent pattern. The level-drop check (v0.63.0)
-  fixed the same offset misreading as a sag; the moved call
-  needs its own discriminator for a flat level with a wide
-  spread, grounded in the same design: a move's spread comes
-  with a position pattern, a noise fluke's does not.
+- Steady-offset misread as a moved beacon — done (v0.64.0): on
+  the tripled two-floor walk at the default 20-reading window, a
+  steady -6 dB offset read `moved` on seed 1 — the short window's
+  spread is 2.70 dB, 0.20 dB over the moved gate, around a -5.96
+  dB mean with a stable revisit delta — a noise-inflated spread,
+  not a position-dependent pattern. The level-drop check (v0.63.0)
+  fixed the same offset misreading as a sag; the moved call now
+  has its own discriminator, in the same design: when a longer
+  history exists, the short-window moved call needs it to agree
+  that the spread is real — the long window's spread must clear
+  the 2 dB expected noise by at least 1.5 standard errors. The
+  offset's 120-reading history spreads 2.09 dB, 0.70 standard
+  errors above noise, so it reads `uncertain` on 5/5 seeds, while
+  the moved beacon's long spread is 2.57 to 2.95 dB, 4.4 to 7.4
+  standard errors above noise, so it stays `moved` on 5/5. A
+  residual-vs-distance correlation was measured and rejected: the
+  moved beacon reads louder almost everywhere, since it moved
+  towards the ward interior, so its correlation with distance is
+  near zero (-0.05 over the long history on seed 1) and the
+  offset's is the same size. The margin is honest but thin — the
+  offset's long spread clears the noise test by only 0.10 dB on
+  seed 1, and on two loops seed 3's short spread sits 0.01 dB
+  under the moved gate with a long spread that would pass the
+  test, so a slightly unluckier noise draw could still misread
+  it (see the v0.64.0 notes at the end).
 
 ## Combined multi-device track export
 
@@ -3848,12 +3863,90 @@ side: its level falls 1.18 dB across the walk, past the drop
 gate, and it stays `uncertain` only because its long revisit
 delta (-0.14 dB) never clears the sag gate — the two pieces of
 evidence check different things, and a verdict needs both.
-One adjacent misread is still open and untouched by this change:
-on the tripled two-floor walk at the default 20-reading window,
-the steady offset reads `moved` on seed 1, because the short
-window's spread is 2.70 dB — 0.20 dB over the moved gate — around
-a -5.96 dB mean with a stable revisit delta. That is a
-noise-inflated spread, not a decline, and it belongs to the
-moved gate's own history, not to this fix.
+The adjacent misread on the moved side — the steady offset
+reading `moved` on the tripled walk at the default window — is
+fixed in v0.64.0 (see the notes at the end): the moved call now
+needs the longer history to agree that the spread is real.
 The roadmap grows as new needs surface — the level-drop check
 for the sag call is the latest addition.
+
+## A longer history must agree the spread is real
+
+The level-drop check fixed the steady offset misreading as a
+sag, but the same offset misread as a moved beacon on the other
+side: on the tripled two-floor walk at the default 20-reading
+window it reads `moved` on seed 1, because the short window's
+spread is 2.70 dB — 0.20 dB over the moved gate — around a
+-5.96 dB mean with a stable revisit delta (+0.17 dB over 20
+pairs). That is a noise-inflated spread, not a position
+pattern, and the gate is not the problem: a spread estimated
+from 20 readings carries a ~0.3 dB standard error, so pure
+noise clears a 2.5 dB gate about one time in twenty. The fix
+is the same design as the longer history for the moved call —
+more history, not a sharper threshold — applied the other way
+round. When a longer history exists, the short-window moved
+call now needs it to agree that the spread is real: the long
+window's spread must clear the expected 2 dB noise by at least
+1.5 standard errors, the same magnitude-plus-significance
+convention as the sag gates, where the standard error of a
+spread estimated from n readings under pure noise is
+noise / sqrt(2n). A moved beacon's residuals carry a position
+pattern on top of the noise, so its settled spread clears it;
+a steady offset's residuals are pure noise, so its settled
+spread sits at the noise level and the verdict falls through to
+`uncertain`. The verdict's reason cites the longer history it
+rests on, and the reported mean, spread, delta and pair count
+stay the short window's — the same convention as the
+long-history sag and moved verdicts. When the long window holds
+no more readings than the short one, it says nothing the short
+window has not already said, and the call reads the short
+window alone.
+
+A residual-vs-distance correlation was measured and rejected
+as the discriminator first. The moved beacon reads louder
+almost everywhere, since it moved from the corner (0, 12)
+towards the ward interior (5, 7), so its correlation with
+distance to the calibrated position is near zero (-0.05 over
+the 120-reading history on seed 1) — the pattern is a
+localised dip near the old corner, not a monotone trend — and
+the offset's correlation is the same size (+0.08 on the short
+window, -0.06 over the long history), so no correlation gate
+separates them. The settled spread is the statistic that
+matches the physics: a move adds position variance on top of
+the noise, an offset does not.
+
+```sh
+python3 -m beacon.cli --drift-classify --multifloor --seed 1 --loops 3
+python3 -m beacon.cli --drift-classify --multifloor --seed 1 --move-beacon D:5,-5 --loops 3
+```
+
+Measured behaviour (v0.64.0): 2 dB RSSI noise, beacon D,
+seeds 1, 2, 3, 7, 11 — the other beacons stay `healthy` in
+every scenario:
+
+| walk | verdicts |
+|---|---|
+| two-floor, D steady -6 dB offset, `--loops 3`, default 20-reading window | `uncertain` 5/5 (was 4/5 — seed 1 now `uncertain`: short-window spread still 2.70 dB, but the 120-reading history spreads only 2.09 dB, 0.70 standard errors above the 2 dB noise) |
+| two-floor, D moved (0, 12) to (5, 7), `--loops 3`, default 20-reading window | `moved` 5/5, unchanged (long spread 2.57 to 2.95 dB, 4.4 to 7.4 standard errors above noise; the reason cites the longer history) |
+| two-floor, D moved, two loops, default 20-reading window | `moved` 5/5, unchanged (long spread 2.47 to 3.07 dB — seed 1's 2.47 dB is 2.97 standard errors above noise) |
+| two-floor, D steady -6 dB offset, two loops, default 20-reading window | `uncertain` 5/5, unchanged |
+| single-floor, D moved / offset | unchanged: `moved` 5/5, `uncertain` 5/5 (long spread 2.64 to 2.92 dB for the move) |
+| two-floor, D moved / offset, demo 80-reading window | unchanged: `moved` 5/5 / `uncertain` 5/5 at three loops; `moved` 3/5 / `uncertain` 5/5 at two loops |
+
+The fix is honest about its margin, and it is thin. The
+offset's long spread clears the noise test by only 0.10 dB on
+seed 1 (2.09 dB against a 2.19 dB gate), and on two loops seed
+3's short spread sits 0.01 dB under the moved gate with a long
+spread of 2.34 dB — 2.15 standard errors above noise, past the
+test — so a slightly unluckier noise draw, one that pushed the
+short spread 0.02 dB higher, would still misread it as `moved`.
+The two gates check different things — the short spread against
+2.5 dB, the long spread against the noise — and a verdict needs
+both, but both are estimates from the same noise, so a fluke
+that spans the whole walk rather than just the short window
+would still fake a move, and only more history would settle it.
+Extra seeds 5, 13, 17 and 23, measured after the fix, agree:
+the offset reads `uncertain` on 4/4 and the move reads `moved`
+on 4/4 at the default window on the tripled walk.
+The roadmap grows as new needs surface — the longer history
+agreeing the spread is real is the latest addition.

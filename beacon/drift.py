@@ -73,7 +73,16 @@ signatures in the residuals, so ``classify`` names the cause:
   short window's spread misses the gate, the classifier consults
   the longer history too: the same spread and mean gates, the
   same stable-revisit requirement, over the long window's
-  readings, where the spread estimate has settled.
+  readings, where the spread estimate has settled. The same
+  noise cuts the other way: a steady offset's short window can
+  fluke *above* the gate — on the tripled two-floor walk its
+  spread is 2.70 dB on seed 1 — so when a longer history exists
+  the short-window call also needs it to agree that the spread is
+  real: the long window's spread must clear the expected noise by
+  at least 1.5 standard errors, the same convention as the sag
+  gates. A moved beacon's spread survives the longer history; a
+  noise fluke settles to the noise level and the verdict falls
+  through to ``uncertain`` instead.
 - **noisy**: the residual spread is more than twice the expected
   RSSI noise (``noise_db``, 2 dB by default, so above 4 dB) with
   no coherent time trend — the beacon is still roughly calibrated
@@ -168,7 +177,28 @@ per-floor history there, so no longer history exists to consult;
 the fix is a third loop, not a sharper threshold. A move under
 about 2 m is invisible at 2 dB noise and is called healthy or
 uncertain, which is a limit of the data, not a bug in the
-classifier.
+classifier. And the third loop opened the adjacent misread the
+other way: at the default 20-reading window the steady offset
+reads ``moved`` on seed 1, its short spread fluking to 2.70 dB,
+0.20 dB over the gate, around a -5.96 dB mean with a stable
+revisit delta. The moved call now needs the longer history to
+agree that the spread is real — the 120-reading history's spread
+must clear the 2 dB noise by at least 1.5 standard errors — and
+the offset's settles to 2.09 dB, 0.70 standard errors above noise,
+so it reads ``uncertain`` on 5/5 seeds while the moved beacon
+stays ``moved`` on 5/5 (its long spread is 2.57 to 2.95 dB, 4.4
+to 7.4 standard errors above noise). A residual-vs-distance
+correlation was measured and rejected as the discriminator: the
+moved beacon reads louder almost everywhere, since it moved
+towards the ward interior, so its correlation with distance is
+near zero (-0.05 over the long history on seed 1) — the pattern
+is a localised dip near the old corner, not a monotone trend —
+and the offset's is the same size, so no correlation gate
+separates them. The margin on the fix is honest but thin: the
+offset's long spread clears the noise test by only 0.10 dB on
+seed 1, and on two loops seed 3's short spread sits 0.01 dB under
+the moved gate with a long spread that would pass the test, so a
+slightly unluckier noise draw could still misread it.
 """
 
 import math
@@ -243,6 +273,21 @@ SAG_DROP_MIN_T = -1.5
 MOVED_STD_MIN_DB = 2.5
 MOVED_MEAN_MIN_DB = 1.5
 
+# The short-window moved call needs the longer history to agree
+# that the spread is real: the long window's spread must clear
+# the expected noise by at least this many standard errors. A
+# steady offset's residuals are pure noise, so its settled spread
+# sits at the noise level; a moved beacon's residuals carry a
+# position pattern on top of the noise, so its settled spread
+# clears it. The standard error of a spread estimated from n
+# readings under pure noise is noise_db / sqrt(2n) — 20 readings:
+# ~0.3 dB, 120 readings: ~0.13 dB — so a 20-reading spread can
+# fluke 0.20 dB over the moved gate (tripled two-floor walk,
+# steady offset, seed 1: short spread 2.70 dB, long spread
+# 2.09 dB) while the settled spread says noise. The same 1.5-SE
+# convention as the sag gates.
+MOVED_LONG_SPREAD_MIN_T = 1.5
+
 # A beacon is "off calibration but unclassifiable" when its mean
 # residual is this far from zero in standard errors (and at least
 # this many dB) — the noise floor for calling something wrong
@@ -311,6 +356,28 @@ def _level_drop(entries: list[tuple[int, float, float, int, float]]
     se = math.sqrt(_stdev(first) ** 2 / len(first)
                    + _stdev(last) ** 2 / len(last))
     return drop, se
+
+
+def _spread_above_noise(std: float, samples: int, noise_db: float,
+                        min_t: float = MOVED_LONG_SPREAD_MIN_T) -> bool:
+    """Whether a residual spread is real excess over the expected noise.
+
+    The moved signature is spread *beyond noise*: a moved beacon's
+    residuals vary with position on top of the noise, while a steady
+    offset's are pure noise. A spread estimated from ``samples``
+    readings has a standard error of about ``noise_db / sqrt(2 *
+    samples)`` under pure noise, so this asks whether ``std`` clears
+    the noise level by at least ``min_t`` of those standard errors —
+    the same 1.5-SE convention as the sag gates. A short window's
+    spread is a noisy estimate (20 readings: ~0.3 dB), so a steady
+    offset's short window can fluke above the moved gate while its
+    settled spread sits at the noise level; the long window's
+    estimate is the one that settles.
+    """
+    if samples < 2:
+        return False
+    se = noise_db / math.sqrt(2 * samples)
+    return std > noise_db + min_t * se
 
 
 @dataclass(frozen=True)
@@ -891,17 +958,43 @@ class DriftMonitor:
         # position-dependent amount — the residuals spread out
         # around a shifted mean. Without revisits only a move
         # towards the walked area shows up (it reads louder), so
-        # the fallback requires a positive mean.
+        # the fallback requires a positive mean. The spread in a
+        # short window is a noisy estimate — 20 readings carry a
+        # ~0.3 dB standard error — so a steady offset's short
+        # window can fluke above the gate while its settled spread
+        # sits at the noise level: on the tripled two-floor walk
+        # the offset's short spread is 2.70 dB on seed 1 but its
+        # 120-reading history spreads only 2.09 dB, 0.70 standard
+        # errors above the 2 dB noise. When a longer history
+        # exists, the short-window call needs it to agree that the
+        # spread is real excess over the expected noise (at least
+        # 1.5 standard errors above it, the same convention as
+        # the sag gates) — a moved beacon's spread survives the
+        # longer history, a noise fluke does not, and the verdict
+        # falls through to uncertain instead. When the long window
+        # holds no more readings than the short one, it says
+        # nothing the short window has not already said, and the
+        # call reads the short window alone.
         if std > MOVED_STD_MIN_DB and abs(mean) > MOVED_MEAN_MIN_DB:
             if pairs >= 5:
                 if delta is not None and abs(delta) < 1.0:
-                    return result(
-                        "moved",
-                        f"residual at revisited spots is stable "
-                        f"({delta:+.2f} dB over {pairs} pairs) but "
-                        f"the window spreads {std:.2f} dB around a "
-                        f"{mean:+.2f} dB mean — the geometry is "
-                        "wrong, not the power")
+                    if (len(long_window) <= samples
+                            or _spread_above_noise(
+                                long_std, len(long_window),
+                                self._noise_db)):
+                        reason = (
+                            f"residual at revisited spots is stable "
+                            f"({delta:+.2f} dB over {pairs} pairs) but "
+                            f"the window spreads {std:.2f} dB around a "
+                            f"{mean:+.2f} dB mean — the geometry is "
+                            "wrong, not the power")
+                        if len(long_window) > samples:
+                            reason += (
+                                f", and the longer "
+                                f"{len(long_window)}-reading history "
+                                f"spreads {long_std:.2f} dB, above the "
+                                f"{self._noise_db:.2f} dB noise")
+                        return result("moved", reason)
             elif mean > MOVED_MEAN_MIN_DB:
                 return result(
                     "moved",
