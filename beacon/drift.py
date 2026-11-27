@@ -108,9 +108,10 @@ a declining residual could be either. Walk the loop twice and the
 two come apart — the same spot, an hour later, reads weaker only
 if the battery is draining. Without revisits the classifier falls
 back to the within-window trend (a strong monotonic decline, or a
-second half of the window much weaker than the first), which
-catches a fast sag most of the time but cannot rule a move out;
-the verdict's reason says which evidence was used. The fallback
+second half of the window much weaker than the first), read from
+the window and from the longer history, which catches a fast sag
+about half the time on a single pass (50/100 seeds) but cannot
+rule a move out; the verdict's reason says which evidence was used. The fallback
 needs the level to have fallen across the walk too — the same
 -1.0 dB, 1.5-standard-error drop gate as the revisit path —
 since a steady offset's within-window slope can fluke below the
@@ -143,8 +144,12 @@ beacon reading weaker overall across that history, is a sag even
 when the short window's mean is above the gate. The long window
 is consulted for the sag only, never for a move — a move's
 signature is positional, not temporal, and the short window
-already carries it — and the noisy check runs first, so a noisy
-beacon whose revisit delta flukes negative stays noisy. Fast
+already carries it — and the noisy check runs after it, so a
+proven decline is named for the decline even when the window
+spreads wide: a dying battery gets noisier as it drains, so the
+spread is the sag's own noise, and what keeps a genuinely noisy
+beacon out of the sag route is its long mean sitting near zero,
+not the ordering. Fast
 detection still rests on the short window: the alarm, the moved
 and noisy verdicts, and the fast-sag fallback all read the short
 window exactly as before.
@@ -183,8 +188,11 @@ only 3/5 on the two-floor walk — seeds 1 and 2, spreads 2.47
 and 2.50 dB — because the short window already holds the whole
 per-floor history there, so no longer history exists to consult;
 the fix is a third loop, not a sharper threshold. A move under
-about 2 m is invisible at 2 dB noise and is called healthy or
-uncertain, which is a limit of the data, not a bug in the
+about 2 m sits at the detection floor at 2 dB noise: on the
+canonical seeds it is called healthy or uncertain, but across
+seeds 1–100 it reads moved on 18 — its position pattern is
+about the size of the noise, so the call is a coin flip at that
+distance, which is a limit of the data, not a bug in the
 classifier. And the third loop opened the adjacent misread the
 other way: at the default 20-reading window the steady offset
 reads ``moved`` on seed 1, its short spread fluking to 2.70 dB,
@@ -577,9 +585,9 @@ class DriftMonitor:
         # two-floor walk the own-floor window averages a fresh loop
         # with a drained one), but across the long window the
         # decline at revisited spots is measurable, so the sag
-        # check consults this window while the alarm, the moved
-        # and noisy verdicts, and the fast-sag fallback all keep
-        # reading the short one.
+        # check consults this window, and the fast-sag fallback
+        # reads its trend from it too, while the alarm and the
+        # moved and noisy verdicts all keep reading the short one.
         self._long_observations: dict[str, dict[int, deque[tuple[int, float, float, int, float]]]] = {
             b.id: {} for b in beacons}
         self._history: dict[str, deque[tuple[int, float, float, int, float]]] = {
@@ -836,6 +844,29 @@ class DriftMonitor:
         long_window = list(self._long_window_for(beacon_id, floor))
         drop, drop_se = _level_drop(long_window)
 
+        # The trend over the floor's long history — the same
+        # readings as the rolling window, kept longer. The
+        # fallback's trend gate used to read the 20-reading
+        # window alone, and a real decline can hide in it while
+        # showing across the full history: on a single loop the
+        # long window holds all 40 readings (24 when the beacon
+        # goes dark mid-walk) against the short window's 20, so
+        # the long trend is a real second opinion, not the same
+        # readings twice — the same design as the level drop,
+        # which already reads the long window. The reported mean,
+        # slope, delta and pair count stay the short window's —
+        # the same convention as the long-history sag and moved
+        # verdicts — and the reason says which history the trend
+        # rests on.
+        long_trend_residuals = [entry[4] for entry in long_window]
+        long_slope = _slope(list(range(len(long_trend_residuals))),
+                            long_trend_residuals)
+        long_half = len(long_trend_residuals) // 2
+        long_half_delta = (
+            _mean(long_trend_residuals[long_half:])
+            - _mean(long_trend_residuals[:long_half])
+            if long_half else 0.0)
+
         def result(verdict: str, reason: str) -> DriftClassification:
             return DriftClassification(
                 id=beacon_id, floor=floor, verdict=verdict,
@@ -854,7 +885,11 @@ class DriftMonitor:
 
         # Battery sag: weaker overall, and falling at the same spot.
         # With revisits the delta is the evidence; without them the
-        # within-window trend has to carry it, and a move cannot be
+        # trend has to carry it — read from the window and from the
+        # longer history, since a real decline can hide in the
+        # 20-reading window while showing across the full history
+        # (on a single loop the long window holds all 40 readings
+        # against the short window's 20) — and a move cannot be
         # ruled out, so the reason says so. Either way the level
         # must actually have fallen across the walk: the revisit
         # delta alone can be faked by a noise excursion in the
@@ -892,28 +927,29 @@ class DriftMonitor:
                         "beacon reads weaker at the same place "
                         "over time, and keeps falling")
             elif ((slope <= SAG_SLOPE_MAX_DB_PER_STEP
-                    or half_delta <= SAG_HALF_DELTA_MAX_DB)
+                    or half_delta <= SAG_HALF_DELTA_MAX_DB
+                    or long_slope <= SAG_SLOPE_MAX_DB_PER_STEP
+                    or long_half_delta <= SAG_HALF_DELTA_MAX_DB)
                     and drop is not None and drop_se is not None
                     and drop < SAG_DROP_MAX_DB
                     and drop < SAG_DROP_MIN_T * drop_se):
+                if (slope <= SAG_SLOPE_MAX_DB_PER_STEP
+                        or half_delta <= SAG_HALF_DELTA_MAX_DB):
+                    trend_scope = "within the window"
+                    trend_slope = slope
+                else:
+                    trend_scope = (
+                        f"over the longer "
+                        f"{len(long_window)}-reading history")
+                    trend_slope = long_slope
                 return result(
                     "battery-sag",
                     f"mean residual {mean:.2f} dB and the residual "
-                    f"falls {slope:.2f} dB per reading within the "
-                    "window and the level fell {drop:.2f} dB from "
-                    "the first quarter to the last quarter of the "
-                    "history — no revisits to confirm against, so "
-                    "a move cannot be ruled out")
-
-        # Noise: spread more than twice the expected RSSI noise,
-        # with no coherent decline.
-        if std > 2.0 * self._noise_db:
-            return result(
-                "noisy",
-                f"residual spread {std:.2f} dB is more than twice "
-                f"the expected {self._noise_db:.2f} dB noise, with "
-                f"no steady decline — the beacon is unreliable, "
-                "not miscalibrated")
+                    f"falls {trend_slope:.2f} dB per reading "
+                    f"{trend_scope} and the level fell {drop:.2f} dB "
+                    f"from the first quarter to the last quarter of "
+                    f"the history — no revisits to confirm against, "
+                    f"so a move cannot be ruled out")
 
         # The long window was already read above, for the level
         # drop — the same readings as the rolling window, kept
@@ -949,9 +985,18 @@ class DriftMonitor:
         # borrow this route). The level must have fallen across the
         # history too — the same drop gate as the short-window
         # test, since a steady offset fakes a long revisit decline
-        # the same way it fakes a short one. The noisy check above
-        # runs first, so a noisy beacon whose revisit delta flukes
-        # negative stays noisy, and a moved beacon's revisit delta
+        # the same way it fakes a short one. The noisy check runs
+        # after this one, so a beacon whose long history proves a
+        # decline is named for the decline even when its window
+        # spreads wide — a dying battery gets noisier as it
+        # drains, so the spread is the sag's own noise, not a
+        # second fault. What keeps a genuinely noisy beacon out
+        # of this route is the mean gate below, not the ordering:
+        # its long mean sits near zero, not 1.5 standard errors
+        # below it — a noise fluke that fakes a revisit decline
+        # and a drop together still leaves the mean near zero
+        # (seed 48: long delta -4.17 dB and drop -4.35 dB, but
+        # long mean -0.16 dB) — and a moved beacon's revisit delta
         # is near zero, so it cannot borrow this route either.
         if len(long_window) >= self._min_samples:
             if (long_pairs >= 5
@@ -974,6 +1019,19 @@ class DriftMonitor:
                     f"the last quarter — the slow decline only "
                     f"shows across the full history, not in the "
                     f"{samples}-reading window")
+
+        # Noise: spread more than twice the expected RSSI noise,
+        # with no coherent decline. It runs after the long-history
+        # sag check above, so a proven decline is named for the
+        # decline first — a dying battery gets noisier as it
+        # drains, and its window spread is the sag's own noise.
+        if std > 2.0 * self._noise_db:
+            return result(
+                "noisy",
+                f"residual spread {std:.2f} dB is more than twice "
+                f"the expected {self._noise_db:.2f} dB noise, with "
+                f"no steady decline — the beacon is unreliable, "
+                "not miscalibrated")
 
         # Moved: stable at the same spot, wrong by a
         # position-dependent amount — the residuals spread out

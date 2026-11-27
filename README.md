@@ -597,7 +597,7 @@ stay `healthy` in every scenario):
 | healthy | `healthy` 5/5 (mean -0.90 to +0.38 dB) |
 | D draining, 0.3/hr | `battery-sag` 5/5 (mean -2.17 to -4.73 dB, revisit delta -1.97 to -5.50 dB) |
 | D moved (0, 12) to (5, 7) | `moved` 5/5 (mean +2.92 to +4.21 dB, spread 2.60 to 3.38 dB; seed 11 through the longer history — its short-window revisit delta is -1.84 dB, but over 41 pairs it settles to -1.00 dB) |
-| D moved 1.4 m, to (1, 11) | `uncertain` 3/5, `healthy` 2/5 — never `moved` or `battery-sag` |
+| D moved 1.4 m, to (1, 11) | `uncertain` 3/5, `healthy` 2/5 on the canonical seeds — never `moved` or `battery-sag` there; across seeds 1–100 it reads `moved` on 18, so the 1.4 m move sits at the detection floor, not below it |
 | D with 5 dB extra noise | `noisy` 5/5 (spread 4.33 to 6.68 dB) |
 | D steady -6 dB offset | `uncertain` 5/5 (mean -5.62 to -6.90 dB, alarming on D throughout) |
 
@@ -4136,3 +4136,115 @@ gates, so they stay `uncertain` — the drop alone never calls
 a sag.
 The roadmap grows as new needs surface — the level-drop gate
 on the no-revisit sag fallback is the latest addition.
+
+## The fallback trend reads the longer history too
+
+The v0.66.0 notes left two follow-ups, and both pointed at the
+same thing: the margins were measured on five seeds, and five
+seeds flatter the classifier. Swept over seeds 1–100, the
+single-loop fast sag reads `battery-sag` on only 50 — the
+canonical 4/5 was a lucky draw — and the slow sag on two loops
+reads `battery-sag` on 84, `noisy` on 11 and `healthy` on 5.
+Seed 11's fast sag reading `healthy` is not an outlier: 29 of
+the 100 seeds read `healthy`, 20 read `noisy`, 1 reads
+`uncertain`. One pass cannot reliably catch a fast sag; the
+decline is buried in the noise on about half the draws, and no
+statistic in the window can tell a real decline from that fluke.
+
+The measurement also found two real fixes — structural, not
+sharper thresholds. The first is the fallback's trend: it read
+the 20-reading window alone, and a real decline can hide in it
+while showing across the full history. On a single loop the
+long window holds all 40 readings (24 when the beacon goes dark
+mid-walk) against the short window's 20, so the fallback now
+reads the trend from the longer history as well as the window —
+the same gates, the same 1.5-standard-error convention, a longer
+history. Seeds 6 and 24 are the ones it rescues: their short
+slopes (-0.097 and -0.062 dB per reading) never clear the -0.15
+gate, but their long slopes (-0.169 and -0.177 over 24 readings)
+do, and their drops clear the drop gate too, so the fallback
+fires and the reason cites the longer history it rests on.
+
+The second is the order of the noisy check. A dying battery
+gets noisier as it drains — the model adds up to 3 dB of extra
+noise on an empty cell — so a slow sag's window spread crosses
+the 4 dB noisy gate precisely because the battery is dying, and
+the noisy check, running first, named the noise instead of the
+decline the long history already proved. The noisy check now
+runs after the long-history sag check, so a proven decline is
+named for the decline first. What keeps a genuinely noisy
+beacon out of the sag route is the long-mean gate, not the
+ordering: its long mean sits near zero, not 1.5 standard errors
+below it. Seed 48 is the pin for that guard — its noisy beacon
+flukes a long revisit delta of -4.17 dB and a level drop of
+-4.35 dB, but its long mean is only -0.16 dB, so it does not
+read `battery-sag`.
+
+One alternative was measured and rejected: dropping the mean
+gate in the fallback, so a sag could fire on trend plus drop
+alone. It takes the fast sag from 25 to 33 on seeds 1–50 — but
+it lets 8 moved beacons read `battery-sag`, because a moved
+beacon's position pattern fakes both a trend and a drop across
+the walk. The mean gate is load-bearing — a sag only ever
+weakens — so it stays.
+
+```python
+from beacon import Beacon, BatteryModel, DriftMonitor
+from beacon.simulate import rectangular_walk, simulate_walk
+
+beacons = [Beacon("A", 0, 0), Beacon("B", 20, 0),
+           Beacon("C", 20, 12), Beacon("D", 0, 12)]
+steps = simulate_walk(rectangular_walk(20.0, 12.0, 10), beacons,
+                      noise_db=2.0, seed=6,
+                      batteries={"D": BatteryModel(
+                          drain_rate_per_hour=1.2)},
+                      step_seconds=120.0)   # a fast sag, one loop
+monitor = DriftMonitor(beacons)
+for step in steps:
+    monitor.feed(step)
+monitor.classify("D").verdict   # "battery-sag", was "noisy" before the fix
+```
+
+Measured behaviour (v0.67.0): 2 dB RSSI noise, beacon D,
+seeds 1–100 — the other beacons stay `healthy` in every
+two-loop scenario, on all 100 seeds:
+
+| walk | verdicts |
+|---|---|
+| two-loop, healthy | `healthy` 100/100 |
+| two-loop, D slow sag 0.3/hr | `battery-sag` 84, `noisy` 11, `healthy` 5 (was 38 `battery-sag` on seeds 1–50 before the reorder; the reorder rescues seeds 10, 25, 40 and 42 there, and 3 more on seeds 51–100) |
+| two-loop, D moved (0, 12) to (5, 7) | `moved` 98, `uncertain` 2 (seeds 23 and 73) |
+| two-loop, D moved 1.4 m, to (1, 11) | `moved` 18, `uncertain` 64, `healthy` 18 |
+| two-loop, D with 5 dB extra noise | `noisy` 91, `healthy` 8, `moved` 1 |
+| two-loop, D steady -6 dB offset | `uncertain` 99, `moved` 1 (seed 50) |
+| single loop, D fast sag 1.2/hr | `battery-sag` 50, `healthy` 29, `noisy` 20, `uncertain` 1 (was 23 on seeds 1–50 before the long trend; the trend rescues seeds 6 and 24 there, and 1 more on seeds 51–100) |
+| single loop, healthy | `healthy` 100/100 |
+| single loop, D moved (0, 12) to (5, 7) | `moved` 91, `uncertain` 8, `noisy` 1 |
+| single loop, D steady -6 dB offset | `uncertain` 98, `battery-sag` 2 (seeds 57 and 84) |
+| single loop, D steady +6 dB offset | `uncertain` 100/100 |
+
+The fix is honest about its margins, and they are thin in
+exactly the places the v0.66.0 notes worried about. Seed 3's
+drop still clears the significance gate by only 0.02 standard
+errors (-2.92 dB at 1.52), and across the 100 seeds the
+passing drop-t runs from -1.52 to -7.67 (seed 52 is the
+closest on the second fifty, at -1.53) — the drop gate vetoes
+a real fast sag on 9 of the first 50 seeds where the trend
+passes but the drop-t fails, so roughly a third of real
+single-pass fast sags are vetoed by the gate. That is the price
+of the gate, and it is not a guarantee either: seeds 57 and
+84's steady offsets pass both gates — their levels fall 1.28
+and 2.06 dB at 1.94 and 2.24 standard errors, by pure noise —
+and read `battery-sag`, a ~2% false-positive rate on steady
+offsets that no gate at 1.5 standard errors can remove. The
+moved beacon's knife-edge moved too: seed 11's long revisit
+delta sitting 0.004 dB inside its gate is not what misses
+across 100 seeds — the moved beacon misses only on seeds 23
+and 73, both on spread (short-window 2.18 and 2.29 dB, long
+2.41 and 2.30 dB, under the 2.5 dB gate), never on the delta
+gate, whose least-negative passing value is +0.78 dB. The
+spread gate is the binding constraint now, and only more
+history — a third loop — would settle it.
+The roadmap grows as new needs surface — the fallback trend
+reading the longer history, and the noisy check yielding to a
+proven sag, are the latest additions.
