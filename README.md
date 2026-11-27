@@ -503,8 +503,13 @@ shift does. The alarm clears on its own when the rolling mean
 comes back inside the threshold, so a beacon that recovers (the
 trolley moved away) stops alarming without anyone resetting the
 monitor. Unknown beacon ids in an observation are ignored rather
-than failing the stream, and multi-floor positions are rejected,
-since the slab attenuation would look like drift.
+than failing the stream. A multi-floor position is accepted too:
+`observe` takes `(x, y, floor)` (a two-tuple still means floor
+0), and the predicted RSSI accounts for the 3 m vertical gap per
+floor of separation and the 15 dB slab attenuation for a beacon on
+another floor — the same model the simulator uses — so a healthy
+beacon heard through a slab does not read as drift, and revisit
+pairs only match readings on the same floor.
 
 Measured behaviour (simulator, 2 dB RSSI noise): a healthy walk
 raises no alarms; a beacon reading 12 dB too loud alarms with a
@@ -3418,3 +3423,81 @@ above are pinned in the tests, so a future change cannot
 silently claim the anisotropic default wins.
 The roadmap grows as new needs surface — the numerically
 stable anisotropic smoother is the latest addition.
+
+## Drift classification on multi-floor walks
+
+The drift monitor used to reject multi-floor positions: a beacon
+heard through a floor slab reads ~15 dB weaker than the path-loss
+model predicts, so the slab looked like drift, and the live
+tracker worked around it by feeding the monitor only the current
+floor's beacons. The monitor is now floor-aware instead.
+`DriftMonitor.observe` takes `(x, y, floor)` — a two-tuple still
+means floor 0 — and the predicted RSSI is the 3D distance (3 m
+of vertical separation per floor, `floor_height_m`) minus the
+slab attenuation for a beacon on a different floor
+(`floor_attenuation_db`, 15 dB), the same model the simulator
+uses, so a healthy beacon heard through a slab reads as healthy.
+Revisit pairs only match readings on the same floor, so a reading
+upstairs never counts as revisiting the same spot downstairs. The
+tracker passes the live position with its floor now, so a
+floor-1 beacon is no longer read as 15 dB of drift the moment the
+device goes upstairs.
+
+```python
+from beacon import DriftMonitor
+from beacon.simulate import simulate_multifloor_walk, two_floor_walk
+
+monitor = DriftMonitor(beacons)   # beacons on floors 0 and 1
+for step in simulate_multifloor_walk(
+        two_floor_walk(20, 12, 10), beacons, noise_db=2.0, seed=7):
+    monitor.feed(step)   # step["true"] is (x, y, floor)
+monitor.classifications()   # one verdict per beacon
+```
+
+```sh
+python3 -m beacon.cli --drift-classify --multifloor --seed 7
+python3 -m beacon.cli --drift-classify --multifloor --seed 7 --battery-degrade D
+python3 -m beacon.cli --drift-classify --multifloor --seed 7 --move-beacon D:5,-5
+```
+
+`--multifloor` walks the two-floor ward twice — each floor's loop
+twice, so revisits exist per floor — and classifies all eight
+beacons. The window matters as much as the floor model: the
+classifier's evidence is the rolling window, and the default
+20-reading window only ever sees one floor's half-loop, where the
+slab compresses the moved signature below its threshold — a moved
+beacon reads `uncertain` on 4 of 5 seeds. The demo's window spans
+a full two-floor cycle instead (80 readings at 10 steps per side),
+and then the verdicts match the single-floor table. The verdict
+follows the window, not the beacon: classified halfway through
+the walk, at the end of the floor-0 pass with the window on D's
+own floor, the moved beacon reads `moved` on 4 of 5 seeds; by the
+end of the walk the window has moved upstairs and the same beacon
+reads `uncertain` on 4 of 5.
+
+Measured behaviour (v0.58.0): on the doubled two-floor walk,
+2 dB RSSI noise, beacon D, seeds 1, 2, 3, 7, 11 — the other
+seven beacons stay `healthy` in every scenario:
+
+| scenario | verdicts |
+|---|---|
+| healthy | `healthy` 5/5 (mean -0.11 to +0.30 dB, revisit -0.03 to +0.48 dB, 80 pairs) |
+| D draining, 0.3/hr | `battery-sag` 5/5 (mean -1.65 to -2.46 dB, revisit delta -1.14 to -2.02 dB); no alarm, the mean never reaches 5 dB |
+| D moved (0, 12) to (5, 7) | `moved` 4/5 (mean +3.71 to +4.13 dB, spread 2.55 to 2.89 dB); seed 2 `uncertain` (spread 2.32 dB, under the 2.5 dB threshold) |
+| D with 5 dB extra noise | `noisy` 5/5 (spread 4.76 to 5.92 dB) |
+| D steady -6 dB offset | `uncertain` 5/5 (mean -5.70 to -6.11 dB), alarming on D throughout |
+
+The misses are the same honest limits as the single-floor table,
+not new bugs: a move's spread is compressed by the slab on the
+other floor, so seed 2 falls just under the moved threshold, and
+the slow sag's mean never reaches the 5 dB alarm threshold, so
+the alarm misses it and only the classifier catches it. The
+steady offset is actually cleaner here than on the single-floor
+walk — `uncertain` on 5/5, where the single-floor walk misreads
+one seed as a sag — because the longer window averages the noise
+fluke out. What the longer window does not fix is a verdict taken
+mid-walk on the wrong floor: a per-floor window, so the
+classifier always sees each beacon on its own floor, is the next
+step, not a sharper threshold.
+The roadmap grows as new needs surface — drift classification
+on multi-floor walks is the latest addition.

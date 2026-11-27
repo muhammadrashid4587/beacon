@@ -693,17 +693,19 @@ class LiveTracker:
         beacons alarming now. Empty when the tracker has no
         monitor.
 
-        The monitor gets the live position just computed and the
-        beacons heard in this reading that sit on the track's
-        current floor — a beacon heard through a slab reads as
-        drift, so cross-floor beacons stay out. A step too thin
-        to locate never reaches here, so the monitor is only fed
-        positions the tracker actually produced.
+        The monitor gets the live position just computed — with its
+        floor — and the beacons heard in this reading that sit on
+        the track's current floor. The monitor is floor-aware, so
+        the position carries the floor it was estimated on; the
+        same-floor filter stays as defence in depth, so a beacon
+        heard through a slab never reaches the monitor at all. A
+        step too thin to locate never reaches here, so the monitor
+        is only fed positions the tracker actually produced.
         """
         if self._drift_monitor is None:
             return ()
         self._drift_monitor.observe(
-            (position.x, position.y),
+            (position.x, position.y, position.floor),
             {beacon_id: rssi[beacon_id] for beacon_id in heard_now
              if self.engine.beacons[beacon_id].floor
              == position.floor})

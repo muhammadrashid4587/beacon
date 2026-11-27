@@ -118,6 +118,16 @@ DEFAULT_NOISE_DB = 2.0
 # matching — long enough to cover two loops of the default walk.
 DEFAULT_HISTORY = 500
 
+# The floor model the monitor uses for multi-floor positions —
+# the same numbers the simulator uses: 3 m of vertical separation
+# per floor and 15 dB of slab attenuation for a beacon heard
+# through a floor. A beacon on another floor reads weaker by the
+# slab and farther by the vertical gap, and the monitor's predicted
+# RSSI accounts for both, so a healthy cross-floor reading does
+# not look like drift.
+DEFAULT_FLOOR_HEIGHT_M = 3.0
+DEFAULT_FLOOR_ATTENUATION_DB = 15.0
+
 # A revisit pair needs this many readings between the two visits,
 # so two readings from the same pass never count as a revisit.
 DEFAULT_REVISIT_GAP = 10
@@ -271,6 +281,11 @@ class DriftMonitor:
     how many readings must separate two visits to the same spot
     before they count as a revisit, and ``revisit_radius_m`` is how
     close two readings must be to count as the same spot.
+    ``floor_height_m`` and ``floor_attenuation_db`` are the floor
+    model for multi-floor positions (3 m and 15 dB by default,
+    matching the simulator): the predicted RSSI for a beacon on
+    another floor accounts for the vertical gap and the slab, and
+    revisit pairs only match readings on the same floor.
     """
 
     def __init__(self, beacons: list[Beacon],
@@ -280,7 +295,9 @@ class DriftMonitor:
                  noise_db: float = DEFAULT_NOISE_DB,
                  history: int = DEFAULT_HISTORY,
                  revisit_gap: int = DEFAULT_REVISIT_GAP,
-                 revisit_radius_m: float = DEFAULT_REVISIT_RADIUS_M):
+                 revisit_radius_m: float = DEFAULT_REVISIT_RADIUS_M,
+                 floor_height_m: float = DEFAULT_FLOOR_HEIGHT_M,
+                 floor_attenuation_db: float = DEFAULT_FLOOR_ATTENUATION_DB):
         if not beacons:
             raise ValueError("drift monitor needs at least one beacon")
         if window < 1:
@@ -301,6 +318,10 @@ class DriftMonitor:
             raise ValueError("revisit_gap must be at least 1")
         if revisit_radius_m <= 0:
             raise ValueError("revisit_radius_m must be positive")
+        if floor_height_m <= 0:
+            raise ValueError("floor_height_m must be positive")
+        if floor_attenuation_db < 0:
+            raise ValueError("floor_attenuation_db cannot be negative")
         self._beacons = {b.id: b for b in beacons}
         self._window = window
         self._threshold = drift_threshold_db
@@ -308,42 +329,58 @@ class DriftMonitor:
         self._noise_db = noise_db
         self._revisit_gap = revisit_gap
         self._revisit_radius_m = revisit_radius_m
-        # (sequence, x, y, residual) per beacon: the rolling window
-        # for the alarm, and the longer history for classification.
-        self._observations: dict[str, deque[tuple[int, float, float, float]]] = {
+        self._floor_height_m = floor_height_m
+        self._floor_attenuation_db = floor_attenuation_db
+        # (sequence, x, y, floor, residual) per beacon: the rolling
+        # window for the alarm, and the longer history for
+        # classification.
+        self._observations: dict[str, deque[tuple[int, float, float, int, float]]] = {
             b.id: deque(maxlen=window) for b in beacons}
-        self._history: dict[str, deque[tuple[int, float, float, float]]] = {
+        self._history: dict[str, deque[tuple[int, float, float, int, float]]] = {
             b.id: deque(maxlen=history) for b in beacons}
         self._seq = 0
 
-    def observe(self, position: tuple[float, float],
+    def observe(self, position: tuple[float, float]
+                | tuple[float, float, int],
                 rssi: dict[str, float]) -> None:
         """Feed one observation: the device's position and the RSSI heard.
 
-        ``position`` is a single-floor ``(x, y)``; multi-floor
-        positions are rejected, since the slab attenuation would look
-        like drift. Beacons not in the monitor's beacon set are
-        ignored rather than failing the stream.
+        ``position`` is ``(x, y)`` on a single floor, or ``(x, y,
+        floor)`` in a multi-floor building (a two-tuple means floor
+        0). The predicted RSSI is the 3D distance — the vertical gap
+        is ``floor_height_m`` per floor of separation — minus the
+        slab attenuation for a beacon on a different floor from the
+        device, the same model the simulator uses, so a healthy
+        beacon heard through a floor does not read as drift.
+        Beacons not in the monitor's beacon set are ignored rather
+        than failing the stream.
         """
-        if len(position) != 2:
+        if len(position) == 2:
+            x, y, floor = position[0], position[1], 0
+        elif len(position) == 3:
+            x, y, floor = position
+        else:
             raise ValueError(
-                "drift monitor needs single-floor (x, y) positions; "
-                "multi-floor positions are not supported")
-        x, y = position
+                "drift monitor needs an (x, y) or (x, y, floor) "
+                f"position; got {len(position)} values")
         self._seq += 1
         for beacon_id, observed in rssi.items():
             beacon = self._beacons.get(beacon_id)
             if beacon is None:
                 continue
-            distance = math.hypot(x - beacon.x, y - beacon.y)
+            dz = self._floor_height_m * abs(floor - beacon.floor)
+            distance = math.hypot(x - beacon.x, y - beacon.y, dz)
             predicted = distance_to_rssi(
                 distance, beacon.rssi_at_1m, beacon.path_loss_exponent)
-            entry = (self._seq, x, y, observed - predicted)
+            if beacon.floor != floor:
+                predicted -= self._floor_attenuation_db
+            entry = (self._seq, x, y, floor, observed - predicted)
             self._observations[beacon_id].append(entry)
             self._history[beacon_id].append(entry)
 
     def feed(self, step: dict) -> None:
-        """Feed one simulator step: ``{"true": (x, y), "rssi": {...}}``."""
+        """Feed one simulator step: ``{"true": (x, y[, floor]),
+        "rssi": {...}}``."""
         self.observe(step["true"], step["rssi"])
 
     def reset(self) -> None:
@@ -377,7 +414,9 @@ class DriftMonitor:
             history=max(self._history[b].maxlen
                         for b in self._history),
             revisit_gap=self._revisit_gap,
-            revisit_radius_m=self._revisit_radius_m)
+            revisit_radius_m=self._revisit_radius_m,
+            floor_height_m=self._floor_height_m,
+            floor_attenuation_db=self._floor_attenuation_db)
 
     def status(self, beacon_id: str) -> DriftAlarm | None:
         """The rolling residual for one beacon, or ``None`` if unheard."""
@@ -386,7 +425,7 @@ class DriftMonitor:
             raise ValueError(f"unknown beacon: {beacon_id!r}")
         if not observations:
             return None
-        residuals = [entry[3] for entry in observations]
+        residuals = [entry[4] for entry in observations]
         return DriftAlarm(
             id=beacon_id,
             mean_residual_db=_mean(residuals),
@@ -421,18 +460,22 @@ class DriftMonitor:
 
         Each reading in the rolling window is matched to the closest
         earlier reading at (nearly) the same position, at least
-        ``revisit_gap`` readings earlier. Returns ``(mean_delta,
+        ``revisit_gap`` readings earlier — on the same floor, so a
+        reading upstairs never counts as revisiting the same spot
+        downstairs. Returns ``(mean_delta,
         standard_error, pairs)`` — or ``(None, None, 0)`` when fewer
         than five pairs match, which is too few to trust.
         """
         window = self._observations[beacon_id]
         history = self._history[beacon_id]
         deltas = []
-        for seq, x, y, residual in window:
+        for seq, x, y, floor, residual in window:
             best = None
-            for old_seq, old_x, old_y, old_residual in history:
+            for old_seq, old_x, old_y, old_floor, old_residual in history:
                 if old_seq > seq - self._revisit_gap:
                     break
+                if old_floor != floor:
+                    continue
                 distance = math.hypot(x - old_x, y - old_y)
                 if best is None or distance < best[0]:
                     best = (distance, old_residual)
@@ -468,7 +511,7 @@ class DriftMonitor:
                 time_slope_db_per_step=0.0, time_correlation=0.0,
                 revisit_delta_db=None, revisit_pairs=0, samples=0,
                 reason="beacon unheard — no readings to classify")
-        residuals = [entry[3] for entry in window]
+        residuals = [entry[4] for entry in window]
         mean = _mean(residuals)
         std = _stdev(residuals)
         steps = list(range(samples))

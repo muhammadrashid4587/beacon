@@ -1474,10 +1474,24 @@ class TestDriftMonitor(unittest.TestCase):
         with self.assertRaises(ValueError):
             DriftMonitor(BEACONS, window=5, min_samples=6)
 
-    def test_multifloor_position_raises(self):
+    def test_multifloor_position_accepted(self):
+        # The monitor is floor-aware: a (x, y, floor) position is
+        # accepted, and a healthy beacon heard through the slab
+        # reads ~0 residual once the floor model accounts for the
+        # vertical gap and the slab attenuation. A malformed
+        # position is still rejected.
+        import math
+
+        from beacon.rssi import distance_to_rssi
+
         monitor = DriftMonitor(BEACONS)
+        distance = math.hypot(5.0, 5.0, 3.0)
+        expected = distance_to_rssi(distance, -59.0, 2.0) - 15.0
+        monitor.observe((5.0, 5.0, 1), {"A": expected})
+        self.assertAlmostEqual(
+            monitor.status("A").mean_residual_db, 0.0, places=6)
         with self.assertRaises(ValueError):
-            monitor.observe((5.0, 5.0, 0), {"A": -60.0})
+            monitor.observe((5.0, 5.0, 0, 0), {"A": -60.0})
 
 
 class TestDriftClassification(unittest.TestCase):
