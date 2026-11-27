@@ -255,6 +255,39 @@ class MultifloorDriftMonitorTest(unittest.TestCase):
             self.assertTrue(all(c.verdict == "healthy" for c in others),
                             f"seed {seed}")
 
+    def test_long_route_sag_needs_a_level_drop_too(self):
+        # The same discriminator on the long route: the two-floor
+        # slow sag is caught from the long history on seeds 1 and
+        # 11, and the verdict rests on the level having fallen
+        # across that history too — a steady offset fakes a long
+        # revisit decline the same way it fakes a short one, so
+        # the drop gate guards this route as well. The offset's
+        # level stays flat on every seed, and its verdict stays
+        # uncertain.
+        for seed in (1, 11):
+            monitor = _classify(seed, "sag")
+            result = monitor.classify("D")
+            self.assertEqual(result.verdict, "battery-sag",
+                             f"seed {seed}")
+            self.assertIsNotNone(result.level_drop_db)
+            self.assertLess(result.level_drop_db, -1.0,
+                            f"seed {seed}")
+        for seed in SEEDS:
+            monitor = _classify(seed, "offset")
+            result = monitor.classify("D")
+            self.assertEqual(result.verdict, "uncertain",
+                             f"seed {seed}")
+            # The drop gate is not what excludes the offset here:
+            # its long revisit delta never clears the sag gate on
+            # the two-floor walk. Seed 11's level does fall 1.18 dB
+            # across the walk — a noise excursion spanning the
+            # whole walk — so the drop alone would not exclude it;
+            # the verdict stays uncertain because the delta fails.
+            if seed != 11:
+                self.assertIsNotNone(result.level_drop_db)
+                self.assertGreater(result.level_drop_db, -1.0,
+                                   f"seed {seed}")
+
     def test_steady_offset_is_uncertain_on_every_seed(self):
         # A steady -6 dB offset alarms (the mean is beyond 5 dB) but
         # no signature fits, so the classifier says uncertain

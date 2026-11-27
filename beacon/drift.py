@@ -50,7 +50,15 @@ signatures in the residuals, so ``classify`` names the cause:
   whether the residual at that spot has fallen — a move cannot
   change what a beacon reads like at a fixed spot, a draining
   battery can. The beacon must also read weaker overall (mean
-  residual below -1.5 dB); a sag only ever weakens.
+  residual below -1.5 dB); a sag only ever weakens. And the level
+  must actually have fallen across the walk — the mean of the last
+  quarter of the floor's long history at least 1.0 dB below the
+  mean of the first quarter, at least 1.5 standard errors from
+  zero. The revisit delta alone can be faked by a noise excursion
+  in the tail of the walk: a steady offset whose last readings
+  happen to run low reads as a decline at revisited spots even
+  though its level never moved. A sag is a process, an offset is
+  a level, and the drop is the test that tells them apart.
 - **moved**: the residual is stable at the same spot (the revisit
   delta is near zero) but wrong by a position-dependent amount —
   the beacon reads louder near its new home and quieter far from
@@ -133,8 +141,17 @@ its revisit delta settles to -1.00 dB over 41 pairs, inside the
 same 1.0 dB gate by 0.004 dB, which is a knife-edge, not a
 comfortable margin — a beacon with 5 dB of extra noise is called
 noisy on 5/5, and a steady -6 dB offset is called uncertain on
-4/5 and misread as battery-sag on seed 11, where the noise
-itself drifts down over the walk. On the doubled two-floor walk
+5/5. The offset used to misread as a sag on seed 11, where the
+noise itself drifts down over the walk (short-window revisit delta
+-1.84 dB); the sag call now also requires the residual level to
+have fallen across the walk — the last quarter of the history at
+least 1.0 dB below the first, at least 1.5 standard errors from
+zero — and the offset's level only falls 0.75 dB, so it stays
+uncertain. That margin is thin too (0.25 dB on the magnitude gate,
+and the drop's t is -1.46 against a -1.5 gate), and it is reported
+as such: a noise excursion that happened to span the whole walk
+would still fake a sag, and only more history — a third loop —
+would settle it.
 the same slow drain is called battery-sag on 2/5 seeds (1 and
 11) through the long history — seeds 2, 3 and 7 lack the signal
 in the revisit pairs (-0.87, -0.19 and -0.48 dB), so the
@@ -206,6 +223,21 @@ SAG_DELTA_MIN_T = -1.5
 SAG_SLOPE_MAX_DB_PER_STEP = -0.15
 SAG_HALF_DELTA_MAX_DB = -1.5
 
+# A sag is a process, not a level: the beacon's residual must
+# actually fall across the walk — the mean of the last quarter of
+# its history at least this far below the mean of the first
+# quarter, and at least this many standard errors from zero. A
+# steady offset reads weak from the first reading and stays flat,
+# so it fails this gate even when a noise excursion in the tail
+# fakes a revisit decline (single-floor steady -6 dB offset,
+# seed 11: short-window revisit delta -1.84 dB, but the level only
+# falls 0.75 dB from the first quarter to the last, 1.46 standard
+# errors). The same magnitude-plus-significance convention as the
+# revisit-delta gate, so this is a second piece of evidence, not
+# a sharper threshold on the first.
+SAG_DROP_MAX_DB = -1.0
+SAG_DROP_MIN_T = -1.5
+
 # A moved beacon's residuals spread out (geometry wrong in
 # different directions) around a shifted mean.
 MOVED_STD_MIN_DB = 2.5
@@ -258,6 +290,29 @@ def _correlation(xs: list[float], ys: list[float]) -> float:
     return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / den
 
 
+def _level_drop(entries: list[tuple[int, float, float, int, float]]
+                ) -> tuple[float | None, float | None]:
+    """How far the residual level fell across ``entries``.
+
+    The mean of the last quarter of the readings minus the mean of
+    the first quarter, with the standard error of that difference —
+    or ``(None, None)`` when there are too few readings to split
+    into quarters (fewer than eight, so under two per quarter).
+    A draining battery falls steadily, so the last quarter reads
+    much weaker than the first; a steady offset reads the same
+    weak level in both quarters, so the drop is near zero whatever
+    the tail's noise does to the revisit delta.
+    """
+    if len(entries) < 8:
+        return None, None
+    first = [entry[4] for entry in entries[:len(entries) // 4]]
+    last = [entry[4] for entry in entries[3 * len(entries) // 4:]]
+    drop = _mean(last) - _mean(first)
+    se = math.sqrt(_stdev(first) ** 2 / len(first)
+                   + _stdev(last) ** 2 / len(last))
+    return drop, se
+
+
 @dataclass(frozen=True)
 class DriftAlarm:
     """A beacon whose RSSI baseline has shifted.
@@ -298,8 +353,12 @@ class DriftClassification:
     spot between visits (None when the device never revisited a
     spot — under five pairs — so the time trend is the only
     evidence); ``revisit_pairs`` is how many matched pairs that
-    delta rests on; ``samples`` is the window size; ``reason`` says
-    in words why this verdict was reached.
+    delta rests on; ``level_drop_db`` is how far the residual level
+    fell from the first quarter to the last quarter of the floor's
+    long history (None when the history is too short to split) —
+    the check that keeps a steady offset from reading as a sag;
+    ``samples`` is the window size; ``reason`` says in words why
+    this verdict was reached.
     """
 
     id: str
@@ -313,12 +372,14 @@ class DriftClassification:
     revisit_pairs: int
     samples: int
     reason: str
+    level_drop_db: float | None = None
 
     def to_dict(self) -> dict:
         """JSON-friendly form, for the stream output, the exported
         track rows, and dashboards. ``revisit_delta_db`` is null
         when the device never revisited a spot, so no delta was
-        measured."""
+        measured, and ``level_drop_db`` is null when the history
+        was too short to split into quarters."""
         return {
             "id": self.id,
             "floor": self.floor,
@@ -331,6 +392,7 @@ class DriftClassification:
             "revisit_pairs": self.revisit_pairs,
             "samples": self.samples,
             "reason": self.reason,
+            "level_drop_db": self.level_drop_db,
         }
 
 
@@ -689,6 +751,15 @@ class DriftMonitor:
                       if half else 0.0)
         delta, delta_se, pairs = self._revisit_delta(beacon_id, floor,
                                                      window)
+        # The level drop across the floor's long history — the
+        # second piece of sag evidence, measured once and shared by
+        # both revisit-based sag checks below. A sag is a process:
+        # the level falls from the start of the walk to the end. A
+        # steady offset is a level: weak from the first reading and
+        # flat throughout, so the drop is near zero even when a
+        # noise excursion in the tail fakes a revisit decline.
+        long_window = list(self._long_window_for(beacon_id, floor))
+        drop, drop_se = _level_drop(long_window)
 
         def result(verdict: str, reason: str) -> DriftClassification:
             return DriftClassification(
@@ -697,7 +768,8 @@ class DriftMonitor:
                 time_slope_db_per_step=slope,
                 time_correlation=correlation,
                 revisit_delta_db=delta, revisit_pairs=pairs,
-                samples=samples, reason=reason)
+                samples=samples, reason=reason,
+                level_drop_db=drop)
 
         if samples < self._min_samples:
             return result(
@@ -708,18 +780,34 @@ class DriftMonitor:
         # Battery sag: weaker overall, and falling at the same spot.
         # With revisits the delta is the evidence; without them the
         # within-window trend has to carry it, and a move cannot be
-        # ruled out, so the reason says so.
+        # ruled out, so the reason says so. Either way the level
+        # must actually have fallen across the walk: the revisit
+        # delta alone can be faked by a noise excursion in the
+        # tail of the walk (the steady-offset seed 11, whose
+        # short-window delta is -1.84 dB while its level only falls
+        # 0.75 dB from the first quarter to the last), so a sag
+        # needs the drop too — below -1.0 dB and at least 1.5
+        # standard errors from zero, the same convention as the
+        # delta gate. A beacon whose drop does not clear the gate
+        # falls through to the checks below instead of being
+        # called a sag.
         if mean < SAG_MEAN_MAX_DB:
             if pairs >= 5:
                 if (delta is not None and delta_se is not None
                         and delta < SAG_DELTA_MAX_DB
-                        and delta < SAG_DELTA_MIN_T * delta_se):
+                        and delta < SAG_DELTA_MIN_T * delta_se
+                        and drop is not None and drop_se is not None
+                        and drop < SAG_DROP_MAX_DB
+                        and drop < SAG_DROP_MIN_T * drop_se):
                     return result(
                         "battery-sag",
                         f"mean residual {mean:.2f} dB and the residual "
                         f"at revisited spots fell {delta:.2f} dB "
-                        f"({pairs} pairs) — the beacon reads weaker "
-                        "at the same place over time")
+                        f"({pairs} pairs) and the level fell "
+                        f"{drop:.2f} dB from the first quarter to "
+                        f"the last quarter of the history — the "
+                        "beacon reads weaker at the same place "
+                        "over time, and keeps falling")
             elif (slope <= SAG_SLOPE_MAX_DB_PER_STEP
                     or half_delta <= SAG_HALF_DELTA_MAX_DB):
                 return result(
@@ -739,15 +827,14 @@ class DriftMonitor:
                 f"no steady decline — the beacon is unreliable, "
                 "not miscalibrated")
 
-        # The long window, computed once and shared by the two
-        # long-history checks below: the same readings as the
-        # rolling window, kept longer, so a signature spread over
-        # several loops is still measurable after the short window
-        # has forgotten the readings it started from. Empty (or
-        # shorter than the short window) when the walk is too short
-        # for a longer history to exist — then the long checks add
-        # nothing and stay silent.
-        long_window = list(self._long_window_for(beacon_id, floor))
+        # The long window was already read above, for the level
+        # drop — the same readings as the rolling window, kept
+        # longer, so a signature spread over several loops is still
+        # measurable after the short window has forgotten the
+        # readings it started from. Empty (or shorter than the
+        # short window) when the walk is too short for a longer
+        # history to exist — then the long checks add nothing and
+        # stay silent.
         long_residuals = [entry[4] for entry in long_window]
         long_mean = _mean(long_residuals) if long_residuals else 0.0
         long_std = _stdev(long_residuals) if long_residuals else 0.0
@@ -771,24 +858,32 @@ class DriftMonitor:
         # from zero) and weaker overall across it (mean at least
         # 1.5 standard errors below zero — a noise fluke that fakes
         # a revisit decline leaves the mean near zero, so it cannot
-        # borrow this route). The noisy check above runs first, so
-        # a noisy beacon whose revisit delta flukes negative stays
-        # noisy, and a moved beacon's revisit delta is near zero,
-        # so it cannot borrow this route either.
+        # borrow this route). The level must have fallen across the
+        # history too — the same drop gate as the short-window
+        # test, since a steady offset fakes a long revisit decline
+        # the same way it fakes a short one. The noisy check above
+        # runs first, so a noisy beacon whose revisit delta flukes
+        # negative stays noisy, and a moved beacon's revisit delta
+        # is near zero, so it cannot borrow this route either.
         if len(long_window) >= self._min_samples:
             if (long_pairs >= 5
                     and long_delta is not None
                     and long_delta_se is not None
                     and long_delta < SAG_DELTA_MAX_DB
                     and long_delta < SAG_DELTA_MIN_T * long_delta_se
-                    and long_mean < -SAG_LONG_MEAN_MIN_T * long_se_mean):
+                    and long_mean < -SAG_LONG_MEAN_MIN_T * long_se_mean
+                    and drop is not None and drop_se is not None
+                    and drop < SAG_DROP_MAX_DB
+                    and drop < SAG_DROP_MIN_T * drop_se):
                 return result(
                     "battery-sag",
                     f"over the longer {len(long_window)}-reading "
                     f"history on floor {floor} the residual at "
                     f"revisited spots fell {long_delta:.2f} dB "
                     f"({long_pairs} pairs) and the mean is "
-                    f"{long_mean:.2f} dB — the slow decline only "
+                    f"{long_mean:.2f} dB and the level fell "
+                    f"{drop:.2f} dB from the first quarter to "
+                    f"the last quarter — the slow decline only "
                     f"shows across the full history, not in the "
                     f"{samples}-reading window")
 

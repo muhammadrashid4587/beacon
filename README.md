@@ -562,7 +562,18 @@ and the two come apart. Without revisits the classifier falls
 back to the within-window trend — a strong monotonic decline, or
 a second half much weaker than the first — which catches a fast
 sag most of the time but cannot rule a move out, and the reason
-says which evidence was used.
+says which evidence was used. And the revisit delta alone is not
+enough for a sag: a noise excursion in the tail of the walk can
+fake a decline at revisited spots, so the sag call also requires
+the residual level to have fallen across the walk — the mean of
+the last quarter of the floor's long history at least 1.0 dB
+below the mean of the first quarter, at least 1.5 standard
+errors from zero. A sag is a process, a steady offset is a
+level, and the drop is the test that tells them apart: the
+offset reads weak from the first reading and stays flat, so its
+drop is near zero whatever the tail's noise does. The
+classification carries the drop as `level_drop_db`, so the
+evidence for or against a sag is visible on every verdict.
 
 ```sh
 python3 -m beacon.cli --drift-classify --seed 7
@@ -588,7 +599,7 @@ stay `healthy` in every scenario):
 | D moved (0, 12) to (5, 7) | `moved` 5/5 (mean +2.92 to +4.21 dB, spread 2.60 to 3.38 dB; seed 11 through the longer history — its short-window revisit delta is -1.84 dB, but over 41 pairs it settles to -1.00 dB) |
 | D moved 1.4 m, to (1, 11) | `uncertain` 3/5, `healthy` 2/5 — never `moved` or `battery-sag` |
 | D with 5 dB extra noise | `noisy` 5/5 (spread 4.33 to 6.68 dB) |
-| D steady -6 dB offset | `uncertain` 4/5; seed 11 misread as `battery-sag` |
+| D steady -6 dB offset | `uncertain` 5/5 (mean -5.62 to -6.90 dB, alarming on D throughout) |
 
 The misses are honest limits, not bugs to tune away. The slow
 sag's mean residual (-2.17 to -4.73 dB) never reaches the 5 dB
@@ -596,10 +607,13 @@ alarm threshold, so the v0.25.0 alarm misses it entirely — the
 classifier catches it through the revisits. A move under about
 2 m is invisible at 2 dB noise: its residual pattern is smaller
 than the noise, so the classifier calls it `healthy` or
-`uncertain` rather than inventing a cause. And a steady offset
-on seed 11 is misread as a sag because the noise itself drifts
-down -1.84 dB over that walk. The same noise fluke used to turn
-the moved beacon's seed-11 verdict `uncertain`, since the
+`uncertain` rather than inventing a cause. A steady offset used
+to misread as a sag on seed 11, because the noise itself drifts
+down -1.84 dB over that walk — the level-drop check fixes that
+one (see the v0.63.0 notes at the end): the offset's level only
+falls 0.75 dB from the first quarter to the last, against a 1.0
+dB gate, so it stays `uncertain`. The same noise fluke used to
+turn the moved beacon's seed-11 verdict `uncertain`, since the
 monitor could not rule a decline out from the short window
 alone — the longer history fixes that one (see the v0.62.0 notes
 at the end): over 41 pairs the delta settles to -1.00 dB,
@@ -2344,10 +2358,11 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   3, 7, 11: a slow sag is called `battery-sag` 5/5, a 7 m move
   is called `moved` 4/5 (seed 11 `uncertain`), 5 dB of extra
   noise is called `noisy` 5/5, and a steady -6 dB offset is
-  called `uncertain` 4/5 and misread as a sag on seed 11, where
-  the noise itself drifts down — while a move under about 2 m
-  is invisible at 2 dB noise and comes back `healthy` or
-  `uncertain`.
+  called `uncertain` 5/5 (v0.63.0: the sag call now also requires
+  the residual level to have fallen across the walk, so the
+  seed-11 noise fluke no longer reads as a decline), while a move
+  under about 2 m is invisible at 2 dB noise and comes back
+  `healthy` or `uncertain`.
 - Deployment planner (when does each beacon go dark?) — done:
   `plan_deployment` forecasts each beacon's hours to dark, to 3 dB
   of RSSI loss, and to 2 dB of extra noise from its `BatteryModel`
@@ -2652,6 +2667,16 @@ and brings mean error back to 2.2–2.5 m across seeds 1, 2, 3, 7, 11
   on A names tag-1 only, `tag-1: A +8.5 dB (uncertain);
   tag-2: none`, with a single-device overlay byte-identical
   to v0.43.0.
+- Steady-offset misread as a moved beacon (next): on the tripled
+  two-floor walk at the default 20-reading window, a steady -6 dB
+  offset reads `moved` on seed 1 — the short window's spread is
+  2.70 dB, 0.20 dB over the moved gate, around a -5.96 dB mean
+  with a stable revisit delta — a noise-inflated spread, not a
+  position-dependent pattern. The level-drop check (v0.63.0)
+  fixed the same offset misreading as a sag; the moved call
+  needs its own discriminator for a flat level with a wide
+  spread, grounded in the same design: a move's spread comes
+  with a position pattern, a noise fluke's does not.
 
 ## Combined multi-device track export
 
@@ -3757,3 +3782,78 @@ consult, and the verdict stays `uncertain` rather than
 inventing a cause.
 The roadmap grows as new needs surface — the longer history
 for the moved-beacon call is the latest addition.
+## A level-drop check for the sag call
+
+The longer history fixed the moved beacon's seed-11 verdict, but
+the steady offset's seed-11 misread was still untouched: a
+steady -6 dB offset read as `battery-sag` on one seed of five,
+because the noise itself drifts down -1.84 dB over that walk and
+the revisit test reads that as a real decline. A longer history
+does not fix this one — over 41 pairs the long revisit delta is
+-1.00 dB, still past the same 1.0 dB gate by 0.005 dB — so the
+fix is a second piece of evidence, not a sharper threshold on
+the first. A sag is a process: the beacon's residual level falls
+steadily from the start of the walk to the end, as the battery
+drains. A steady offset is a level: weak from the first reading,
+flat throughout. `classify` now requires, on both revisit-based
+sag paths (the short window and the long history), that the
+level actually fell across the walk — the mean of the last
+quarter of the floor's long history at least 1.0 dB below the
+mean of the first quarter, at least 1.5 standard errors from
+zero, the same magnitude-plus-significance convention as the
+revisit-delta gate. The classification carries the drop as
+`level_drop_db`, and the sag reason cites it, so the evidence is
+visible on every verdict; the export round-trips the new field,
+and a file written before v0.63.0 loads with it null.
+
+Two candidate discriminators were measured and rejected first.
+A gap-dependence test — the decline should grow with the time
+between the two visits of a revisit pair — has nothing to work
+with on these walks: every pair spans exactly one loop (gap
+~40 readings), so there is no gap variation to regress on. And
+a within-half slope test — the decline should be sustained in
+both halves of the walk — fails on the real sag itself: the
+battery loses RSSI with the square of the charge used, so the
+decline is concentrated in the second half, and the first half's
+slope is near zero (+0.04 to -0.04 dB per reading) on every
+seed. The quarter-level drop is the statistic that matches the
+physics: compare the freshest readings against the most drained.
+
+```sh
+python3 -m beacon.cli --drift-classify --seed 11 --battery-degrade D
+python3 -m beacon.cli --drift-classify --multifloor --seed 1 --battery-degrade D --loops 3
+```
+
+Measured behaviour (v0.63.0): 2 dB RSSI noise, beacon D,
+seeds 1, 2, 3, 7, 11 — the other beacons stay `healthy` in
+every scenario:
+
+| walk | verdicts |
+|---|---|
+| single-floor, D steady -6 dB offset | `uncertain` 5/5 (was 4/5 — seed 11 now `uncertain`: short-window revisit delta still -1.84 dB, but the level only falls 0.75 dB from the first quarter to the last, against the 1.0 dB gate) |
+| single-floor, D draining 0.3/hr | `battery-sag` 5/5, unchanged (level drops -1.68 to -4.48 dB, 2.05 to 4.93 standard errors) |
+| single-floor, healthy / moved / noisy | unchanged: `healthy` 5/5, `moved` 5/5, `noisy` 5/5 |
+| two-floor, D draining 0.3/hr, `--loops 3` | `battery-sag` 5/5, unchanged (level drops -3.50 to -5.37 dB) |
+| two-floor, D draining 0.3/hr, two loops | `battery-sag` 2/5 (seeds 1 and 11), unchanged (level drops -2.03 and -3.11 dB) |
+| two-floor, D steady -6 dB offset | `uncertain` 5/5, unchanged |
+
+The seed-11 fix is honest about its margin: the offset's level
+drop is -0.75 dB against a 1.0 dB gate — 0.25 dB of margin — and
+its t is -1.46 against a -1.5 gate, so both gates exclude it but
+neither by much. A noise excursion that happened to span the
+whole walk, rather than just the tail, would still fake a sag,
+and only more history — a third loop — would settle it. The
+two-floor offset's seed 11 is the same lesson from the other
+side: its level falls 1.18 dB across the walk, past the drop
+gate, and it stays `uncertain` only because its long revisit
+delta (-0.14 dB) never clears the sag gate — the two pieces of
+evidence check different things, and a verdict needs both.
+One adjacent misread is still open and untouched by this change:
+on the tripled two-floor walk at the default 20-reading window,
+the steady offset reads `moved` on seed 1, because the short
+window's spread is 2.70 dB — 0.20 dB over the moved gate — around
+a -5.96 dB mean with a stable revisit delta. That is a
+noise-inflated spread, not a decline, and it belongs to the
+moved gate's own history, not to this fix.
+The roadmap grows as new needs surface — the level-drop check
+for the sag call is the latest addition.

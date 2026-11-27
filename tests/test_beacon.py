@@ -1608,7 +1608,14 @@ class TestDriftClassification(unittest.TestCase):
         # A steady -6 dB offset alarms (mean beyond 5 dB) but is
         # steady at revisited spots with no position pattern — a
         # stabilised sag and a miscalibration look identical.
-        for seed in (1, 2, 3, 7):
+        # Seed 11 used to be the false positive: the noise drifts
+        # down -1.84 dB over the walk, which the revisit test reads
+        # as a real decline. The sag call now also requires the
+        # residual level to have fallen across the walk — the last
+        # quarter of the history at least 1.0 dB below the first —
+        # and the offset's level only falls 0.75 dB, so it stays
+        # uncertain on all five seeds.
+        for seed in (1, 2, 3, 7, 11):
             loop = rectangular_walk(20.0, 12.0, 10)
             steps = simulate_walk(loop + loop, BEACONS,
                                   noise_db=2.0, seed=seed)
@@ -1620,9 +1627,26 @@ class TestDriftClassification(unittest.TestCase):
             result = monitor.classify("D")
             self.assertEqual(result.verdict, "uncertain", seed)
             self.assertIsNotNone(monitor.alarm("D"))
-        # Seed 11 is the known false positive, asserted as such:
-        # the noise drifts down -1.84 dB over the walk, which the
-        # revisit test reads as a real decline.
+            self.assertIsNotNone(result.level_drop_db)
+            self.assertGreater(result.level_drop_db, -1.0, seed)
+
+    def test_level_drop_separates_sag_from_offset(self):
+        # The discriminator itself, pinned on the numbers: a real
+        # sag's level falls from the first quarter to the last on
+        # every seed (the drain is a process), while a steady
+        # offset's level stays flat (it is a level, weak from the
+        # first reading) — even on seed 11, where the revisit
+        # delta fakes a decline. The sag verdicts carry the drop
+        # in the classification, so the evidence is visible.
+        for seed in (1, 2, 3, 7, 11):
+            monitor = self._two_loops(
+                seed, batteries={"D": BatteryModel(
+                    drain_rate_per_hour=0.3)}, step_seconds=120.0)
+            result = monitor.classify("D")
+            self.assertEqual(result.verdict, "battery-sag", seed)
+            self.assertIsNotNone(result.level_drop_db)
+            self.assertLess(result.level_drop_db, -1.0, seed)
+            self.assertIn("fell", result.reason, seed)
         loop = rectangular_walk(20.0, 12.0, 10)
         steps = simulate_walk(loop + loop, BEACONS,
                               noise_db=2.0, seed=11)
@@ -1631,7 +1655,11 @@ class TestDriftClassification(unittest.TestCase):
         monitor = DriftMonitor(BEACONS)
         for step in steps:
             monitor.feed(step)
-        self.assertEqual(monitor.classify("D").verdict, "battery-sag")
+        result = monitor.classify("D")
+        self.assertEqual(result.verdict, "uncertain")
+        self.assertAlmostEqual(result.revisit_delta_db, -1.84,
+                               places=1)
+        self.assertGreater(result.level_drop_db, -1.0)
 
     def test_small_move_is_at_the_detection_floor(self):
         # A 1.4 m move (D to (1, 11)) leaves a residual pattern

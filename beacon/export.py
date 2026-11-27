@@ -618,7 +618,10 @@ def _drift_classifications_from_dict(raw) -> list[dict]:
     recorded without a drift monitor, so the classifications
     default to empty rather than failing a file that predates
     them. ``revisit_delta_db`` is null when the device never
-    revisited a spot, so no delta was measured.
+    revisited a spot, so no delta was measured, and
+    ``level_drop_db`` is null when the history was too short to
+    split into quarters — a file written before v0.63.0 carries
+    no level drop at all, so it defaults to null there too.
     """
     if raw is None:
         return []
@@ -641,6 +644,9 @@ def _drift_classifications_from_dict(raw) -> list[dict]:
             "revisit_pairs": int(c["revisit_pairs"]),
             "samples": int(c["samples"]),
             "reason": str(c["reason"]),
+            "level_drop_db": (
+                None if c.get("level_drop_db") is None
+                else float(c["level_drop_db"])),
         }
         for c in raw
     ]
