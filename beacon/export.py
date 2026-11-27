@@ -621,7 +621,10 @@ def _drift_classifications_from_dict(raw) -> list[dict]:
     revisited a spot, so no delta was measured, and
     ``level_drop_db`` is null when the history was too short to
     split into quarters — a file written before v0.63.0 carries
-    no level drop at all, so it defaults to null there too.
+    no level drop at all, so it defaults to null there too — and
+    ``late_decline_db`` is null when the history was too short
+    to split into thirds — a file written before v0.70.0 carries
+    no late decline at all, so it defaults to null there too.
     """
     if raw is None:
         return []
@@ -647,6 +650,9 @@ def _drift_classifications_from_dict(raw) -> list[dict]:
             "level_drop_db": (
                 None if c.get("level_drop_db") is None
                 else float(c["level_drop_db"])),
+            "late_decline_db": (
+                None if c.get("late_decline_db") is None
+                else float(c["late_decline_db"])),
         }
         for c in raw
     ]

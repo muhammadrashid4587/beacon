@@ -4421,3 +4421,99 @@ discriminator that is not long-delta agreement, already
 rejected after measurement: it costs 3 true slow sags.
 The roadmap grows as new needs surface — the position
 pattern settling the spread gate is the latest addition.
+
+## The decline has to be there late, not just on average
+
+The v0.69.0 notes left the other open problem for v0.70.0:
+the 3-loop sag-misread rate. Measuring first: all eight
+misreads come through the short-window sag route — the
+short window is the last 20 readings, and its revisit delta
+pairs them against the earliest visit at the same spot, so
+the short delta and the drop both measure the walk on
+average. The long route is already guarded against them:
+the noisy seeds' long mean sits near zero (+0.09 to -0.80
+dB, against the long route's 1.5-standard-error gate), and
+the offset seeds' long revisit deltas are -0.97 and -0.98
+dB, just above the -1.0 dB gate. What separates the
+misreads from a real sag is not the size of the decline —
+the noisy seeds' short deltas run to -4.60 dB, as large as
+a real sag's — but where it sits in the walk. A sag's loss
+grows with the square of the charge used, so its decline
+is steepest late; a misread's is a step or a cliff in one
+interval only: the offset seeds dip early and then flatten
+(loop means -5.26, -6.22, -6.24 dB and -5.56, -6.31,
+-6.78 dB), and four of the noisy seeds are flat in the
+late interval too (late declines -0.02, -0.46, +0.03,
++0.22, -0.88 and -0.23 dB). The discriminator is the
+late decline: the mean of the last third of the floor's
+long history at least 1.0 dB below the mean of the middle
+third.
+
+Three other discriminators were measured and rejected
+before it. The long history's time correlation does not
+separate at all: the weakest true slow sag correlates at
+-0.193 with time, while the strongest misread correlates
+at -0.28 — the 2 dB noise swamps the smooth decline in
+correlation terms. Requiring the decline in *both*
+intervals does not separate either: a true sag's first
+interval flukes positive (up to +0.61 dB) because the
+quadratic loss is tiny early, while offset seed 83
+declines in both intervals (-0.76 and -0.46 dB) — the
+early interval cannot be gated. And the late-decline gate
+with a significance leg does not survive measurement: the
+late interval's standard error is inflated by the dying
+battery's own extra noise (up to 3 dB of extra std at low
+charge), so a 1.5-standard-error leg blocks 17 true slow
+sags on three loops and one on two (seed 94: late decline
+-1.01 dB at 1.09 standard errors) while repairing no
+additional misread. The gate as shipped is magnitude-only
+— the drop gate still carries the significance test for
+the walk as a whole — and a sag blocked here falls
+through to the long-history check, whose own gates still
+fire for a real decline, so the cost of the gate is the
+verdict's route, not the verdict itself. This is not
+long-delta agreement: the long delta averages the early
+shallow decline with the late steep one and so dilutes it,
+which is what cost true sags when it was tried; the late
+decline measures the late interval directly, where the sag
+is strongest. The classification carries the evidence as
+`late_decline_db`, and the export round-trips it (a file
+written before v0.70.0 loads with it null).
+
+Measured behaviour (v0.70.0): 2 dB RSSI noise, beacon D,
+seeds 1–100 — the other beacons stay `healthy` in every
+scenario, on all 100 seeds:
+
+| walk | verdicts |
+|---|---|
+| three-loop, D steady -6 dB offset | `uncertain` 99, `moved` 1 (was `uncertain` 97, `battery-sag` 2, `moved` 1) |
+| three-loop, D with 5 dB extra noise | `noisy` 88, `battery-sag` 3, `healthy` 9 (was `noisy` 85, `battery-sag` 6, `healthy` 9) |
+| three-loop, D draining, 0.3/hr | `battery-sag` 98, `noisy` 2, unchanged — 11 of the 98 now read through the longer history instead of the short window |
+| two-loop, every scenario | unchanged — the slow sag still reads `battery-sag` on 84 |
+| single-loop, every scenario | unchanged — the fallback path is not gated |
+
+Out-of-sample, seeds 101–200: the offset's sag misreads
+are gone (0, was 2) and the noisy beacon's are halved (1,
+was 2), while the slow sag stays at 99 and the 7 m move
+at 100 — the repair holds out of sample too.
+
+The fix is honest about what it does not repair. Three
+noisy seeds still read `battery-sag` on three loops:
+seeds 33 and 97 are late cliffs (late declines -3.81 and
+-2.15 dB), which a quadratic sag's late acceleration also
+produces, so no statistic on this evidence tells them
+apart; seed 12's excursion sits in the short window, so
+the gate blocks the short route, but its long revisit
+delta (-2.87 dB) and drop (-3.45 dB) clear the long
+route's gates. And the gate has one known cost, out of
+sample on two loops only: seed 155's true slow sag has a
+late decline of only -0.42 dB, so the short route is
+blocked and its long revisit delta (-0.76 dB over 41
+pairs) cannot rescue it — it reads `uncertain`. Eight
+misreads repaired on three loops against one true sag
+lost on two, and every pinned tally unchanged. The next
+item is the remaining late-cliff misreads, and the
+single-loop offset misreads (2 of 100 seeds, through the
+fallback path this fix deliberately leaves alone).
+The roadmap grows as new needs surface — the decline
+having to be there late is the latest addition.

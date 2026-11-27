@@ -103,7 +103,17 @@ signatures in the residuals, so ``classify`` names the cause:
   A steady offset is the classic case: a beacon whose battery
   sagged and then stabilised looks exactly like a beacon that was
   miscalibrated, and no statistic in the window can tell them
-  apart. The classifier says so instead of guessing.
+  apart. The classifier says so instead of guessing. And the
+  decline must be there late as well as on average: a sag's loss
+  grows with the square of the charge used, so the last third of
+  the walk reads much weaker than the middle third, while a noise
+  excursion that dips early and flattens — or a cliff in one
+  interval only — shows no late decline at all, even when it
+  clears the revisit-delta and drop gates. That late-decline gate
+  is magnitude-only (the last third at least 1.0 dB below the
+  middle third): the late interval's noise is inflated by the
+  dying battery's own extra noise, so a significance test there
+  would punish the sag for its own symptom.
 - **healthy**: nothing is off — the mean residual is inside noise
   and no signature fires.
 
@@ -185,7 +195,18 @@ a third loop — but measured across seeds 1–100 it does not: the
 steady offset reads ``battery-sag`` on 2 of the 100 seeds over
 three loops, and a noisy beacon on 6, both from a short-window
 decline the long history contradicts only weakly (see the README
-v0.68.0 notes).
+v0.68.0 notes). The late-decline gate fixes most of that (see
+the README v0.70.0 notes): the decline must also be there in
+the late interval — the last third at least 1.0 dB below the
+middle third — which a step or a cliff in one interval cannot
+fake, so the offset reads ``battery-sag`` on 0 of 100 seeds over
+three loops and the noisy beacon on 3, while the slow sag stays
+at 98 and the two-loop tallies on seeds 1–100 do not move at
+all. The three
+noisy seeds that still misread are the honest limit: their
+excursion is a late cliff, which a quadratic sag's late
+acceleration also produces, so no statistic on this evidence
+tells them apart.
 the same slow drain is called battery-sag on 2/5 seeds (1 and
 11) through the long history — seeds 2, 3 and 7 lack the signal
 in the revisit pairs (-0.87, -0.19 and -0.48 dB), so the
@@ -309,6 +330,33 @@ SAG_HALF_DELTA_MAX_DB = -1.5
 SAG_DROP_MAX_DB = -1.0
 SAG_DROP_MIN_T = -1.5
 
+# A sag is a process that accelerates: the battery's loss grows
+# with the square of the charge used, so the decline is steepest
+# late — the last third of the walk reads much weaker than the
+# middle third. A steady offset's or a noisy beacon's apparent
+# decline is a step or a cliff in one interval only (a noise
+# excursion in the tail, or a dip early in the walk that then
+# flattens), so the late interval shows no decline at all. The
+# gate is magnitude-only, deliberately: the late interval's
+# standard error is inflated by the dying battery's own extra
+# noise (up to 3 dB of extra std at low charge), so a
+# significance test on that interval punishes the sag for its
+# own symptom — measured, the 1.5-SE leg blocks one true slow
+# sag on two loops (seed 94: late decline -1.01 dB at 1.09
+# standard errors) and no additional misread, while the
+# magnitude leg alone repairs the same misreads with no cost on
+# any pinned tally (one true sag is still lost out of sample on
+# two loops, seed 155 — see the README v0.70.0 notes). The drop
+# gate still carries the significance test for the walk as a
+# whole. Measured on three loops, seeds 1-100:
+# the two steady-offset misreads' late declines are -0.02 and
+# -0.46 dB, and four of the six noisy misreads' are +0.22 dB or
+# weaker, so the -1.0 dB gate repairs them; a sag blocked here
+# falls through to the long-history check below, whose own gates
+# still fire for a real decline, so the cost of the gate is the
+# verdict's route, not the verdict itself.
+SAG_LATE_DECLINE_MAX_DB = -1.0
+
 # A moved beacon's residuals spread out (geometry wrong in
 # different directions) around a shifted mean.
 MOVED_STD_MIN_DB = 2.5
@@ -419,6 +467,35 @@ def _level_drop(entries: list[tuple[int, float, float, int, float]]
     return drop, se
 
 
+def _late_decline(entries: list[tuple[int, float, float, int, float]]
+                  ) -> tuple[float | None, float | None]:
+    """How far the residual level fell in the late interval of the walk.
+
+    The mean of the last third of the readings minus the mean of
+    the middle third, with the standard error of that difference —
+    or ``(None, None)`` when there are too few readings to split
+    into thirds (fewer than twelve, so under four per third).
+    A draining battery's loss grows with the square of the charge
+    used, so its decline is steepest late — the last third reads
+    much weaker than the middle one. A misread's decline is a step
+    or a cliff in one interval only: a beacon whose readings dip
+    early and then flatten (a steady offset whose noise happens to
+    run low in the middle of the walk) shows no late decline at
+    all, and neither does one whose tail excursion sits in the
+    short window alone. The decline must be there late, not just
+    on average across the walk.
+    """
+    if len(entries) < 12:
+        return None, None
+    third = len(entries) // 3
+    mid = [entry[4] for entry in entries[third:2 * third]]
+    last = [entry[4] for entry in entries[2 * third:]]
+    decline = _mean(last) - _mean(mid)
+    se = math.sqrt(_stdev(mid) ** 2 / len(mid)
+                   + _stdev(last) ** 2 / len(last))
+    return decline, se
+
+
 def _spread_above_noise(std: float, samples: int, noise_db: float,
                         min_t: float = MOVED_LONG_SPREAD_MIN_T) -> bool:
     """Whether a residual spread is real excess over the expected noise.
@@ -527,8 +604,13 @@ class DriftClassification:
     fell from the first quarter to the last quarter of the floor's
     long history (None when the history is too short to split) —
     the check that keeps a steady offset from reading as a sag;
-    ``samples`` is the window size; ``reason`` says in words why
-    this verdict was reached.
+    ``late_decline_db`` is how far the level fell in the late
+    interval — the mean of the last third of the history minus
+    the mean of the middle third (None when the history is too
+    short to split into thirds) — the check that keeps a step or
+    a cliff in one interval from reading as a sag; ``samples``
+    is the window size; ``reason`` says in words why this verdict
+    was reached.
     """
 
     id: str
@@ -543,13 +625,16 @@ class DriftClassification:
     samples: int
     reason: str
     level_drop_db: float | None = None
+    late_decline_db: float | None = None
 
     def to_dict(self) -> dict:
         """JSON-friendly form, for the stream output, the exported
         track rows, and dashboards. ``revisit_delta_db`` is null
         when the device never revisited a spot, so no delta was
         measured, and ``level_drop_db`` is null when the history
-        was too short to split into quarters."""
+        was too short to split into quarters, and
+        ``late_decline_db`` is null when it was too short to
+        split into thirds."""
         return {
             "id": self.id,
             "floor": self.floor,
@@ -563,6 +648,7 @@ class DriftClassification:
             "samples": self.samples,
             "reason": self.reason,
             "level_drop_db": self.level_drop_db,
+            "late_decline_db": self.late_decline_db,
         }
 
 
@@ -930,6 +1016,16 @@ class DriftMonitor:
         # noise excursion in the tail fakes a revisit decline.
         long_window = list(self._long_window_for(beacon_id, floor))
         drop, drop_se = _level_drop(long_window)
+        # The late decline across the floor's long history — the
+        # second piece of sag evidence in the late interval,
+        # measured once and shared by the short-window sag check
+        # below. A sag is a process that accelerates: the level
+        # falls steeply late, not just on average across the walk.
+        # The standard error rides along for inspection (and for
+        # tests) — the gate itself is magnitude-only, since the
+        # late interval's noise is inflated by the dying
+        # battery's own extra noise.
+        late_decline, _late_se = _late_decline(long_window)
 
         # The trend over the floor's long history — the same
         # readings as the rolling window, kept longer. The
@@ -962,7 +1058,7 @@ class DriftMonitor:
                 time_correlation=correlation,
                 revisit_delta_db=delta, revisit_pairs=pairs,
                 samples=samples, reason=reason,
-                level_drop_db=drop)
+                level_drop_db=drop, late_decline_db=late_decline)
 
         if samples < self._min_samples:
             return result(
@@ -987,15 +1083,34 @@ class DriftMonitor:
         # standard errors from zero, the same convention as the
         # delta gate. A beacon whose drop does not clear the gate
         # falls through to the checks below instead of being
-        # called a sag. The fallback had no such gate until
-        # v0.66.0: a steady offset's within-window slope can fluke
-        # below the trend gate on a single pass (seed 13: -0.202
-        # dB per reading) while its level only falls 0.45 dB, so
-        # it read battery-sag. The same drop gate now guards the
+        # called a sag. The same drop gate now guards the
         # fallback too — a sag is a process, an offset is a level,
         # with or without revisits. When the history is too short
         # to split into quarters the drop is null and the fallback
         # stays silent, the same convention as the revisit path.
+        # And the decline must be there late as well: the
+        # short-window delta and the drop both measure the walk
+        # on average, so a noise excursion that dips early and
+        # flattens — or a cliff in one interval only — clears
+        # them both while the level never falls in the late
+        # interval, where a real sag's decline is steepest (the
+        # loss grows with the square of the charge used). The
+        # late-decline gate is magnitude-only — the last third
+        # at least 1.0 dB below the middle third — because the
+        # late interval's standard error is inflated by the
+        # dying battery's own extra noise, so a significance
+        # test there punishes the sag for its own symptom
+        # (measured: the 1.5-SE leg blocks one true slow sag on
+        # two loops and no additional misread). A sag blocked
+        # here falls through to the long-history check below,
+        # whose own gates still fire for a real decline, so the
+        # cost of the gate is the verdict's route, not the
+        # verdict itself. This is not long-delta agreement: the
+        # long delta averages the early shallow decline with
+        # the late steep one and so dilutes it, which is what
+        # cost true sags when it was tried; the late decline
+        # measures the late interval directly, where the sag is
+        # strongest.
         if mean < SAG_MEAN_MAX_DB:
             if pairs >= 5:
                 if (delta is not None and delta_se is not None
@@ -1003,15 +1118,18 @@ class DriftMonitor:
                         and delta < SAG_DELTA_MIN_T * delta_se
                         and drop is not None and drop_se is not None
                         and drop < SAG_DROP_MAX_DB
-                        and drop < SAG_DROP_MIN_T * drop_se):
+                        and drop < SAG_DROP_MIN_T * drop_se
+                        and late_decline is not None
+                        and late_decline < SAG_LATE_DECLINE_MAX_DB):
                     return result(
                         "battery-sag",
                         f"mean residual {mean:.2f} dB and the residual "
                         f"at revisited spots fell {delta:.2f} dB "
                         f"({pairs} pairs) and the level fell "
                         f"{drop:.2f} dB from the first quarter to "
-                        f"the last quarter of the history — the "
-                        "beacon reads weaker at the same place "
+                        f"the last quarter of the history and "
+                        f"{late_decline:.2f} dB in the late interval "
+                        f"— the beacon reads weaker at the same place "
                         "over time, and keeps falling")
             elif ((slope <= SAG_SLOPE_MAX_DB_PER_STEP
                     or half_delta <= SAG_HALF_DELTA_MAX_DB

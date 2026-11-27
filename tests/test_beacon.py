@@ -68,6 +68,8 @@ from beacon import (
     write_track_replay,
 )
 from beacon.simulate import rectangular_walk
+from beacon.drift import _late_decline
+from beacon.export import _drift_classifications_from_dict
 
 # Four corner beacons in a 20 x 12 m ward, matching the CLI defaults.
 BEACONS = [
@@ -2019,7 +2021,7 @@ class TestDriftClassification(unittest.TestCase):
             {"uncertain": 100})
 
     def test_three_loop_sweep_pins_verdict_counts(self):
-        # The v0.69.0 measurement: the same scenarios swept over
+        # The v0.70.0 measurement: the same scenarios swept over
         # seeds 1-100 on three loops (120 readings) instead of
         # two. The third loop settles the slow sag — 84 to 98 —
         # because the extra loop's drained readings pull the long
@@ -2036,14 +2038,20 @@ class TestDriftClassification(unittest.TestCase):
         # position pattern, only weaker. The single-pass fast sag
         # is identical on one, two and three loops (50/100): the
         # beacon goes dark at step 24, so the extra loops add no
-        # readings at all. And the third loop opens two small
-        # misreads the other way: the steady offset reads
+        # readings at all. And the third loop opened two small
+        # misreads the other way: the steady offset read
         # battery-sag on 2 seeds and the noisy beacon on 6, both
         # from a short-window decline the long history contradicts
         # only weakly — a noise excursion in the tail, not a
-        # sharper threshold away from being caught. A future
-        # change that shifts these counts must update this test
-        # and the README deliberately, not silently.
+        # sharper threshold away from being caught. The
+        # late-decline gate (v0.70.0) repairs most of that: the
+        # decline must also be there in the late interval, so the
+        # offset reads battery-sag on 0 seeds now and the noisy
+        # beacon on 3 — the three that remain are late cliffs,
+        # which a quadratic sag's late acceleration also
+        # produces. A future change that shifts these counts must
+        # update this test and the README deliberately, not
+        # silently.
         moved = [Beacon(b.id, b.x, b.y) for b in BEACONS]
         moved[3] = Beacon("D", 5.0, 7.0)
         small_moved = [Beacon(b.id, b.x, b.y) for b in BEACONS]
@@ -2093,10 +2101,10 @@ class TestDriftClassification(unittest.TestCase):
             tally(lambda s: self._three_loops_with(s, small_moved)),
             {"moved": 35, "uncertain": 41, "healthy": 24})
         self.assertEqual(tally(noisy),
-                         {"noisy": 85, "battery-sag": 6, "healthy": 9})
+                         {"noisy": 88, "battery-sag": 3, "healthy": 9})
         self.assertEqual(
             tally(lambda s: offset(s, -6.0)),
-            {"uncertain": 97, "battery-sag": 2, "moved": 1})
+            {"uncertain": 99, "moved": 1})
         self.assertEqual(
             tally(lambda s: offset(s, 6.0)),
             {"uncertain": 99, "moved": 1})
@@ -2104,7 +2112,9 @@ class TestDriftClassification(unittest.TestCase):
         # gates. The third loop's slow-sag gain holds (99) and
         # the 7 m move reads moved on all 100; the 1.4 m move
         # reads moved on the same 24 as two loops there, and the
-        # offset's sag misreads stay at 2.
+        # offset's sag misreads are gone (0, was 2) while the
+        # noisy beacon's are halved (1, was 2) — the late-decline
+        # gate's repair holds out of sample too.
         self.assertEqual(
             tally(lambda s: self._three_loops(
                 s, batteries=slow_sag, step_seconds=120.0),
@@ -2120,7 +2130,172 @@ class TestDriftClassification(unittest.TestCase):
             {"moved": 31, "uncertain": 47, "healthy": 22})
         self.assertEqual(
             tally(lambda s: offset(s, -6.0), seeds=range(101, 201)),
-            {"uncertain": 98, "battery-sag": 2})
+            {"uncertain": 100})
+        self.assertEqual(
+            tally(lambda s: noisy(s), seeds=range(101, 201)),
+            {"noisy": 89, "uncertain": 1, "healthy": 9,
+             "battery-sag": 1})
+
+    def test_late_decline_gate_repairs_offset_sag_misreads(self):
+        # The v0.70.0 fix, pinned by seed: on three loops the
+        # steady -6 dB offset read battery-sag on seeds 12 and
+        # 83 — a noise excursion that dips early and flattens,
+        # clearing the revisit-delta and drop gates while the
+        # level never falls late. Their late declines are -0.02
+        # and -0.46 dB, far above the -1.0 dB gate, so the
+        # short-window sag call is blocked and they read
+        # uncertain now, with the late decline visible on the
+        # verdict.
+        for seed, decline in ((12, -0.02), (83, -0.46)):
+            loop = rectangular_walk(20.0, 12.0, 10)
+            steps = simulate_walk(loop + loop + loop, BEACONS,
+                                  noise_db=2.0, seed=seed)
+            for step in steps:
+                step["rssi"]["D"] += -6.0
+            monitor = DriftMonitor(BEACONS)
+            for step in steps:
+                monitor.feed(step)
+            result = monitor.classify("D")
+            self.assertEqual(result.verdict, "uncertain", seed)
+            self.assertIsNotNone(result.late_decline_db, seed)
+            self.assertAlmostEqual(result.late_decline_db, decline,
+                                   places=1, msg=seed)
+            self.assertGreater(result.late_decline_db, -1.0, seed)
+
+    def test_late_decline_gate_repairs_noisy_sag_misreads(self):
+        # The same fix, pinned by seed: on three loops the noisy
+        # beacon read battery-sag on seeds 12, 13, 20, 33, 66
+        # and 97. Seeds 13, 20 and 66 are repaired — their late
+        # declines are -0.88, +0.22 and -0.23 dB, so the
+        # short-window sag call is blocked and they fall through
+        # to noisy, which is what they are. Seeds 12, 33 and 97
+        # are the honest limit, pinned in the test below.
+        for seed in (13, 20, 66):
+            loop = rectangular_walk(20.0, 12.0, 10)
+            steps = simulate_walk(loop + loop + loop, BEACONS,
+                                  noise_db=2.0, seed=seed)
+            rng = random.Random(seed + 1000)
+            for step in steps:
+                step["rssi"]["D"] += rng.gauss(0.0, 5.0)
+            monitor = DriftMonitor(BEACONS)
+            for step in steps:
+                monitor.feed(step)
+            result = monitor.classify("D")
+            self.assertEqual(result.verdict, "noisy", seed)
+            self.assertGreater(result.late_decline_db, -1.0, seed)
+
+    def test_late_decline_gate_keeps_true_sag_via_long_route(self):
+        # The gate's cost is the verdict's route, not the verdict:
+        # seed 5's true slow sag has a late decline of only
+        # -0.29 dB — the dying battery's own extra noise swamps
+        # the late interval — so the short-window sag call is
+        # blocked, but the long-history check still fires (long
+        # revisit delta, long mean and drop all clear their
+        # gates), so it still reads battery-sag, from the longer
+        # history.
+        monitor = self._three_loops(
+            5, batteries={"D": BatteryModel(
+                drain_rate_per_hour=0.3)}, step_seconds=120.0)
+        result = monitor.classify("D")
+        self.assertEqual(result.verdict, "battery-sag")
+        self.assertIn("longer", result.reason)
+        self.assertIsNotNone(result.late_decline_db)
+        self.assertGreater(result.late_decline_db, -1.0)
+
+    def test_late_decline_gate_remaining_misreads_are_late_cliffs(self):
+        # The honest limit, pinned by seed: the three noisy seeds
+        # the gate does not repair. Seeds 33 and 97 are late
+        # cliffs — their late declines are -3.81 and -2.15 dB, so
+        # the gate passes and the short-window sag call fires.
+        # A late cliff is what a quadratic sag's late
+        # acceleration also produces, so no statistic on this
+        # evidence tells them apart. Seed 12's excursion is in
+        # the short window, not the late interval, so the gate
+        # blocks the short route — but its long revisit delta
+        # (-2.87 dB) and drop (-3.45 dB) clear the long route's
+        # gates, so it still reads battery-sag from the longer
+        # history.
+        for seed, decline in ((33, -3.81), (97, -2.15)):
+            loop = rectangular_walk(20.0, 12.0, 10)
+            steps = simulate_walk(loop + loop + loop, BEACONS,
+                                  noise_db=2.0, seed=seed)
+            rng = random.Random(seed + 1000)
+            for step in steps:
+                step["rssi"]["D"] += rng.gauss(0.0, 5.0)
+            monitor = DriftMonitor(BEACONS)
+            for step in steps:
+                monitor.feed(step)
+            result = monitor.classify("D")
+            self.assertEqual(result.verdict, "battery-sag", seed)
+            self.assertAlmostEqual(result.late_decline_db, decline,
+                                   places=1, msg=seed)
+            self.assertLess(result.late_decline_db, -1.0, seed)
+        loop = rectangular_walk(20.0, 12.0, 10)
+        steps = simulate_walk(loop + loop + loop, BEACONS,
+                              noise_db=2.0, seed=12)
+        rng = random.Random(12 + 1000)
+        for step in steps:
+            step["rssi"]["D"] += rng.gauss(0.0, 5.0)
+        monitor = DriftMonitor(BEACONS)
+        for step in steps:
+            monitor.feed(step)
+        result = monitor.classify("D")
+        self.assertEqual(result.verdict, "battery-sag")
+        self.assertIn("longer", result.reason)
+
+    def test_late_decline_gate_costs_one_out_of_sample_two_loop_sag(self):
+        # The gate's known cost, pinned by seed so it is a
+        # deliberate limit, not a silent regression: seed 155's
+        # true slow sag on two loops out of sample has a late
+        # decline of only -0.42 dB — its late interval fluked
+        # flat — so the short-window sag call is blocked, and
+        # its long revisit delta is only -0.76 dB over 41 pairs,
+        # inside the -1.0 dB gate, so the long route cannot
+        # rescue it either and it reads uncertain. One true sag,
+        # out of sample on two loops only, against eight misreads
+        # repaired on three loops; every pinned tally is
+        # unchanged.
+        monitor = self._two_loops(
+            155, batteries={"D": BatteryModel(
+                drain_rate_per_hour=0.3)}, step_seconds=120.0)
+        result = monitor.classify("D")
+        self.assertEqual(result.verdict, "uncertain")
+        self.assertIsNotNone(result.late_decline_db)
+        self.assertAlmostEqual(result.late_decline_db, -0.42,
+                               places=1)
+        self.assertGreater(result.late_decline_db, -1.0)
+
+    def test_late_decline_helper(self):
+        # _late_decline is the mean of the last third minus the
+        # mean of the middle third, with the standard error of
+        # that difference — or (None, None) when there are too
+        # few readings to split into thirds.
+        entries = [(i, 0.0, 0.0, 0, float(-i)) for i in range(12)]
+        decline, se = _late_decline(entries)
+        self.assertAlmostEqual(decline, -4.0)
+        self.assertGreater(se, 0.0)
+        self.assertEqual(_late_decline(entries[:11]), (None, None))
+        flat = [(i, 0.0, 0.0, 0, -6.0) for i in range(12)]
+        decline, _ = _late_decline(flat)
+        self.assertAlmostEqual(decline, 0.0)
+
+    def test_late_decline_db_round_trips_through_export(self):
+        # The classification's late decline rides the export rows
+        # like the level drop does, and a file written before
+        # v0.70.0 — with no late_decline_db key at all — loads
+        # with it null instead of failing.
+        monitor = self._three_loops(
+            5, batteries={"D": BatteryModel(
+                drain_rate_per_hour=0.3)}, step_seconds=120.0)
+        raw = [monitor.classify("D").to_dict()]
+        loaded = _drift_classifications_from_dict(raw)
+        self.assertEqual(len(loaded), 1)
+        self.assertAlmostEqual(loaded[0]["late_decline_db"],
+                               raw[0]["late_decline_db"])
+        old = [dict(raw[0])]
+        del old[0]["late_decline_db"]
+        loaded_old = _drift_classifications_from_dict(old)
+        self.assertIsNone(loaded_old[0]["late_decline_db"])
 
     def test_long_moved_beats_noisy_on_three_loops(self):
         # The reorder's rescue, pinned by seed: on three loops
