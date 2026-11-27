@@ -4627,3 +4627,127 @@ in-sample) — the fallback's own limit, not a gate to tune.
 The roadmap grows as new needs surface — the longer
 history alone carrying the fallback's trend is the latest
 addition.
+
+## A dying battery gets noisier as it drains
+
+The v0.71.0 notes left the late cliffs themselves (seeds 33,
+97, 12) and the single-loop slow sag (1/100 in-sample). One
+of the three cliffs has a fix, and it comes from the other
+half of the battery model: the loss is not the only thing
+that grows as the cell drains — the extra noise grows
+linearly with the charge used, from 0 dB on a fresh cell to
+3 dB on an empty one, so a sagging beacon's residual spread
+grows from about 2 dB in the first third of the walk to
+about 5 dB in the last. A noisy beacon's spread is constant
+— about 5.4 dB throughout — so its growth is whatever the
+noise draws say, and it can shrink. The discriminator is
+the spread growth: the standard deviation of the last third
+of the floor's long history minus that of the first third.
+The long-history sag route is vetoed when the spread
+shrinks — the gate is magnitude-only at 0.0 dB, the natural
+boundary (a dying battery cannot get quieter), not a tuned
+threshold — and it only applies when the history is long
+enough to estimate a spread per third (60 readings, 20 per
+third); a shorter history carries no growth evidence and
+the call stands on the other gates.
+
+The gate guards the long-history route only, deliberately.
+That route's whole case is the long history, so a
+long-history statistic contradicting it is a legitimate
+veto; the short-window route's verdict rests on the short
+window, which the growth statistic does not speak to.
+Measured: guarding both routes would repair the same one
+misread in-sample and the out-of-sample one (seed 124,
+growth -1.00 dB) but cost three true slow sags on two loops
+(seed 92 at -0.05 dB in-sample, seeds 121 and 154 at -0.44
+and -0.10 dB out-of-sample) — all three fire through the
+short route, where the short window's own evidence is
+strong and a long-history spread fluke should not veto it.
+Guarding the long route alone repairs seed 12 at zero cost
+anywhere measured: its excursion spans the whole walk, so
+it clears the long delta (-2.87 dB), mean and drop
+(-3.45 dB) gates, but its spread shrinks -0.12 dB, so the
+call is vetoed and it reads `noisy` instead (its short
+window spreads 5.12 dB, past the 4 dB noisy gate).
+
+Six other discriminators were measured and rejected
+before it, in-sample and out-of-sample on the pinned seed
+sweeps — the ten from v0.71.0 stand rejected too:
+
+- The quadratic-vs-step model comparison (the residual
+  shape fitted to a quadratic in time against a single step
+  with a free changepoint): the step fits better than the
+  quadratic even for most true sags — the sag's loss
+  plateaus once the cell hits empty at step 100, so a step
+  fits the plateau — misreads at -89 to -225 dB² against
+  the true sags' median -15 to -20 and minimum -240. No
+  cut.
+- The sixth difference (last sixth against the fifth sixth
+  of the history) as a veto: the true sags' sixth
+  differences are more negative than three of the four
+  misreads' (+1.34, -0.70 and +0.60 dB), and the fourth
+  (seed 12, -2.18 dB) sits inside the sags' own range
+  (minimum -5.54 dB) — so the veto points the wrong way,
+  and as a requirement it is the late split already
+  rejected in v0.71.0.
+- The steepest-sixth share of the late decline:
+  misreads at 1.13 to 1.18, true sags from 1.00 up. No
+  cut.
+- The round acceleration (second-round revisit delta
+  minus first-round): repairs only seed 12 (+0.03 dB
+  against the sags' median -2.61) at a cost of 4 true
+  sags in-sample — and seed 12 is already repaired by
+  the growth gate.
+- The absolute-deviation regression slope (the variance
+  trend using all readings instead of two thirds): at a
+  t-stat gate of 0.0 it repairs seed 12 at a cost of one
+  true sag in-sample (t -0.40) and two out-of-sample on
+  two loops — worse than the thirds on every sample.
+- A significance leg on the growth gate (1.5 standard
+  errors): the growth's standard error is about 0.9 dB
+  on three loops, so it blocks neither misread (seed 12
+  at -0.13 standard errors, seed 124 at -1.10) while the
+  magnitude leg repairs one of them.
+
+The single-loop slow sag was measured the same way and
+does not ship a fix either. Its quadratic coefficient
+carries about 0.3 standard errors of signal on one loop —
+the total loss over a single 80-minute loop is under 1 dB
+against 2 dB of noise — so its t-stat falls below -1.5 on
+13 of 100 slow-sag seeds, but also on 7 of 100 steady
+offsets (and 7 of 100 healthy walks): the distributions
+overlap almost completely, and a verdict-level gate built
+on it would need the mean gate relaxed too, admitting
+healthy beacons as well. The single-loop slow sag stays
+an honest limit of the data, not a gate to tune.
+
+Measured behaviour (v0.72.0): 2 dB RSSI noise, beacon D,
+three loops — the other beacons stay `healthy` in every
+scenario, on all 100 seeds:
+
+| walk | verdicts, seeds 1–100 | verdicts, seeds 101–200 |
+|---|---|---|
+| three-loop, D with 5 dB extra noise | `noisy` 89, `battery-sag` 2, `healthy` 9 (was `noisy` 88, `battery-sag` 3, `healthy` 9) | `noisy` 89, `uncertain` 1, `healthy` 9, `battery-sag` 1 — unchanged |
+| three-loop, D draining, 0.3/hr | `battery-sag` 98, `noisy` 2 — unchanged | `battery-sag` 99, `noisy` 1 — unchanged |
+| two-loop, every scenario | unchanged | unchanged |
+| single-loop, every scenario | unchanged — the growth gate never fires without revisits, and the fallback route is not gated |
+
+The fix is honest about what it does not repair. Seeds 33
+and 97 still read `battery-sag`: their spreads happened to
+grow (+0.82 and +1.37 dB), so the gate passes and the
+short-window call fires — a late cliff whose noise draws
+happen to widen is, on this evidence, a sag. Seed 124
+out of sample still reads `battery-sag` too: it fires
+through the short-window route, which the gate
+deliberately does not guard. And the repair's margin is a
+knife-edge, not a comfortable one: the weakest true slow
+sag, seed 92, grows only +0.03 dB and fires through the
+longer history, so the gate passes it by 0.03 dB — a
+slightly unluckier noise draw would veto a real sag here.
+The classification carries the evidence as
+`spread_growth_db`, and the export round-trips it (a file
+written before v0.72.0 loads with it null). The next items
+are the two remaining late cliffs and the single-loop slow
+sag, both measured limits of this evidence. The roadmap
+grows as new needs surface — a dying battery getting
+noisier as it drains is the latest addition.
