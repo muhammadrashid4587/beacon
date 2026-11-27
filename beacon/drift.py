@@ -223,9 +223,21 @@ and drop gates through the longer history — but its spread
 shrinks across the walk (-0.12 dB from the first third to the
 last), while a dying battery's spread grows, so the
 long-history call is vetoed and it reads ``noisy`` instead.
-One late cliff remains, out of sample (seed 124): its
-excursion started early (-1.57 dB) and kept falling, so no
-statistic on this evidence tells it from a sag.
+The last one, out of sample (seed 124), is repaired by the
+mid-first spread-growth gate (see the README v0.74.0 notes):
+its excursion started early and kept falling, so the
+early-delta gate passes it — but its middle third reads much
+quieter than its first (-1.40 dB), while a dying battery gets
+noisier as it drains, so the short-window call is vetoed and
+it reads ``noisy`` instead. The gate is magnitude-only at
+-1.0 dB: the weakest true slow sag shrinks only -0.58 dB,
+so no true sag is vetoed on either sample, on two loops or
+three.
+One late cliff remains, unrepaired and unpinned in the
+sweeps: on two loops, out of sample, seed 156's noisy beacon
+still reads ``battery-sag`` — its mid-first growth is only
+-0.09 dB, so the gate passes it, and no statistic on this
+evidence separates it from a sag.
 the same slow drain is called battery-sag on 2/5 seeds (1 and
 11) through the long history — seeds 2, 3 and 7 lack the signal
 in the revisit pairs (-0.87, -0.19 and -0.48 dB), so the
@@ -446,6 +458,45 @@ SAG_SPREAD_GROWTH_MIN_READINGS = 60
 # with the long route still open underneath.
 SAG_EARLY_DELTA_MIN_PAIRS = 30
 
+# A dying battery gets noisier as it drains — the extra noise
+# grows linearly with the charge used — so a sag's residual
+# spread grows from the first third of the walk to the middle
+# one, while a noise excursion's spread is constant and can
+# shrink a long way: the excursion is a run of noise draws, so
+# the middle third can read much quieter than the first. The
+# short-window sag route is vetoed when the middle third's
+# spread is more than 1.0 dB below the first third's. The gate
+# is magnitude-only, deliberately, at the same 1.0 dB the late
+# decline and the level drop use: a shrink past it is the
+# opposite of a draining battery by more than any true sag
+# shows, and a significance leg would punish the sag for the
+# very noise growth it measures (the spread difference's
+# standard error is about 0.9 dB on three loops). Measured on
+# seeds 1-200, two and three loops: the last late cliff (seed
+# 124, out of sample) shrinks -1.40 dB and is repaired, while
+# the weakest true slow sag shrinks only -0.58 dB (two loops,
+# seed 2; -0.47 dB on three loops, seed 105) — a knife-edge on
+# both sides of the gate, reported as such (see the README
+# v0.74.0 notes). The sign test at 0.0 was measured and
+# rejected alongside it: it repairs the same cliff but costs
+# true slow sags on two loops (17 seeds read battery-sag with
+# a negative mid-first growth there, seeds 31 and 121 among
+# them — the same two-loop cost that kept the spread-growth
+# gate off the short route in v0.72.0 and the mid-first
+# spread-growth veto out of v0.73.0), whose long route cannot
+# rescue them there. The gate only applies when the history is
+# long enough to estimate a spread per third (60 readings, 20
+# per third, the same size as the spread-growth gate); a
+# shorter history carries no mid-first evidence and the call
+# stands on the other gates. A sag blocked here falls through
+# to the long-history check below, whose own gates still fire
+# for a real decline — including its own spread-growth gate,
+# which already vetoes the cliff (its first-to-last growth is
+# -1.00 dB) — so the cost of the gate is the verdict's route,
+# not the verdict itself, the same design as the late-decline
+# and early-delta gates.
+SAG_MID_SPREAD_GROWTH_MAX_DB = -1.0
+
 # A moved beacon's residuals spread out (geometry wrong in
 # different directions) around a shifted mean.
 MOVED_STD_MIN_DB = 2.5
@@ -614,6 +665,36 @@ def _spread_growth(entries: list[tuple[int, float, float, int, float]]
     return growth, se
 
 
+def _mid_spread_growth(entries: list[tuple[int, float, float, int, float]]
+                       ) -> tuple[float | None, float | None]:
+    """How far the residual spread grew from the first to the middle
+    third of ``entries``.
+
+    The standard deviation of the middle third of the readings
+    minus that of the first third, with the standard error of
+    that difference — or ``(None, None)`` when there are too few
+    readings to estimate a spread per third (fewer than
+    ``SAG_SPREAD_GROWTH_MIN_READINGS``, 20 per third). A dying
+    battery gets noisier as it drains, so its spread grows from
+    the first third to the middle one; a noise excursion's spread
+    is constant, so the middle third can read much quieter than
+    the first when the excursion's noise draws run low there.
+    The standard error rides along for inspection (and for
+    tests) — the gate itself is magnitude-only at -1.0 dB, since
+    a significance test on a spread difference would punish the
+    sag for the very noise growth it measures.
+    """
+    if len(entries) < SAG_SPREAD_GROWTH_MIN_READINGS:
+        return None, None
+    third = len(entries) // 3
+    first = [entry[4] for entry in entries[:third]]
+    mid = [entry[4] for entry in entries[third:2 * third]]
+    growth = _stdev(mid) - _stdev(first)
+    se = math.sqrt(_stdev(first) ** 2 / (2 * len(first))
+                   + _stdev(mid) ** 2 / (2 * len(mid)))
+    return growth, se
+
+
 def _spread_above_noise(std: float, samples: int, noise_db: float,
                         min_t: float = MOVED_LONG_SPREAD_MIN_T) -> bool:
     """Whether a residual spread is real excess over the expected noise.
@@ -739,8 +820,15 @@ class DriftClassification:
     fewer than five pairs match there) — the check that keeps a
     late cliff from reading as a sag through the short window,
     since a sag declines from the start and a cliff only declines
-    late; ``samples`` is the window size; ``reason`` says in words why
-    this verdict was reached.
+    late; ``mid_first_spread_growth_db`` is how far the residual
+    spread grew from the first third of the history to the middle
+    third (None when the history is too short to estimate a
+    spread per third) — the check that keeps a noise excursion
+    that starts early and keeps falling from reading as a sag
+    through the short window, since a dying battery gets noisier
+    as it drains and an excursion's middle third can read much
+    quieter than its first; ``samples`` is the window size;
+    ``reason`` says in words why this verdict was reached.
     """
 
     id: str
@@ -758,6 +846,7 @@ class DriftClassification:
     late_decline_db: float | None = None
     spread_growth_db: float | None = None
     early_revisit_delta_db: float | None = None
+    mid_first_spread_growth_db: float | None = None
 
     def to_dict(self) -> dict:
         """JSON-friendly form, for the stream output, the exported
@@ -769,7 +858,9 @@ class DriftClassification:
         split into thirds, and ``spread_growth_db`` is null when
         it was too short to estimate a spread per third, and
         ``early_revisit_delta_db`` is null when fewer than five
-        pairs match in the first two-thirds of the history."""
+        pairs match in the first two-thirds of the history, and
+        ``mid_first_spread_growth_db`` is null when it was too
+        short to estimate a spread per third."""
         return {
             "id": self.id,
             "floor": self.floor,
@@ -786,6 +877,8 @@ class DriftClassification:
             "late_decline_db": self.late_decline_db,
             "spread_growth_db": self.spread_growth_db,
             "early_revisit_delta_db": self.early_revisit_delta_db,
+            "mid_first_spread_growth_db":
+                self.mid_first_spread_growth_db,
         }
 
 
@@ -1172,6 +1265,19 @@ class DriftMonitor:
         # significance test on a spread difference would punish
         # the sag for the very noise growth it measures.
         spread_growth, _growth_se = _spread_growth(long_window)
+        # The mid-first spread growth across the floor's long
+        # history — the standard deviation of the middle third
+        # minus that of the first, measured once and shared by
+        # the short-window sag check below. A dying battery gets
+        # noisier as it drains, so its spread grows from the
+        # first third to the middle one; a noise excursion's
+        # spread is constant, so its middle third can read much
+        # quieter than its first. The standard error rides along
+        # for inspection (and for tests) — the gate itself is
+        # magnitude-only at -1.0 dB, since a significance test on
+        # a spread difference would punish the sag for the very
+        # noise growth it measures.
+        mid_first_growth, _mid_se = _mid_spread_growth(long_window)
         # The early revisit delta across the floor's long history —
         # the mean paired delta over the first two-thirds of the
         # history, the part before the late interval, measured once
@@ -1225,7 +1331,8 @@ class DriftMonitor:
                 samples=samples, reason=reason,
                 level_drop_db=drop, late_decline_db=late_decline,
                 spread_growth_db=spread_growth,
-                early_revisit_delta_db=early_delta)
+                early_revisit_delta_db=early_delta,
+                mid_first_spread_growth_db=mid_first_growth)
 
         if samples < self._min_samples:
             return result(
@@ -1300,7 +1407,26 @@ class DriftMonitor:
         # (two loops hold 14 early pairs) and for a beacon
         # that went dark mid-walk (25). A sag blocked here
         # falls through to the long-history check below, the
-        # same as a sag blocked by the late-decline gate.
+        # same as a sag blocked by the late-decline gate. And
+        # the spread must have grown from the first third to
+        # the middle one: the short-window call is vetoed when
+        # the middle third's spread is more than 1.0 dB below
+        # the first third's — a dying battery gets noisier as
+        # it drains, so a big shrink is the opposite of a sag
+        # by more than any true sag shows (the weakest true
+        # slow sag shrinks only -0.58 dB, two loops, seed 2),
+        # while a noise excursion that starts early and keeps
+        # falling reads much quieter in the middle third than
+        # in the first (the last late cliff, seed 124, shrinks
+        # -1.40 dB). The gate is magnitude-only at -1.0 dB —
+        # the same 1.0 dB the late decline and the level drop
+        # use — and it needs a history long enough to estimate
+        # a spread per third (60 readings), so it stays silent
+        # on a single loop. A sag blocked here falls through
+        # to the long-history check below, whose own
+        # spread-growth gate already vetoes the cliff, so the
+        # cost of the gate is the verdict's route, not the
+        # verdict itself.
         if mean < SAG_MEAN_MAX_DB:
             if pairs >= 5:
                 if (delta is not None and delta_se is not None
@@ -1314,7 +1440,10 @@ class DriftMonitor:
                         and not (early_delta is not None
                                  and early_pairs
                                  >= SAG_EARLY_DELTA_MIN_PAIRS
-                                 and early_delta > 0.0)):
+                                 and early_delta > 0.0)
+                        and not (mid_first_growth is not None
+                                 and mid_first_growth
+                                 < SAG_MID_SPREAD_GROWTH_MAX_DB)):
                     return result(
                         "battery-sag",
                         f"mean residual {mean:.2f} dB and the residual "
