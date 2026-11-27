@@ -112,6 +112,32 @@ def ellipse_from_covariance(
                                angle_deg=angle_deg)
 
 
+def ellipse_covariance(ellipse: PositionUncertainty
+                         ) -> list[list[float]]:
+    """The 2x2 covariance behind a 95% confidence ellipse.
+
+    The inverse of :func:`ellipse_from_covariance`: the ellipse
+    is the 95% interval of a 2-D Gaussian, so each axis's
+    variance is ``(semi_axis / sqrt(5.991)) ** 2``, and the
+    covariance is that diagonal matrix rotated by the ellipse's
+    angle. A Kalman filter fed this covariance as its
+    measurement noise trusts the step more along its strong
+    axis than its weak one — the anisotropic smoother (see
+    :func:`beacon.filter.KalmanFilter.update`). Raises
+    ValueError for a non-positive axis.
+    """
+    if ellipse.semi_major <= 0.0 or ellipse.semi_minor <= 0.0:
+        raise ValueError("ellipse axes must be positive")
+    theta = math.radians(ellipse.angle_deg)
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
+    var_major = ellipse.semi_major ** 2 / _CHI2_95_2DOF
+    var_minor = ellipse.semi_minor ** 2 / _CHI2_95_2DOF
+    return [[cos_t * cos_t * var_major + sin_t * sin_t * var_minor,
+             cos_t * sin_t * (var_major - var_minor)],
+            [cos_t * sin_t * (var_major - var_minor),
+             sin_t * sin_t * var_major + cos_t * cos_t * var_minor]]
+
+
 def ellipse_rms_sigma(ellipse: PositionUncertainty) -> float:
     """The isotropic noise matching an ellipse's covariance, in
     metres: the root-mean-square of the standard deviations

@@ -3342,3 +3342,79 @@ ellipse stays near-circular — its size now follows the step's
 geometry, its shape still does not.
 The roadmap grows as new needs surface — the per-step
 geometry-aware smoother noise is the latest addition.
+
+## A numerically stable anisotropic smoother
+
+The full anisotropic version failed on numerics, not on the
+idea: the forward pass updated its covariance with the short
+form `(I - K H) P`, which is not symmetric by construction,
+so rounding drifted it off symmetry and off
+positive-definiteness, and the smoother's backward subtraction
+finished the job. This version fixes the numerics instead of
+abandoning the idea. The filter's covariance update is now
+the Joseph form, `(I - K H) P (I - K H)^T + K R K^T`, which
+keeps the covariance symmetric and positive semi-definite by
+construction; every stored covariance is symmetrised after
+each step; and the smoother's backward pass symmetrises each
+smoothed covariance and floors its position block's
+eigenvalues at a small positive value (1 mm standard
+deviation), so a degenerate smoothed covariance can never
+leave a step without an ellipse. `KalmanFilter.update` takes
+the full per-step covariance as `measurement_covariance` — a
+symmetric positive-definite 2x2 matrix, so a step can be
+trusted more along its strong axis than its weak one — and
+`ellipse_covariance(ellipse)` builds that matrix from a live
+confidence ellipse, the inverse of `ellipse_from_covariance`.
+
+```python
+from beacon import KalmanFilter, ellipse_covariance
+
+kalman = KalmanFilter(measurement_noise=4.0)
+for position, ellipse in zip(positions, ellipses):
+    kalman.update(position,
+                  measurement_covariance=ellipse_covariance(ellipse))
+smoothed = kalman.smooth_with_covariance()
+```
+
+Measured behaviour (v0.57.0): the numerics are fixed — zero
+degenerate smoothed covariances on all five demo seeds, where
+the v0.56.0 attempt degenerated 33–37 of 40 per walk — and
+the smoothed ellipses are genuinely anisotropic now, with a
+mean axis ratio of 1.51 on the demo walk against 1.00 for the
+near-circular isotropic ones (mean semi-major 1.75 m, mean
+semi-minor 1.17 m). The eigenvalue floor never fires on the
+demo walks: the Joseph form and the symmetrisation alone keep
+every covariance healthy, so the floor is a backstop for
+other walks, not a correction to these numbers. But the
+anisotropic weighting still measures worse than the per-step
+isotropic noise it was meant to replace, on both figures that
+matter:
+
+| seed | anisotropic mean | isotropic mean | anisotropic inside | isotropic inside |
+|---|---|---|---|---|
+| 1 | 1.37 m | 1.15 m | 21/40 | 36/40 |
+| 2 | 1.59 m | 1.60 m | 19/40 | 26/40 |
+| 3 | 2.05 m | 1.72 m | 15/40 | 25/40 |
+| 7 | 1.85 m | 1.29 m | 19/40 | 29/40 |
+| 11 | 1.14 m | 1.04 m | 29/40 | 36/40 |
+| total | 1.60 m | 1.36 m | 103/200 | 152/200 |
+
+Blending the anisotropic covariance halfway toward its own
+isotropic RMS gives 1.38 m and 143 of 200; a quarter blend
+gives 1.36 m and 150 of 200 — closer, still not beating the
+isotropic default. The reason is what the smoother is fed:
+live-filtered positions, whose error is dominated by the
+filter's own dynamics and lag, not by the instantaneous
+trilateration geometry — so the raw ellipse's shape misweights
+the steps, trusting the "strong" axis too much in a direction
+the filtered error does not follow, and the stretched
+ellipses end up overconfident in the wrong direction. The
+default therefore stays the per-step isotropic noise, and the
+smoothed ellipses the overlay and the replay draw stay
+near-circular. The anisotropic path is available at the
+filter level, numerically stable, for a space where the
+geometry does follow the filtered error — and the numbers
+above are pinned in the tests, so a future change cannot
+silently claim the anisotropic default wins.
+The roadmap grows as new needs surface — the numerically
+stable anisotropic smoother is the latest addition.
