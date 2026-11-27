@@ -87,7 +87,7 @@ class EvaluateSmoothedFileTest(unittest.TestCase):
             self.assertAlmostEqual(
                 report.by_device[device_id].mean_error_m,
                 expected.by_device[device_id].mean_error_m, places=2)
-        self.assertAlmostEqual(report.overall.mean_error_m, 1.13,
+        self.assertAlmostEqual(report.overall.mean_error_m, 1.14,
                                places=2)
         self.assertEqual(report.overall.steps, 80)
         self.assertEqual(report.overall.located, 80)
@@ -108,10 +108,10 @@ class EvaluateSmoothedFileTest(unittest.TestCase):
             report = evaluate_multi_device_track(file_tracks,
                                                  scorer_truths)
         self.assertAlmostEqual(
-            report.by_device["tag-1"].mean_error_m, 1.34, places=2)
+            report.by_device["tag-1"].mean_error_m, 1.29, places=2)
         self.assertAlmostEqual(
-            report.by_device["tag-2"].mean_error_m, 0.92, places=2)
-        self.assertAlmostEqual(report.overall.mean_error_m, 1.13,
+            report.by_device["tag-2"].mean_error_m, 0.98, places=2)
+        self.assertAlmostEqual(report.overall.mean_error_m, 1.14,
                                places=2)
 
     def test_unlocated_step_keeps_coverage(self):
@@ -155,7 +155,7 @@ class EvaluateSmoothedFileTest(unittest.TestCase):
             report = evaluate_multi_device_track(file_tracks,
                                                  scorer_truths)
         self.assertAlmostEqual(
-            report.by_device["tag-1"].mean_error_m, 1.34, places=2)
+            report.by_device["tag-1"].mean_error_m, 1.29, places=2)
         self.assertEqual(report.overall.steps, 40)
 
     def test_raw_json_file_is_refused(self):
@@ -273,9 +273,9 @@ class EvaluateSmoothedFileCliTest(unittest.TestCase):
             out.getvalue())
         lines = self._report_lines(out.getvalue())
         self.assertEqual(len(lines), 3)
-        self.assertIn("mean error: 1.34 m", lines[0])
-        self.assertIn("mean error: 0.92 m", lines[1])
-        self.assertIn("mean error: 1.13 m", lines[2])
+        self.assertIn("mean error: 1.29 m", lines[0])
+        self.assertIn("mean error: 0.98 m", lines[1])
+        self.assertIn("mean error: 1.14 m", lines[2])
 
     def test_cli_json_writes_report_dict(self):
         tracks, truths = _two_walk_tracks_and_truths()
@@ -299,17 +299,17 @@ class EvaluateSmoothedFileCliTest(unittest.TestCase):
                                          "smoothing_method"},
                          {"by_device", "overall"})
         self.assertAlmostEqual(
-            written["by_device"]["tag-1"]["mean_error_m"], 1.34,
+            written["by_device"]["tag-1"]["mean_error_m"], 1.29,
             places=2)
         self.assertAlmostEqual(
-            written["by_device"]["tag-2"]["mean_error_m"], 0.92,
+            written["by_device"]["tag-2"]["mean_error_m"], 0.98,
             places=2)
         self.assertAlmostEqual(written["overall"]["mean_error_m"],
-                               1.13, places=2)
+                               1.14, places=2)
         self.assertEqual(written["overall"]["steps"], 80)
         # The report prints as well as writing JSON: the file
         # flag names the track and prints its verdict.
-        self.assertIn("mean error: 1.13 m", out.getvalue())
+        self.assertIn("mean error: 1.14 m", out.getvalue())
 
     def test_cli_csv_file_scores_the_same(self):
         tracks, truths = _two_walk_tracks_and_truths()
@@ -324,7 +324,7 @@ class EvaluateSmoothedFileCliTest(unittest.TestCase):
                            output_stream=out), 0)
         lines = self._report_lines(out.getvalue())
         self.assertEqual(len(lines), 3)
-        self.assertIn("mean error: 1.13 m", lines[2])
+        self.assertIn("mean error: 1.14 m", lines[2])
 
     def test_cli_missing_file_returns_2(self):
         tracks, truths = _two_walk_tracks_and_truths()

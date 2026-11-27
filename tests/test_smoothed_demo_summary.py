@@ -26,10 +26,11 @@ def _demo_track_and_truth(seed=7, filter_name="kalman"):
     """The CLI demo walk as live positions, with its ground truth.
 
     The same walk ``python -m beacon.cli`` prints: the default
-    ward, 2 dB RSSI noise, 40 steps. The engine gives no ellipse
-    here, and the walk is single-floor by construction, so the
-    positions carry no uncertainty and floor 0 at confidence 1.0
-    — exactly what the CLI builds for its summary.
+    ward, 2 dB RSSI noise, 40 steps. The walk is single-floor
+    by construction, so the positions carry floor 0 at
+    confidence 1.0 — and each carries its step's raw-geometry
+    ellipse, exactly what the CLI builds for its summary, so
+    the smoother weights each step by its own geometry.
     """
     steps = simulate_walk(rectangular_walk(20.0, 12.0, 10), BEACONS,
                           noise_db=2.0, seed=seed)
@@ -37,24 +38,29 @@ def _demo_track_and_truth(seed=7, filter_name="kalman"):
     positions = []
     for i, step in enumerate(steps):
         x, y = engine.estimate(step["rssi"])
+        try:
+            _, _, uncertainty = engine.estimate_with_uncertainty(
+                step["rssi"])
+        except ValueError:
+            uncertainty = None
         positions.append(LivePosition(
             t=float(i), x=x, y=y, floor=0, floor_confidence=1.0,
-            uncertainty=None, heard=tuple(sorted(step["rssi"]))))
+            uncertainty=uncertainty, heard=tuple(sorted(step["rssi"]))))
     return positions, [step["true"] for step in steps]
 
 
 class EvaluateSmoothedLiveTrackTest(unittest.TestCase):
     def test_demo_smoothed_report_numbers(self):
         # The README's demo numbers: the smoothed track cuts the
-        # mean from 2.16 m to 1.34 m — the same numbers tag-1
+        # mean from 2.16 m to 1.29 m — the same numbers tag-1
         # scores in the multi-device smoothed report, since it is
         # the same forward walk, seed 7.
         positions, truth = _demo_track_and_truth()
         report = evaluate_smoothed_live_track(positions, truth)
-        self.assertAlmostEqual(report.mean_error_m, 1.34, places=2)
+        self.assertAlmostEqual(report.mean_error_m, 1.29, places=2)
         self.assertAlmostEqual(report.median_error_m, 1.01, places=2)
-        self.assertAlmostEqual(report.p90_error_m, 2.67, places=2)
-        self.assertAlmostEqual(report.max_error_m, 3.40, places=2)
+        self.assertAlmostEqual(report.p90_error_m, 2.73, places=2)
+        self.assertAlmostEqual(report.max_error_m, 3.37, places=2)
         self.assertEqual(report.steps, 40)
         self.assertEqual(report.located, 40)
         self.assertEqual(report.coverage, 1.0)
@@ -156,8 +162,8 @@ class SmoothedDemoSummaryCliTest(unittest.TestCase):
         self.assertIn("Smoothed track (Rauch-Tung-Striebel):", output)
         self.assertIn(
             "smoothed: steps: 40  located: 40  coverage: 1.00  "
-            "mean error: 1.34 m  median: 1.01 m  p90: 2.67 m  "
-            "worst: 3.40 m", output)
+            "mean error: 1.29 m  median: 1.01 m  p90: 2.73 m  "
+            "worst: 3.37 m", output)
 
     def test_demo_smoothed_line_uses_the_shared_formatter(self):
         # The CLI line is the shared formatter's output for the
@@ -172,13 +178,13 @@ class SmoothedDemoSummaryCliTest(unittest.TestCase):
     def test_demo_with_moving_average_filter_prints_smoothed(self):
         # The moving-average engine still gets a smoothed summary:
         # smoothing its laggy estimates helps a little (2.73 m to
-        # 2.55 m) but stays worse than the Kalman default.
+        # 2.54 m) but stays worse than the Kalman default.
         output = self._run_demo(["--steps", "10", "--noise", "2.0",
                                  "--seed", "7",
                                  "--filter", "moving_average"])
         self.assertIn("steps: 40  mean error: 2.73 m", output)
         self.assertIn("Smoothed track (Rauch-Tung-Striebel):", output)
-        self.assertIn("mean error: 2.55 m", output)
+        self.assertIn("mean error: 2.54 m", output)
 
     def test_demo_smoothed_beats_raw_on_other_seeds(self):
         for seed in (1, 2, 3, 11):

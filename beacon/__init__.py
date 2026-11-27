@@ -59,12 +59,12 @@ from .tracking import (DEFAULT_FORECAST_WINDOW_HOURS, ExcludedBeacon,
                        format_multi_device_report, format_report_line)
 from .trilateration import trilaterate
 from .uncertainty import (PositionUncertainty, ellipse_from_covariance,
-                          estimate_uncertainty)
+                          ellipse_rms_sigma, estimate_uncertainty)
 from .validation import (DEFAULT_MAX_WORST_SEMI_MAJOR_M,
                          FloorLayoutVerdict, LayoutValidation,
                          validate_floor_layouts)
 
-__version__ = "0.55.0"
+__version__ = "0.56.0"
 
 __all__ = [
     "BatteryModel",
@@ -166,6 +166,7 @@ __all__ = [
     "write_track_replay",
     "PositionUncertainty",
     "ellipse_from_covariance",
+    "ellipse_rms_sigma",
     "estimate_uncertainty",
     "LayoutScore",
     "PlacementAdvice",

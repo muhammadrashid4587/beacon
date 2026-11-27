@@ -77,13 +77,13 @@ def _mean_error(rows, truth):
 class SmoothedExportTest(unittest.TestCase):
     def test_rts_cuts_mean_error_single_device(self):
         # The seeded demo track, seed 7: the README's raw mean
-        # 2.16 m against the smoothed 1.34 m.
+        # 2.16 m against the smoothed 1.29 m.
         positions, truth = _one_walk_track(seed=7)
         raw = track_rows(positions)
         smoothed = smooth_track_rows(raw)
         self.assertEqual(len(smoothed), len(raw))
         self.assertAlmostEqual(_mean_error(raw, truth), 2.16, places=2)
-        self.assertAlmostEqual(_mean_error(smoothed, truth), 1.34,
+        self.assertAlmostEqual(_mean_error(smoothed, truth), 1.29,
                                places=2)
         self.assertLess(_mean_error(smoothed, truth),
                         _mean_error(raw, truth))
@@ -91,8 +91,8 @@ class SmoothedExportTest(unittest.TestCase):
     def test_rts_cuts_mean_error_every_seed(self):
         # Smoothing helps on every seed, not just the demo one.
         for seed, raw_mean, smoothed_mean in (
-                (1, 1.97, 1.26), (2, 2.57, 1.64), (3, 2.63, 1.92),
-                (7, 2.16, 1.34), (11, 1.83, 1.11)):
+                (1, 1.97, 1.15), (2, 2.57, 1.60), (3, 2.63, 1.72),
+                (7, 2.16, 1.29), (11, 1.83, 1.04)):
             positions, truth = _one_walk_track(seed=seed)
             raw = track_rows(positions)
             smoothed = smooth_track_rows(raw)
@@ -154,11 +154,11 @@ class SmoothedExportTest(unittest.TestCase):
         self.assertAlmostEqual(
             _mean_error([row for row in smoothed
                          if row["device"] == "tag-1"], truths["tag-1"]),
-            1.34, places=2)
+            1.29, places=2)
         self.assertAlmostEqual(
             _mean_error([row for row in smoothed
                          if row["device"] == "tag-2"], truths["tag-2"]),
-            0.92, places=2)
+            0.98, places=2)
 
     def test_interleaved_rows_smooth_per_device(self):
         # Combined rows need not arrive grouped by device: the
@@ -254,7 +254,7 @@ class SmoothedExportTest(unittest.TestCase):
             loaded = load_track_json(path)
             expected = smooth_track_rows(track_rows(positions))
             self.assertEqual(loaded, expected)
-            self.assertAlmostEqual(_mean_error(loaded, truth), 1.34,
+            self.assertAlmostEqual(_mean_error(loaded, truth), 1.29,
                                    places=2)
 
     def test_smoothed_csv_round_trip(self):
@@ -265,7 +265,7 @@ class SmoothedExportTest(unittest.TestCase):
             loaded = load_track_csv(path)
             expected = smooth_track_rows(track_rows(positions))
             self.assertEqual(loaded, expected)
-            self.assertAlmostEqual(_mean_error(loaded, truth), 1.34,
+            self.assertAlmostEqual(_mean_error(loaded, truth), 1.29,
                                    places=2)
 
     def test_smoothed_multi_json_round_trip(self):
@@ -373,7 +373,7 @@ class SmoothedExportTest(unittest.TestCase):
                                      simulate_walk(
                                          rectangular_walk(20.0, 12.0, 10),
                                          BEACONS, noise_db=2.0, seed=7)]),
-                1.34, places=2)
+                1.29, places=2)
 
 
 if __name__ == "__main__":

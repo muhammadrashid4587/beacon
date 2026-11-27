@@ -120,6 +120,11 @@ class KalmanFilter:
     ``MEASURED_MEASUREMENT_NOISE_M`` (2 m, variance 4.0) instead —
     a filter that assumes less noise than the estimates really
     carry reports a tighter posterior than it has earned.
+    ``update`` also takes a per-step ``measurement_noise`` that
+    overrides this value for one update: the smoothing path
+    feeds each step its own geometry-derived variance, so the
+    filter trusts geometrically strong steps more than weak
+    ones instead of one isotropic number for the whole walk.
     """
 
     # State-transition (constant velocity, dt = 1) and observation
@@ -157,8 +162,26 @@ class KalmanFilter:
             list[float], list[list[float]],
             list[float], list[list[float]]]] = []
 
-    def update(self, position: tuple[float, float]) -> tuple[float, float]:
-        """Feed a new estimate, return the filtered position."""
+    def update(self, position: tuple[float, float],
+               measurement_noise: float | None = None
+               ) -> tuple[float, float]:
+        """Feed a new estimate, return the filtered position.
+
+        ``measurement_noise`` is this step's measurement-noise
+        variance, overriding the constructor's value for this
+        update only — the smoother's per-step geometry noise
+        (see :func:`beacon.uncertainty.ellipse_rms_sigma`):
+        a step whose live estimate is geometrically weak is fed
+        with a larger variance, so the filter leans harder on
+        its velocity model there, and a geometrically strong
+        step with a smaller one. It must be positive when
+        given; the constructor's value is used when it is not.
+        """
+        if (measurement_noise is not None
+                and measurement_noise <= 0.0):
+            raise ValueError("measurement_noise must be positive")
+        step_r = ([[measurement_noise, 0.0], [0.0, measurement_noise]]
+                  if measurement_noise is not None else self._R)
         if self._state is None:
             # First observation: start here, at rest, with a wide
             # velocity covariance so the filter can learn the speed.
@@ -185,7 +208,7 @@ class KalmanFilter:
         hx = _matvec(self._H, state)
         innovation = [position[0] - hx[0], position[1] - hx[1]]
         s = _matmul(_matmul(self._H, cov), _transpose(self._H))
-        s = [[s[i][j] + self._R[i][j] for j in range(2)] for i in range(2)]
+        s = [[s[i][j] + step_r[i][j] for j in range(2)] for i in range(2)]
         det = s[0][0] * s[1][1] - s[0][1] * s[1][0]
         if det == 0.0:
             raise ValueError("singular innovation covariance")

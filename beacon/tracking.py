@@ -72,7 +72,6 @@ from .beacon import Beacon
 from .deployment import DeploymentPlan, plan_deployment
 from .drift import DriftAlarm, DriftClassification, DriftMonitor
 from .engine import PositioningEngine
-from .filter import MEASURED_MEASUREMENT_NOISE_M
 from .schedule import (REASON_DARK, REASON_LOSS, REASON_NEVER, REASON_NOISE)
 from .simulate import rectangular_walk, simulate_walk
 from .uncertainty import PositionUncertainty
@@ -898,7 +897,7 @@ def evaluate_smoothed_multi_device_track(
         truths: dict[str, list[tuple[float, float]
                             | tuple[float, float, int]]],
         method: str = "rts", window: int = 5,
-        measurement_noise_m: float = MEASURED_MEASUREMENT_NOISE_M
+        measurement_noise_m: float | None = None
         ) -> MultiDeviceTrackReport:
     """Score every device's recorded track against its own truth,
     after smoothing.
@@ -918,10 +917,10 @@ def evaluate_smoothed_multi_device_track(
 
     ``measurement_noise_m`` is the smoother's measurement-noise
     standard deviation in metres (see
-    :func:`beacon.export.smooth_track_rows`): it defaults to the
-    measured 2 m, so the smoothed positions the report scores
-    are the ones the overlay and the replay draw from the
-    smoothed export.
+    :func:`beacon.export.smooth_track_rows`): it defaults to
+    the per-step geometry noise, so the smoothed positions the
+    report scores are the ones the overlay and the replay draw
+    from the smoothed export.
 
     The smoothing is the same :func:`beacon.export.smooth_track_rows`
     the smoothed export uses — the track's rows are smoothed and
@@ -968,7 +967,7 @@ def evaluate_smoothed_live_track(
         positions: list[LivePosition | None],
         truth: list[tuple[float, float] | tuple[float, float, int]],
         method: str = "rts", window: int = 5,
-        measurement_noise_m: float = MEASURED_MEASUREMENT_NOISE_M
+        measurement_noise_m: float | None = None
         ) -> TrackReport:
     """Score one live track against ground truth, after smoothing.
 
@@ -987,10 +986,10 @@ def evaluate_smoothed_live_track(
 
     ``measurement_noise_m`` is the smoother's measurement-noise
     standard deviation in metres (see
-    :func:`beacon.export.smooth_track_rows`): it defaults to the
-    measured 2 m, so the smoothed positions the report scores
-    are the ones the overlay and the replay draw from the
-    smoothed export.
+    :func:`beacon.export.smooth_track_rows`): it defaults to
+    the per-step geometry noise, so the smoothed positions the
+    report scores are the ones the overlay and the replay draw
+    from the smoothed export.
 
     The smoothing is the same :func:`beacon.export.smooth_track_rows`
     the smoothed export uses, and the scoring is the shared
@@ -1279,10 +1278,11 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
     ``--export-smoothed-csv`` save the same track with its
     positions smoothed (Rauch-Tung-Striebel), alongside the raw
     export, so a dashboard can replay the steadier path.
-    ``--smoothing-noise-m`` sets the smoother's
-    measurement-noise stddev in metres for those smoothed
-    exports (default: the calibrated 2 m; 1.0 reproduces the
-    pre-0.54.0 numbers).
+    ``--smoothing-noise-m`` sets one scalar measurement-noise
+    stddev in metres for the smoother behind those smoothed
+    exports (omit it for the per-step geometry noise; 1.0
+    reproduces the pre-0.54.0 numbers, 2.0 the v0.54.0/v0.55.0
+    calibrated ones).
     ``input_stream`` / ``output_stream``
     exist so tests can drive the stream without touching
     sys.stdin / sys.stdout.
@@ -1311,13 +1311,13 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                         help="assumed RSSI noise in dB for the confidence "
                         f"ellipse (default: {DEFAULT_SIGMA_RSSI_DB})")
     parser.add_argument("--smoothing-noise-m", type=float,
-                        default=MEASURED_MEASUREMENT_NOISE_M,
-                        help="measurement-noise stddev in metres for "
-                        "the smoother behind --export-smoothed-json "
-                        "/ --export-smoothed-csv (default: "
-                        f"{MEASURED_MEASUREMENT_NOISE_M}, the "
-                        "calibrated value); 1.0 reproduces the "
-                        "pre-0.54.0 numbers")
+                        default=None,
+                        help="one scalar measurement-noise stddev in "
+                        "metres for the smoother behind "
+                        "--export-smoothed-json / --export-smoothed-csv "
+                        "(omit it for the per-step geometry noise; 1.0 "
+                        "reproduces the pre-0.54.0 numbers, 2.0 the "
+                        "v0.54.0/v0.55.0 calibrated ones)")
     parser.add_argument("--battery-drain-per-hour", type=float, default=0.0,
                         help="demo only: drain beacon D's battery at "
                         "this fraction of a full charge per hour, so "
@@ -1377,7 +1377,8 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
         parser.error("--readmit-after must be at least 1")
     if args.sigma_rssi <= 0:
         parser.error("--sigma-rssi must be positive")
-    if args.smoothing_noise_m <= 0:
+    if (args.smoothing_noise_m is not None
+            and args.smoothing_noise_m <= 0):
         parser.error("--smoothing-noise-m must be positive")
     if args.battery_drain_per_hour < 0:
         parser.error("--battery-drain-per-hour must not be negative")
@@ -1459,8 +1460,8 @@ def _export_track(positions: list[LivePosition | None],
                   json_path: str | None, csv_path: str | None,
                   smoothed_json_path: str | None = None,
                   smoothed_csv_path: str | None = None,
-                  measurement_noise_m: float
-                  = MEASURED_MEASUREMENT_NOISE_M) -> None:
+                  measurement_noise_m: float | None = None
+                  ) -> None:
     """Save a recorded track to the requested export files, if
     any. A track with no steps (an empty stream) has nothing to
     export, so the flags are quietly skipped rather than

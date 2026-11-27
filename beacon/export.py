@@ -106,7 +106,8 @@ import math
 from .filter import (MEASURED_MEASUREMENT_NOISE_M, KalmanFilter,
                      MovingAverageFilter)
 from .tracking import LivePosition
-from .uncertainty import PositionUncertainty, ellipse_from_covariance
+from .uncertainty import (PositionUncertainty, ellipse_from_covariance,
+                          ellipse_rms_sigma)
 
 FORMAT = "beacon-live-track"
 FORMAT_VERSION = 1
@@ -292,10 +293,29 @@ def multi_track_to_dict(
     }
 
 
+def _step_noise_m(row: dict) -> float | None:
+    """One row's per-step smoother noise, in metres, from the
+    step's own live confidence ellipse — the RMS sigma of the
+    ellipse (see :func:`beacon.uncertainty.ellipse_rms_sigma`),
+    so a step located by a weak geometry is smoothed on a
+    larger noise than a step pinned down from all sides. None
+    when the step carries no ellipse (degenerate geometry), so
+    the filter falls back to the measured noise for that step.
+    """
+    major = row.get("ellipse_semi_major_m")
+    minor = row.get("ellipse_semi_minor_m")
+    angle = row.get("ellipse_angle_deg")
+    if major is None or minor is None or angle is None:
+        return None
+    return ellipse_rms_sigma(
+        PositionUncertainty(major, minor, angle))
+
+
 def _smooth_series(
         positions: list[tuple[float, float]], method: str,
         window: int,
-        measurement_noise_m: float = MEASURED_MEASUREMENT_NOISE_M
+        measurement_noise_m: float | None = None,
+        noises_m: list[float | None] | None = None
         ) -> list[tuple[float, float, PositionUncertainty | None]]:
     """One device's (x, y) series, smoothed in order, with the
     smoothed ellipse per step.
@@ -314,23 +334,41 @@ def _smooth_series(
 
     ``measurement_noise_m`` is the standard deviation, in
     metres, of the position estimates the smoother is fed — the
-    filter's measurement-noise variance is its square. It
-    defaults to the measured value
-    (``MEASURED_MEASUREMENT_NOISE_M``, 2 m on the demo walk):
-    a filter that assumes less noise than the estimates really
-    carry reports a tighter posterior than it has earned, so
-    its 95% ellipse covers far fewer than 95% of the true
-    positions. The parameter is ignored by the moving-average
-    method, which has no noise model. Raises ValueError on a
-    non-positive noise for the ``"rts"`` method.
+    filter's measurement-noise variance is its square. When it
+    is None (the default) the noise is per step instead of one
+    isotropic number for the whole walk: each step is fed with
+    the RMS sigma of its own live confidence ellipse, from
+    ``noises_m`` (one sigma per position, in order), so the
+    filter trusts geometrically strong steps more than weak
+    ones — a step with no ellipse in ``noises_m`` falls back to
+    the measured ``MEASURED_MEASUREMENT_NOISE_M`` (2 m) for
+    that step. A float selects one scalar noise for every step
+    instead: 1.0 reproduces the pre-0.54.0 numbers exactly and
+    2.0 the v0.54.0/v0.55.0 calibrated ones. The parameter is
+    ignored by the moving-average method, which has no noise
+    model. Raises ValueError on a non-positive scalar noise
+    for the ``"rts"`` method.
     """
     if method == "rts":
-        if measurement_noise_m <= 0.0:
+        if measurement_noise_m is not None and measurement_noise_m <= 0.0:
             raise ValueError("measurement_noise_m must be positive")
         kalman = KalmanFilter(
-            measurement_noise=measurement_noise_m ** 2)
-        for position in positions:
-            kalman.update(position)
+            measurement_noise=(measurement_noise_m ** 2
+                               if measurement_noise_m is not None
+                               else MEASURED_MEASUREMENT_NOISE_M ** 2))
+        if measurement_noise_m is None:
+            steps = zip(positions,
+                        noises_m if noises_m is not None
+                        else [None] * len(positions))
+            for position, noise_m in steps:
+                if noise_m is None:
+                    kalman.update(position)
+                else:
+                    kalman.update(position,
+                                  measurement_noise=noise_m ** 2)
+        else:
+            for position in positions:
+                kalman.update(position)
         smoothed = []
         for x, y, cov in kalman.smooth_with_covariance():
             try:
@@ -348,8 +386,8 @@ def _smooth_series(
 
 def smooth_track_rows(rows: list[dict], method: str = "rts",
                       window: int = 5,
-                      measurement_noise_m: float =
-                      MEASURED_MEASUREMENT_NOISE_M) -> list[dict]:
+                      measurement_noise_m: float | None = None
+                      ) -> list[dict]:
     """The rows of a recorded track with their positions smoothed.
 
     ``rows`` is a row list as :func:`track_rows` produces — or as
@@ -378,11 +416,16 @@ def smooth_track_rows(rows: list[dict], method: str = "rts",
     so it is the opt-out, not the default. ``measurement_noise_m``
     is the standard deviation, in metres, of the position
     estimates the smoother is fed — the filter's measurement-noise
-    variance is its square — defaulting to the measured
-    ``MEASURED_MEASUREMENT_NOISE_M`` (2 m on the demo walk), so
-    the smoothed 95% ellipse is an honest interval instead of the
-    overconfident one the filter's 1 m default produced; pass 1.0
-    to reproduce the old behaviour. It is ignored by the
+    variance is its square. When it is None (the default) the
+    noise is per step instead of one isotropic number for the
+    whole walk: each step is smoothed on the RMS sigma of its
+    own live confidence ellipse (see :func:`_step_noise_m`), so
+    the filter trusts a step as much as that step's own beacon
+    geometry earned — a step with no ellipse falls back to the
+    measured ``MEASURED_MEASUREMENT_NOISE_M`` (2 m). Pass a
+    float to use one scalar noise for every step instead: 1.0
+    reproduces the pre-0.54.0 behaviour exactly, 2.0 the
+    v0.54.0/v0.55.0 calibrated one. It is ignored by the
     moving-average method, which has no noise model. Rows from
     several devices are smoothed per device — each device's series
     separately, in that device's own order — so one tag's walk
@@ -421,9 +464,11 @@ def smooth_track_rows(rows: list[dict], method: str = "rts",
                 end += 1
             run = indices[start:end]
             positions = [(rows[i]["x"], rows[i]["y"]) for i in run]
+            noises = ([_step_noise_m(rows[i]) for i in run]
+                      if measurement_noise_m is None else None)
             for i, (x, y, ellipse) in zip(
                     run, _smooth_series(positions, method, window,
-                                        measurement_noise_m)):
+                                        measurement_noise_m, noises)):
                 smoothed[i]["x"] = x
                 smoothed[i]["y"] = y
                 smoothed[i]["smoothed_ellipse_semi_major_m"] = (
@@ -440,7 +485,7 @@ def smoothed_track_to_dict(
         positions: list[LivePosition | None],
         device: str | None = None,
         method: str = "rts", window: int = 5,
-        measurement_noise_m: float = MEASURED_MEASUREMENT_NOISE_M
+        measurement_noise_m: float | None = None
         ) -> dict:
     """Serialise a recorded track to plain JSON-ready data, with
     the positions smoothed (see :func:`smooth_track_rows`).
@@ -471,7 +516,7 @@ def smoothed_track_to_dict(
 def smoothed_multi_track_to_dict(
         tracks: dict[str, list[LivePosition | None]],
         method: str = "rts", window: int = 5,
-        measurement_noise_m: float = MEASURED_MEASUREMENT_NOISE_M
+        measurement_noise_m: float | None = None
         ) -> dict:
     """Serialise several devices' recorded tracks to one combined
     JSON-ready dict, with every device's positions smoothed.
@@ -720,7 +765,7 @@ def export_smoothed_track_json(
         positions: list[LivePosition | None], path: str,
         device: str | None = None,
         method: str = "rts", window: int = 5,
-        measurement_noise_m: float = MEASURED_MEASUREMENT_NOISE_M
+        measurement_noise_m: float | None = None
         ) -> None:
     """Write a recorded track to ``path`` as JSON, with the
     positions smoothed (see :func:`smoothed_track_to_dict`) —
@@ -744,7 +789,7 @@ def export_smoothed_track_json(
 def export_smoothed_multi_track_json(
         tracks: dict[str, list[LivePosition | None]], path: str,
         method: str = "rts", window: int = 5,
-        measurement_noise_m: float = MEASURED_MEASUREMENT_NOISE_M
+        measurement_noise_m: float | None = None
         ) -> None:
     """Write several devices' recorded tracks to ``path`` as one
     combined JSON file, with every device's positions smoothed
@@ -769,7 +814,7 @@ def export_smoothed_track_csv(
         positions: list[LivePosition | None], path: str,
         device: str | None = None,
         method: str = "rts", window: int = 5,
-        measurement_noise_m: float = MEASURED_MEASUREMENT_NOISE_M
+        measurement_noise_m: float | None = None
         ) -> None:
     """Write a recorded track to ``path`` as CSV, with the
     positions smoothed — the same rows as
@@ -795,7 +840,7 @@ def export_smoothed_track_csv(
 def export_smoothed_multi_track_csv(
         tracks: dict[str, list[LivePosition | None]], path: str,
         method: str = "rts", window: int = 5,
-        measurement_noise_m: float = MEASURED_MEASUREMENT_NOISE_M
+        measurement_noise_m: float | None = None
         ) -> None:
     """Write several devices' recorded tracks to ``path`` as one
     combined CSV file, with every device's positions smoothed —

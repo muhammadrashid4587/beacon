@@ -65,7 +65,6 @@ from .export import (export_multi_track_csv, export_multi_track_json,
                      export_smoothed_multi_track_csv,
                      export_smoothed_multi_track_json, load_track_csv,
                      load_track_json, track_from_dict)
-from .filter import MEASURED_MEASUREMENT_NOISE_M
 from .simulate import rectangular_walk, simulate_walk
 from .tracking import (DEFAULT_DARK_AFTER_S, DEFAULT_FORECAST_WINDOW_HOURS,
                        DEFAULT_READMIT_AFTER, DEFAULT_SIGMA_RSSI_DB,
@@ -267,8 +266,8 @@ class MultiDeviceTracker:
     def export_smoothed_track_json(self, path: str,
                                    method: str = "rts",
                                    window: int = 5,
-                                   measurement_noise_m: float =
-                                   MEASURED_MEASUREMENT_NOISE_M
+                                   measurement_noise_m: float | None =
+                                   None
                                    ) -> None:
         """Write every device's recorded track to ``path`` as one
         combined JSON file, with every device's positions
@@ -288,8 +287,8 @@ class MultiDeviceTracker:
     def export_smoothed_track_csv(self, path: str,
                                   method: str = "rts",
                                   window: int = 5,
-                                  measurement_noise_m: float =
-                                  MEASURED_MEASUREMENT_NOISE_M
+                                  measurement_noise_m: float | None =
+                                  None
                                   ) -> None:
         """Write every device's recorded track to ``path`` as one
         combined CSV file, with every device's positions smoothed
@@ -740,10 +739,11 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
     the same combined file with every device's positions
     smoothed (Rauch-Tung-Striebel, per device), alongside the
     raw export, so a dashboard can replay the steadier paths.
-    ``--smoothing-noise-m`` sets the smoother's
-    measurement-noise stddev in metres for the smoothed
-    exports and the smoothed demo reports (default: the
-    calibrated 2 m; 1.0 reproduces the pre-0.54.0 numbers).
+    ``--smoothing-noise-m`` sets one scalar measurement-noise
+    stddev in metres for the smoother behind the smoothed
+    exports and the smoothed demo reports (omit it for the
+    per-step geometry noise; 1.0 reproduces the pre-0.54.0
+    numbers, 2.0 the v0.54.0/v0.55.0 calibrated ones).
     ``--evaluate`` (demo only) scores the two demo walks
     against their ground truth and prints the multi-device
     track accuracy report — one line per device plus the
@@ -797,14 +797,14 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
                         help="assumed RSSI noise in dB for the confidence "
                         f"ellipse (default: {DEFAULT_SIGMA_RSSI_DB})")
     parser.add_argument("--smoothing-noise-m", type=float,
-                        default=MEASURED_MEASUREMENT_NOISE_M,
-                        help="measurement-noise stddev in metres for "
-                        "the smoother behind --export-smoothed-json "
-                        "/ --export-smoothed-csv and the "
-                        "--evaluate-smoothed reports (default: "
-                        f"{MEASURED_MEASUREMENT_NOISE_M}, the "
-                        "calibrated value); 1.0 reproduces the "
-                        "pre-0.54.0 numbers")
+                        default=None,
+                        help="one scalar measurement-noise stddev in "
+                        "metres for the smoother behind "
+                        "--export-smoothed-json / --export-smoothed-csv "
+                        "and the --evaluate-smoothed reports (omit it "
+                        "for the per-step geometry noise; 1.0 "
+                        "reproduces the pre-0.54.0 numbers, 2.0 the "
+                        "v0.54.0/v0.55.0 calibrated ones)")
     parser.add_argument("--forecast", action="store_true",
                         help="attach the deployment plan to every "
                         "device's tracker, so each live position "
@@ -908,7 +908,8 @@ def main(argv=None, input_stream=None, output_stream=None) -> int:
         parser.error("--readmit-after must be at least 1")
     if args.sigma_rssi <= 0:
         parser.error("--sigma-rssi must be positive")
-    if args.smoothing_noise_m <= 0:
+    if (args.smoothing_noise_m is not None
+            and args.smoothing_noise_m <= 0):
         parser.error("--smoothing-noise-m must be positive")
     if args.forecast_window_hours <= 0:
         parser.error("--forecast-window-hours must be positive")

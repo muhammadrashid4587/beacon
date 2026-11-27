@@ -259,7 +259,7 @@ class SmoothedOverlayTest(unittest.TestCase):
     def test_rendered_smoothed_track_measures_like_the_export(self):
         # The two-device demo walk: the dashed trails on the
         # overlay, unprojected, score the same as the smoothed
-        # export's rows — overall 1.94 m raw to 1.13 m smoothed
+        # export's rows — overall 1.94 m raw to 1.14 m smoothed
         # over the 80 located steps — so the map shows the
         # improvement the export measured, not a different one.
         tracks, truths = _two_walk_tracks()
@@ -300,7 +300,7 @@ class SmoothedOverlayTest(unittest.TestCase):
                 [row for row in smoothed if row["device"] == device],
                 truth))
         self.assertAlmostEqual(overall_raw, 1.94, places=2)
-        self.assertAlmostEqual(overall_smoothed, 1.13, places=2)
+        self.assertAlmostEqual(overall_smoothed, 1.14, places=2)
 
 
 class SmoothedReplayTest(unittest.TestCase):
@@ -428,13 +428,13 @@ class SmoothedRenderCliTest(unittest.TestCase):
                 svg = handle.read()
             self.assertIn("smoothed track (dashed)", svg)
             # The rendered smoothed trail scores the smoothed
-            # mean, not the raw one: 1.34 m against 2.16 m.
+            # mean, not the raw one: 1.29 m against 2.16 m.
             points = _smoothed_polyline_points(svg)
             self.assertEqual(len(points), 40)
             rendered_error = statistics.fmean(
                 math.hypot(px - tx, py - ty)
                 for (px, py), (tx, ty) in zip(points, truth))
-            self.assertAlmostEqual(rendered_error, 1.34, delta=0.05)
+            self.assertAlmostEqual(rendered_error, 1.29, delta=0.05)
             self.assertLess(
                 rendered_error,
                 _mean_error(track_rows(positions), truth))

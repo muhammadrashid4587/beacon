@@ -112,6 +112,34 @@ def ellipse_from_covariance(
                                angle_deg=angle_deg)
 
 
+def ellipse_rms_sigma(ellipse: PositionUncertainty) -> float:
+    """The isotropic noise matching an ellipse's covariance, in
+    metres: the root-mean-square of the standard deviations
+    along the ellipse's axes.
+
+    The ellipse is the 95% interval of a 2-D Gaussian, so each
+    axis's variance is ``(semi_axis / sqrt(5.991)) ** 2``; the
+    RMS of the two is the single standard deviation whose
+    isotropic covariance has the same average variance as the
+    ellipse's. It is geometry-dependent — a step located by
+    beacons clustered on one side has a stretched ellipse and
+    so a larger sigma than a step pinned down from all sides —
+    which is what makes it the smoother's per-step noise (see
+    :func:`beacon.export.smooth_track_rows`): the filter trusts
+    each step as much as that step's own geometry earned, not
+    as much as the walk's average. On the default demo walk it
+    averages about 2.0 m (1.1–3.7 m per step), so the per-step
+    noise is calibrated to the same measured error the scalar
+    2 m was — it varies the noise per step instead of changing
+    its average. Raises ValueError for a non-positive axis.
+    """
+    if ellipse.semi_major <= 0.0 or ellipse.semi_minor <= 0.0:
+        raise ValueError("ellipse axes must be positive")
+    return math.sqrt((ellipse.semi_major ** 2
+                      + ellipse.semi_minor ** 2)
+                     / (2.0 * _CHI2_95_2DOF))
+
+
 def estimate_uncertainty(beacons: list[tuple[float, float]],
                          position: tuple[float, float],
                          distances: list[float],

@@ -109,13 +109,16 @@ class KalmanNoiseWidensCovarianceTest(unittest.TestCase):
 
 
 class SmoothingNoiseParameterTest(unittest.TestCase):
-    def test_default_is_the_measured_noise(self):
-        # The default smoothing is the calibrated one: the
-        # smoothed ellipse averages 1.90 m semi-major on the
-        # demo walk, not the 1.14 m the 1 m default gave.
+    def test_default_is_the_per_step_noise(self):
+        # The default smoothing is the per-step one: the
+        # smoothed ellipse averages 1.82 m semi-major on the
+        # demo walk — a little tighter than the 1.90 m the
+        # scalar 2 m gave, since weak-geometry steps are
+        # smoothed on a larger noise and strong ones on a
+        # smaller one — and not the 1.14 m the 1 m default gave.
         positions, _ = _one_walk_track(seed=7)
         smoothed = smooth_track_rows(track_rows(positions))
-        self.assertAlmostEqual(_mean_semi_major(smoothed), 1.90,
+        self.assertAlmostEqual(_mean_semi_major(smoothed), 1.82,
                                places=2)
 
     def test_explicit_one_metre_reproduces_old_ellipse(self):
@@ -129,7 +132,7 @@ class SmoothingNoiseParameterTest(unittest.TestCase):
         self.assertEqual(_inside_count(old, truth), 20)
 
     def test_default_covers_better_on_every_seed(self):
-        # The calibrated ellipse covers more true positions than
+        # The per-step ellipse covers more true positions than
         # the 1 m one on every seed — the fix is not a seed-7
         # fluke — while staying tighter than the raw ellipse.
         for seed in (1, 2, 3, 7, 11):
@@ -169,22 +172,31 @@ class NoisePlumbingTest(unittest.TestCase):
     def test_evaluate_passes_noise_through(self):
         # The report scores the same positions the export writes
         # at the same noise: 1.0 m reproduces the old 1.45 m mean,
-        # the default scores the new 1.34 m.
+        # the default scores the per-step 1.29 m, and the scalar
+        # 2.0 m reproduces the v0.54.0/v0.55.0 1.34 m.
         positions, truth = _one_walk_track(seed=7)
         old = evaluate_smoothed_live_track(
             positions, truth, measurement_noise_m=1.0)
         new = evaluate_smoothed_live_track(positions, truth)
+        calibrated = evaluate_smoothed_live_track(
+            positions, truth, measurement_noise_m=2.0)
         self.assertAlmostEqual(old.mean_error_m, 1.45, places=2)
-        self.assertAlmostEqual(new.mean_error_m, 1.34, places=2)
+        self.assertAlmostEqual(new.mean_error_m, 1.29, places=2)
+        self.assertAlmostEqual(calibrated.mean_error_m, 1.34,
+                               places=2)
 
     def test_multi_device_evaluate_passes_noise_through(self):
         tracks, truths = _two_walk_tracks()
         old = evaluate_smoothed_multi_device_track(
             tracks, truths, measurement_noise_m=1.0)
         new = evaluate_smoothed_multi_device_track(tracks, truths)
+        calibrated = evaluate_smoothed_multi_device_track(
+            tracks, truths, measurement_noise_m=2.0)
         self.assertAlmostEqual(old.overall.mean_error_m, 1.25,
                                places=2)
-        self.assertAlmostEqual(new.overall.mean_error_m, 1.13,
+        self.assertAlmostEqual(new.overall.mean_error_m, 1.14,
+                               places=2)
+        self.assertAlmostEqual(calibrated.overall.mean_error_m, 1.13,
                                places=2)
 
     def test_smoothed_export_passes_noise_through(self):
@@ -202,7 +214,7 @@ class NoisePlumbingTest(unittest.TestCase):
             new_path = os.path.join(tmpdir, "new.json")
             export_smoothed_track_json(positions, new_path)
             new = load_track_json(new_path)
-            self.assertAlmostEqual(_mean_semi_major(new), 1.90,
+            self.assertAlmostEqual(_mean_semi_major(new), 1.82,
                                    places=2)
             self.assertEqual(
                 new, smooth_track_rows(track_rows(positions)))

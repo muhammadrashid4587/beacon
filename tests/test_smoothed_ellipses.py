@@ -221,11 +221,11 @@ class SmoothedEllipseExportTest(unittest.TestCase):
             self.assertLessEqual(
                 row["smoothed_ellipse_angle_deg"], 90.0)
         # The smoother's ellipse is much tighter than the live
-        # geometry's: 1.90 m against 6.32 m on the demo walk.
+        # geometry's: 1.82 m against 6.32 m on the demo walk.
         self.assertAlmostEqual(_mean_semi_major(raw), 6.32, places=2)
         self.assertAlmostEqual(
             _mean_semi_major(smoothed, "smoothed_ellipse_semi_major_m"),
-            1.90, places=2)
+            1.82, places=2)
         # And the live ellipse fields are untouched by smoothing.
         self.assertEqual(
             [row["ellipse_semi_major_m"] for row in smoothed],
@@ -326,16 +326,17 @@ class SmoothedEllipseMeasuredTest(unittest.TestCase):
     def test_demo_walk_smoothed_ellipse_numbers(self):
         # The smoothed ellipse is the smoother's own posterior,
         # and its 95% claim is only as good as the filter's noise
-        # model: the smoother now assumes the measured 2 m
-        # measurement noise instead of the filter's 1 m default,
-        # so on the demo walk 30 of 40 true positions fall inside
-        # the smoothed ellipse, against 33 of 40 inside the raw
-        # geometry ellipse — the smoothed ellipse is still
-        # tighter than the raw one (1.90 m against 6.32 m
-        # semi-major), but it now reads as wide as the track's
-        # actual accuracy instead of tighter than it. Passing
-        # measurement_noise_m=1.0 reproduces the old overconfident
-        # numbers: 20 of 40 inside on seed 7, 1.14 m semi-major.
+        # model: the smoother now smooths each step on that
+        # step's own geometry-derived noise instead of one
+        # isotropic 2 m, so on the demo walk 29 of 40 true
+        # positions fall inside the smoothed ellipse, against
+        # 33 of 40 inside the raw geometry ellipse — the
+        # smoothed ellipse is still tighter than the raw one
+        # (1.82 m against 6.32 m semi-major), but it now reads
+        # as wide as the track's actual accuracy instead of
+        # tighter than it. Passing measurement_noise_m=1.0
+        # reproduces the old overconfident numbers: 20 of 40
+        # inside on seed 7, 1.14 m semi-major.
         positions, truth = _one_walk_track(seed=7)
         raw = track_rows(positions)
         smoothed = smooth_track_rows(raw)
@@ -343,7 +344,7 @@ class SmoothedEllipseMeasuredTest(unittest.TestCase):
             _inside_count(smoothed, truth,
                           "smoothed_ellipse_semi_major_m",
                           "smoothed_ellipse_semi_minor_m",
-                          "smoothed_ellipse_angle_deg"), 30)
+                          "smoothed_ellipse_angle_deg"), 29)
         self.assertEqual(_inside_count(raw, truth), 33)
         old = smooth_track_rows(raw, measurement_noise_m=1.0)
         self.assertEqual(
@@ -354,28 +355,30 @@ class SmoothedEllipseMeasuredTest(unittest.TestCase):
         self.assertAlmostEqual(
             _mean_semi_major(old, "smoothed_ellipse_semi_major_m"),
             1.14, places=2)
-        # The filter's noise model is isotropic, so the smoothed
-        # ellipse is near-circular on every seed — it carries
-        # almost no orientation, unlike the raw geometry ellipse.
+        # The per-step noise is isotropic at each step, so the
+        # smoothed ellipse is near-circular on every seed — it
+        # carries almost no orientation, unlike the raw geometry
+        # ellipse — but its size now follows the step's geometry:
+        # 1.68–1.85 m mean semi-major across seeds instead of one
+        # 1.90 m everywhere.
         for seed in (1, 2, 3, 7, 11):
             seed_positions, seed_truth = _one_walk_track(seed=seed)
             seed_smoothed = smooth_track_rows(
                 track_rows(seed_positions))
-            self.assertAlmostEqual(
-                _mean_semi_major(seed_smoothed,
-                                 "smoothed_ellipse_semi_major_m"),
-                1.90, places=2)
-            self.assertAlmostEqual(
-                _mean_semi_major(seed_smoothed,
-                                 "smoothed_ellipse_semi_minor_m"),
-                1.90, places=2)
+            major = _mean_semi_major(seed_smoothed,
+                                     "smoothed_ellipse_semi_major_m")
+            minor = _mean_semi_major(seed_smoothed,
+                                     "smoothed_ellipse_semi_minor_m")
+            self.assertAlmostEqual(major, minor, places=2)
+            self.assertGreaterEqual(major, 1.68)
+            self.assertLessEqual(major, 1.85)
             inside = _inside_count(
                 seed_smoothed, seed_truth,
                 "smoothed_ellipse_semi_major_m",
                 "smoothed_ellipse_semi_minor_m",
                 "smoothed_ellipse_angle_deg")
-            self.assertGreaterEqual(inside, 21)
-            self.assertLessEqual(inside, 37)
+            self.assertGreaterEqual(inside, 25)
+            self.assertLessEqual(inside, 36)
 
 
 class SmoothedEllipseOverlayTest(unittest.TestCase):

@@ -37,7 +37,6 @@ from .deployment import (DEFAULT_LOSS_THRESHOLD_DB,
                          plan_deployment)
 from .drift import DriftMonitor
 from .engine import PositioningEngine
-from .filter import MEASURED_MEASUREMENT_NOISE_M
 from .map_overlay import load_track_for_overlay, render_map_overlay
 from .replay import render_track_replay
 from .schedule import replacement_schedule
@@ -254,13 +253,13 @@ def main(argv=None) -> int:
                         help="position filter (default: kalman; "
                         "moving_average is the pre-0.5.0 default)")
     parser.add_argument("--smoothing-noise-m", type=float,
-                        default=MEASURED_MEASUREMENT_NOISE_M,
-                        help="measurement-noise stddev in metres for "
-                        "the smoother behind the smoothed-track "
-                        "summary (default: "
-                        f"{MEASURED_MEASUREMENT_NOISE_M}, the "
-                        "calibrated value); 1.0 reproduces the "
-                        "pre-0.54.0 numbers")
+                        default=None,
+                        help="one scalar measurement-noise stddev in "
+                        "metres for the smoother behind the "
+                        "smoothed-track summary (omit it for the "
+                        "per-step geometry noise; 1.0 reproduces the "
+                        "pre-0.54.0 numbers, 2.0 the v0.54.0/v0.55.0 "
+                        "calibrated ones)")
     parser.add_argument("--map-overlay", default=None, metavar="PATH",
                         help="render a ward-map SVG overlay from an "
                         "exported live track (.json or .csv) instead "
@@ -366,7 +365,8 @@ def main(argv=None) -> int:
                         "burns per hour (default: 0.05)")
     args = parser.parse_args(argv)
 
-    if args.smoothing_noise_m <= 0:
+    if (args.smoothing_noise_m is not None
+            and args.smoothing_noise_m <= 0):
         parser.error("--smoothing-noise-m must be positive")
 
     if args.deployment_plan:
@@ -457,10 +457,23 @@ def main(argv=None) -> int:
     print(f"{'step':>4} {'true':>14} {'estimated':>14} {'error m':>7}")
     errors = []
     estimates = []
+    uncertainties = []
     for i, step in enumerate(steps):
         true = step["true"]
         est = engine.estimate(step["rssi"])
         estimates.append(est)
+        # The ellipse describes this step's raw geometry, from the
+        # same beacons the engine localised on — the filtered
+        # position above carries none, so the smoother behind the
+        # summary would fall back to one scalar noise for the
+        # whole walk. A step whose geometry is degenerate still
+        # has a valid filtered position, it just has no ellipse.
+        try:
+            _, _, uncertainty = engine.estimate_with_uncertainty(
+                step["rssi"])
+        except ValueError:
+            uncertainty = None
+        uncertainties.append(uncertainty)
         err = math.hypot(est[0] - true[0], est[1] - true[1])
         errors.append(err)
         print(f"{i:>4} ({true[0]:5.1f},{true[1]:5.1f}) "
@@ -475,13 +488,16 @@ def main(argv=None) -> int:
     # worth against the raw numbers above — the shared scorer and
     # formatter, so this line cannot disagree with the
     # multi-device smoothed report. The walk is single-floor by
-    # construction, so every position is on floor 0; the engine
-    # gives no ellipse here, so the positions carry none.
+    # construction, so every position is on floor 0; each position
+    # carries its step's raw-geometry ellipse, so the smoother
+    # weights each step by its own geometry instead of one
+    # scalar noise for the whole walk.
     positions = [
         LivePosition(t=float(i), x=est[0], y=est[1], floor=0,
-                     floor_confidence=1.0, uncertainty=None,
+                     floor_confidence=1.0, uncertainty=uncertainty,
                      heard=tuple(sorted(step["rssi"])))
-        for i, (est, step) in enumerate(zip(estimates, steps))
+        for i, (est, uncertainty, step) in enumerate(
+            zip(estimates, uncertainties, steps))
     ]
     smoothed_report = evaluate_smoothed_live_track(
         positions, [step["true"] for step in steps],

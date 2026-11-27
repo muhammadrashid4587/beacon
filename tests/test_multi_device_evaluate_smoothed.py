@@ -50,34 +50,34 @@ def _two_walk_tracks_and_truths():
 class EvaluateSmoothedTrackTest(unittest.TestCase):
     def test_demo_smoothed_report_numbers(self):
         # The README's demo numbers: the smoothed track cuts the
-        # overall mean from 1.94 m to 1.13 m, tag-1 from 2.16 m
-        # to 1.34 m and tag-2 from 1.72 m to 0.92 m — the same
-        # numbers the smoothed export measured in v0.48.0.
+        # overall mean from 1.94 m to 1.14 m, tag-1 from 2.16 m
+        # to 1.29 m and tag-2 from 1.72 m to 0.98 m — the same
+        # numbers the smoothed export measures.
         tracks, truths = _two_walk_tracks_and_truths()
         report = evaluate_smoothed_multi_device_track(tracks, truths)
         self.assertAlmostEqual(
-            report.by_device["tag-1"].mean_error_m, 1.34, places=2)
+            report.by_device["tag-1"].mean_error_m, 1.29, places=2)
         self.assertAlmostEqual(
             report.by_device["tag-1"].median_error_m, 1.01, places=2)
         self.assertAlmostEqual(
-            report.by_device["tag-1"].p90_error_m, 2.67, places=2)
+            report.by_device["tag-1"].p90_error_m, 2.73, places=2)
         self.assertAlmostEqual(
-            report.by_device["tag-1"].max_error_m, 3.40, places=2)
+            report.by_device["tag-1"].max_error_m, 3.37, places=2)
         self.assertAlmostEqual(
-            report.by_device["tag-2"].mean_error_m, 0.92, places=2)
+            report.by_device["tag-2"].mean_error_m, 0.98, places=2)
         self.assertAlmostEqual(
-            report.by_device["tag-2"].median_error_m, 0.77, places=2)
+            report.by_device["tag-2"].median_error_m, 0.80, places=2)
         self.assertAlmostEqual(
-            report.by_device["tag-2"].p90_error_m, 1.87, places=2)
+            report.by_device["tag-2"].p90_error_m, 1.93, places=2)
         self.assertAlmostEqual(
-            report.by_device["tag-2"].max_error_m, 2.83, places=2)
-        self.assertAlmostEqual(report.overall.mean_error_m, 1.13,
+            report.by_device["tag-2"].max_error_m, 2.85, places=2)
+        self.assertAlmostEqual(report.overall.mean_error_m, 1.14,
                                places=2)
-        self.assertAlmostEqual(report.overall.median_error_m, 0.85,
+        self.assertAlmostEqual(report.overall.median_error_m, 0.90,
                                places=2)
-        self.assertAlmostEqual(report.overall.p90_error_m, 2.31,
+        self.assertAlmostEqual(report.overall.p90_error_m, 2.40,
                                places=2)
-        self.assertAlmostEqual(report.overall.max_error_m, 3.40,
+        self.assertAlmostEqual(report.overall.max_error_m, 3.37,
                                places=2)
         self.assertEqual(report.overall.steps, 80)
         self.assertEqual(report.overall.located, 80)
@@ -187,9 +187,9 @@ class EvaluateSmoothedCliTest(unittest.TestCase):
         self.assertEqual(len(lines), 6)
         self.assertIn("mean error: 2.16 m", lines[0])
         self.assertIn("mean error: 1.94 m", lines[2])
-        self.assertIn("mean error: 1.34 m", lines[3])
-        self.assertIn("mean error: 0.92 m", lines[4])
-        self.assertIn("mean error: 1.13 m", lines[5])
+        self.assertIn("mean error: 1.29 m", lines[3])
+        self.assertIn("mean error: 0.98 m", lines[4])
+        self.assertIn("mean error: 1.14 m", lines[5])
 
     def test_demo_evaluate_smoothed_alone_prints_only_smoothed(self):
         out = io.StringIO()
@@ -198,7 +198,7 @@ class EvaluateSmoothedCliTest(unittest.TestCase):
                        output_stream=out), 0)
         lines = self._report_lines(out.getvalue())
         self.assertEqual(len(lines), 3)
-        self.assertIn("mean error: 1.13 m", lines[2])
+        self.assertIn("mean error: 1.14 m", lines[2])
         self.assertNotIn("mean error: 1.94 m", out.getvalue())
 
     def test_demo_evaluate_smoothed_json_writes_report_dict(self):
@@ -216,13 +216,13 @@ class EvaluateSmoothedCliTest(unittest.TestCase):
         self.assertEqual(set(written) - {"smoothed", "smoothing_method"},
                          {"by_device", "overall"})
         self.assertAlmostEqual(
-            written["by_device"]["tag-1"]["mean_error_m"], 1.34,
+            written["by_device"]["tag-1"]["mean_error_m"], 1.29,
             places=2)
         self.assertAlmostEqual(
-            written["by_device"]["tag-2"]["mean_error_m"], 0.92,
+            written["by_device"]["tag-2"]["mean_error_m"], 0.98,
             places=2)
         self.assertAlmostEqual(written["overall"]["mean_error_m"],
-                               1.13, places=2)
+                               1.14, places=2)
         self.assertEqual(written["overall"]["steps"], 80)
 
     def test_evaluate_smoothed_and_json_together(self):
@@ -246,7 +246,7 @@ class EvaluateSmoothedCliTest(unittest.TestCase):
         self.assertAlmostEqual(raw["overall"]["mean_error_m"], 1.94,
                                places=2)
         self.assertAlmostEqual(smoothed["overall"]["mean_error_m"],
-                               1.13, places=2)
+                               1.14, places=2)
 
     def test_evaluate_smoothed_needs_demo(self):
         with self.assertRaises(SystemExit) as caught:
@@ -271,7 +271,7 @@ class EvaluateSmoothedCliTest(unittest.TestCase):
                        output_stream=out), 0)
         lines = self._report_lines(out.getvalue())
         self.assertEqual(len(lines), 6)
-        self.assertIn("mean error: 0.92 m", lines[4])
+        self.assertIn("mean error: 0.98 m", lines[4])
         self.assertNotIn("mean error: 2.16 m", lines[3])
         self.assertNotIn("mean error: 1.94 m", lines[5])
 

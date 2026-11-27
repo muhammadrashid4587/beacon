@@ -52,10 +52,17 @@ class CliSmoothingNoiseTest(unittest.TestCase):
             self.assertEqual(cli_main(argv), 0)
         return sink.getvalue()
 
-    def test_default_is_the_calibrated_noise(self):
-        # No flag: the summary scores the calibrated smoothing —
-        # the README's 1.34 m smoothed mean on the demo walk.
+    def test_default_is_the_per_step_noise(self):
+        # No flag: the summary scores the per-step smoothing —
+        # the README's 1.29 m smoothed mean on the demo walk.
         output = self._cli_output([])
+        self.assertAlmostEqual(
+            _smoothed_mean_error(output, "smoothed:"), 1.29, places=2)
+
+    def test_two_metres_reproduces_the_calibrated_numbers(self):
+        # 2.0 m is the v0.54.0/v0.55.0 calibrated scalar: the
+        # smoothed mean goes back to 1.34 m on the same walk.
+        output = self._cli_output(["--smoothing-noise-m", "2.0"])
         self.assertAlmostEqual(
             _smoothed_mean_error(output, "smoothed:"), 1.34, places=2)
 
@@ -92,10 +99,20 @@ class TrackingSmoothingNoiseTest(unittest.TestCase):
             return (load_track_json(json_path),
                     load_track_csv(csv_path))
 
-    def test_default_export_is_the_calibrated_smoothing(self):
-        # No flag: the smoothed export's ellipse averages 1.90 m
-        # semi-major — the calibrated value, in both formats.
+    def test_default_export_is_the_per_step_smoothing(self):
+        # No flag: the smoothed export's ellipse averages 1.82 m
+        # semi-major — the per-step value, in both formats.
         rows_json, rows_csv = self._export_smoothed(["--demo"])
+        self.assertAlmostEqual(_mean_semi_major(rows_json), 1.82,
+                               places=2)
+        self.assertAlmostEqual(_mean_semi_major(rows_csv), 1.82,
+                               places=2)
+
+    def test_two_metres_reproduces_the_calibrated_ellipse(self):
+        # 2.0 m: the ellipse goes back to the calibrated 1.90 m
+        # mean semi-major, in both formats.
+        rows_json, rows_csv = self._export_smoothed(
+            ["--demo", "--smoothing-noise-m", "2.0"])
         self.assertAlmostEqual(_mean_semi_major(rows_json), 1.90,
                                places=2)
         self.assertAlmostEqual(_mean_semi_major(rows_csv), 1.90,
@@ -125,11 +142,20 @@ class MultiDeviceSmoothingNoiseTest(unittest.TestCase):
             self.assertEqual(multi_main(argv), 0)
         return sink.getvalue()
 
-    def test_default_smoothed_report_is_the_calibrated_one(self):
-        # No flag: the smoothed demo report scores the calibrated
-        # smoothing — the README's 1.13 m overall mean.
+    def test_default_smoothed_report_is_the_per_step_one(self):
+        # No flag: the smoothed demo report scores the per-step
+        # smoothing — the README's 1.14 m overall mean.
         output = self._multi_output(
             ["--demo", "--evaluate-smoothed"])
+        self.assertAlmostEqual(
+            _smoothed_mean_error(output, "overall:"), 1.14, places=2)
+
+    def test_two_metres_reproduces_the_calibrated_report(self):
+        # 2.0 m: the overall smoothed mean goes back to the
+        # calibrated 1.13 m.
+        output = self._multi_output(
+            ["--demo", "--evaluate-smoothed",
+             "--smoothing-noise-m", "2.0"])
         self.assertAlmostEqual(
             _smoothed_mean_error(output, "overall:"), 1.13, places=2)
 
