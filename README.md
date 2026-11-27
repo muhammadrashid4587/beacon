@@ -45,6 +45,11 @@ library, no dependencies, no BLE hardware needed.
   mid-shift is caught while the ward is running, not at the next
   re-walk — and the alarm clears on its own when the beacon
   recovers.
+- Per-floor drift windows: each beacon keeps one rolling window
+  per floor, and the drift classification reads the beacon's own
+  floor — so a verdict taken mid-walk on a two-floor ward is the
+  verdict taken at the end, instead of following whichever floor
+  the window happens to cover.
 - Trajectory smoothing: a recorded walk can be re-run through the
   Rauch-Tung-Striebel smoother, which revises each past position
   with the observations that came after it, so the replayed path
@@ -3495,9 +3500,84 @@ the alarm misses it and only the classifier catches it. The
 steady offset is actually cleaner here than on the single-floor
 walk — `uncertain` on 5/5, where the single-floor walk misreads
 one seed as a sag — because the longer window averages the noise
-fluke out. What the longer window does not fix is a verdict taken
-mid-walk on the wrong floor: a per-floor window, so the
-classifier always sees each beacon on its own floor, is the next
-step, not a sharper threshold.
+fluke out. What the longer window did not fix was a verdict taken
+mid-walk on the wrong floor: the per-floor window below is that
+step — the classifier always sees each beacon on its own floor
+now, not a sharper threshold.
 The roadmap grows as new needs surface — drift classification
 on multi-floor walks is the latest addition.
+
+## Per-floor classification window
+
+The drift monitor's window used to be one window per beacon,
+mixing readings from every floor the device visited. The
+classifier's evidence is the window, so on a multi-floor walk the
+verdict followed whichever floor the window happened to cover:
+classified halfway through the walk, at the end of the floor-0
+pass with the window on D's own floor, the moved beacon read
+`moved` on 4 of 5 seeds; by the end of the walk the window had
+moved upstairs and the same beacon read `uncertain` on 4 of 5.
+The window is per floor now. Each beacon keeps one rolling
+window per floor it was heard on, and `classify` — and the alarm
+— read the window for the beacon's own floor by default, the
+floor the beacon is mounted on, so the verdict always rests on
+the beacon's own geometry. `classify(id, floor=...)`,
+`status(id, floor=...)` and `alarm(id, floor=...)` read another
+floor's window instead, for inspection, and the classification
+carries the floor it was taken on (`DriftClassification.floor`,
+in the exported rows too — files written before per-floor windows
+load with the floor defaulting to 0). A beacon never heard on its
+own floor is `uncertain` — no readings to classify — not
+healthy, and the reason names the floor.
+
+```python
+monitor.classify("D")          # D's own floor (floor 0)
+monitor.classify("D", floor=1) # the same beacon, seen through the slab
+```
+
+```sh
+python3 -m beacon.cli --drift-classify --multifloor --seed 7
+python3 -m beacon.cli --drift-classify --multifloor --seed 7 --move-beacon D:5,-5
+```
+
+Measured behaviour (v0.59.0): on the doubled two-floor walk,
+2 dB RSSI noise, beacon D, seeds 1, 2, 3, 7, 11 — the other
+seven beacons stay `healthy` in every scenario:
+
+| scenario | verdicts |
+|---|---|
+| healthy | `healthy` 5/5 (mean -0.01 to +0.12 dB, revisit -0.14 to +0.79 dB, 41 pairs) |
+| D draining, 0.3/hr | `healthy` 5/5 — the slow sag is missed on this walk (see below) |
+| D moved (0, 12) to (5, 7) | `moved` 3/5 (mean +4.10 to +4.24 dB, spread 2.47 to 3.07 dB); seeds 1 and 2 `uncertain` (spread 2.47 and 2.50 dB, just under the 2.5 dB threshold) |
+| D with 5 dB extra noise | `noisy` 5/5 (spread 4.48 to 6.11 dB) |
+| D steady -6 dB offset | `uncertain` 5/5 (mean -5.88 to -6.01 dB), alarming on D throughout |
+
+The verdict no longer follows the window: classified at the end
+of the floor-0 pass and at the end of the walk, the moved beacon
+reads the same on every seed — `moved` on 1, 2, 7, 11 and
+`uncertain` on 3 at the default 20-reading window, `uncertain`
+on 1 and 2 and `moved` on 3, 7, 11 at the demo's 80-reading
+window — because the own-floor window does not change while the
+device is upstairs. And the default window now catches the move
+it used to miss: the default 20 readings are the last 20 on the
+beacon's own floor — the old window held the last 20 readings of
+the walk, which were all taken upstairs, on the wrong floor for
+D — so the moved beacon reads `moved` on 4 of 5 seeds (seed 3
+`uncertain`: its revisit delta is +1.20 dB, so the moved call,
+which needs a stable revisit, does not fire).
+
+The slow sag is the honest cost. The old mixed window borrowed
+the more-drained cross-floor tail — readings taken later in the
+walk, at a lower battery — which pulled the window's mean past
+the -1.5 dB sag gate. The own-floor window averages the fresh
+first loop with the drained second loop, so the mean stays at
+-0.60 to -0.79 dB and the gate blocks the verdict, even though
+the revisit delta still measures the decline (-1.50 dB on seeds
+1 and 11). The walk ends upstairs, so D's own-floor window never
+sees the most-drained readings at all — the last quarter of the
+walk is on the wrong floor for D. The fix is a longer history
+(more loops on the beacon's own floor), not a sharper threshold:
+as the window fills with drained readings, its mean crosses the
+gate on its own.
+The roadmap grows as new needs surface — the per-floor
+classification window is the latest addition.

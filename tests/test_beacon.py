@@ -1478,8 +1478,11 @@ class TestDriftMonitor(unittest.TestCase):
         # The monitor is floor-aware: a (x, y, floor) position is
         # accepted, and a healthy beacon heard through the slab
         # reads ~0 residual once the floor model accounts for the
-        # vertical gap and the slab attenuation. A malformed
-        # position is still rejected.
+        # vertical gap and the slab attenuation — on the floor the
+        # reading was taken on. The beacon's own floor has no
+        # readings, so it has no status there: the windows are per
+        # floor, and a cross-floor reading never counts as an
+        # own-floor one. A malformed position is still rejected.
         import math
 
         from beacon.rssi import distance_to_rssi
@@ -1488,8 +1491,11 @@ class TestDriftMonitor(unittest.TestCase):
         distance = math.hypot(5.0, 5.0, 3.0)
         expected = distance_to_rssi(distance, -59.0, 2.0) - 15.0
         monitor.observe((5.0, 5.0, 1), {"A": expected})
+        self.assertIsNone(monitor.status("A"))
+        self.assertIsNone(monitor.alarm("A"))
         self.assertAlmostEqual(
-            monitor.status("A").mean_residual_db, 0.0, places=6)
+            monitor.status("A", floor=1).mean_residual_db, 0.0,
+            places=6)
         with self.assertRaises(ValueError):
             monitor.observe((5.0, 5.0, 0, 0), {"A": -60.0})
 

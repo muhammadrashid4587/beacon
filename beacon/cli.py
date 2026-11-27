@@ -149,13 +149,12 @@ def run_drift_classify(args: argparse.Namespace) -> int:
         steps = simulate_walk(loop + loop, sim_beacons,
                               noise_db=args.noise, seed=args.seed,
                               batteries=batteries, step_seconds=step_seconds)
-    # The classification window must span a full cycle of the walk:
-    # on a multi-floor walk the default 20-reading window only ever
-    # sees one floor's half-loop, and the slab compresses the moved
-    # signature there (a moved beacon reads "uncertain" on 4 of 5
-    # seeds). A full two-floor cycle — 4 sides x steps per side x 2
-    # floors — sees both floors, and the moved beacon reads "moved"
-    # on 4 of 5 seeds with the sag caught on 5 of 5.
+    # The classification window must span a full cycle of the walk,
+    # per floor: on a multi-floor walk each beacon keeps one window
+    # per floor, and the verdict reads the beacon's own floor — so
+    # the window is 4 sides x steps per side x 2 loops of readings
+    # on that floor, and it holds both loops of the doubled walk.
+    # The single-floor demo keeps the default 20-reading window.
     monitor = DriftMonitor(
         beacons,
         window=8 * args.steps if args.multifloor else DEFAULT_WINDOW)

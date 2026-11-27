@@ -1,4 +1,4 @@
-"""Drift classification on multi-floor walks (beacon 0.58.0).
+"""Drift classification on multi-floor walks (beacon 0.59.0).
 
 The drift monitor used to reject multi-floor positions: a beacon
 heard through a floor slab reads ~15 dB weaker than the path-loss
@@ -8,13 +8,15 @@ vertical separation per floor) minus the slab attenuation, the same
 model the simulator uses — so a healthy beacon on another floor
 reads as healthy, and the classifier works on a two-floor walk.
 
-The window matters as much as the floor model: the classifier's
-evidence is the rolling window, and the default 20-reading window
-only ever sees one floor's half-loop, where the slab compresses
-the moved signature below its threshold. The classification window
-has to span a full cycle of the walk — 80 readings for the
-two-floor ward walked twice — and then the verdicts match the
-single-floor table.
+The window is per floor, not one window per beacon: each beacon
+keeps one rolling window per floor it was heard on, and the
+classification reads the beacon's own floor, so the verdict
+always rests on the beacon's own geometry instead of whichever
+floor a single mixed window happens to cover. Classified halfway
+through the walk and at the end, the moved beacon reads the same
+on every seed — the own-floor window does not change while the
+device is upstairs. The classification carries the floor it was
+taken on.
 """
 
 import io
@@ -133,25 +135,38 @@ class MultifloorDriftMonitorTest(unittest.TestCase):
                 self.assertEqual(result.verdict, "healthy",
                                  f"seed {seed} beacon {result.id}")
 
-    def test_draining_beacon_is_battery_sag_on_every_seed(self):
-        # The slow sag never reaches the 5 dB alarm threshold, so
-        # the alarm misses it — the classifier catches it through
-        # the revisits, as on the single-floor walk.
+    def test_slow_sag_is_missed_on_the_two_floor_walk(self):
+        # The honest limit the per-floor window introduces: the slow
+        # sag no longer reaches the classifier on this walk. The old
+        # mixed window borrowed the more-drained cross-floor tail —
+        # readings taken later, at a lower battery — which pulled
+        # the window's mean past the -1.5 dB sag gate. The own-floor
+        # window averages the fresh first loop with the drained
+        # second loop, so the mean stays at -0.60 to -0.79 dB and
+        # the gate blocks the verdict, even though the revisit delta
+        # still measures the decline (-1.50 dB on seeds 1 and 11).
+        # No alarm either: the mean never reaches the 5 dB alarm
+        # threshold. The walk ends upstairs, so D's own-floor
+        # window never sees the most-drained readings at all.
         for seed in SEEDS:
             monitor = _classify(seed, "sag")
-            self.assertEqual(monitor.classify("D").verdict,
-                             "battery-sag", f"seed {seed}")
+            result = monitor.classify("D")
+            self.assertEqual(result.verdict, "healthy", f"seed {seed}")
+            self.assertGreater(result.mean_residual_db, -1.5,
+                               f"seed {seed}")
             self.assertEqual(monitor.alarms(), [])
             others = [c for c in monitor.classifications()
                       if c.id != "D"]
             self.assertTrue(all(c.verdict == "healthy" for c in others),
                             f"seed {seed}")
 
-    def test_moved_beacon_is_moved_on_four_of_five_seeds(self):
-        # Seed 2 is the honest miss: the window's spread is 2.32 dB,
-        # under the 2.5 dB moved threshold, so it reads uncertain —
-        # the same kind of miss as seed 11 on the single-floor walk.
-        expected = {1: "moved", 2: "uncertain", 3: "moved",
+    def test_moved_beacon_is_moved_on_three_of_five_seeds(self):
+        # Seeds 1 and 2 are the honest misses: the own-floor
+        # window's spread is 2.47 and 2.50 dB, just under the 2.5 dB
+        # moved threshold — the same kind of miss as seed 2 with
+        # the old mixed window, and seed 11 on the single-floor
+        # walk.
+        expected = {1: "uncertain", 2: "uncertain", 3: "moved",
                     7: "moved", 11: "moved"}
         for seed in SEEDS:
             monitor = _classify(seed, "move")
@@ -188,32 +203,105 @@ class MultifloorDriftMonitorTest(unittest.TestCase):
             self.assertTrue(all(c.verdict == "healthy" for c in others),
                             f"seed {seed}")
 
-    def test_default_window_misses_the_move(self):
-        # The failure the longer window fixes: with the default
-        # 20-reading window the last window only ever sees one
-        # floor's half-loop, the slab compresses the moved
-        # signature, and the beacon reads uncertain on 4 of 5 seeds.
-        expected = {1: "uncertain", 2: "uncertain", 3: "uncertain",
-                    7: "moved", 11: "uncertain"}
+    def test_default_per_floor_window_catches_the_move(self):
+        # The failure the per-floor window fixes: with the old mixed
+        # 20-reading window the last window only ever saw one
+        # floor's half-loop, the slab compressed the moved
+        # signature, and the beacon read uncertain on 4 of 5 seeds.
+        # The window is per floor now, so the default window holds
+        # the last 20 readings on the beacon's own floor, and the
+        # moved beacon reads "moved" on 4 of 5 seeds — seed 3 is
+        # the miss (its revisit delta is +1.20 dB, so the moved
+        # call, which needs a stable revisit, does not fire).
+        expected = {1: "moved", 2: "moved", 3: "uncertain",
+                    7: "moved", 11: "moved"}
         for seed in SEEDS:
             monitor = _classify(seed, "move", window=20)
             self.assertEqual(monitor.classify("D").verdict,
                              expected[seed], f"seed {seed}")
 
-    def test_moved_verdict_depends_on_which_floor_the_window_covers(self):
-        # Halfway through the walk — at the end of the floor-0 pass,
-        # with the window on D's own floor — the moved beacon reads
-        # "moved" on 4 of 5 seeds; by the end of the walk the window
-        # has moved upstairs and the same beacon reads "uncertain"
-        # on 4 of 5. The verdict follows the window, not the beacon.
-        expected_own_floor = {1: "moved", 2: "moved", 3: "uncertain",
-                              7: "moved", 11: "moved"}
-        for seed in SEEDS:
-            monitor = DriftMonitor(BEACONS)
-            for step in _walk(seed, "move")[:120]:
-                monitor.feed(step)
-            self.assertEqual(monitor.classify("D").verdict,
-                             expected_own_floor[seed], f"seed {seed}")
+    def test_moved_verdict_is_the_same_mid_walk_and_at_the_end(self):
+        # The verdict used to follow the window: classified halfway
+        # through the walk — at the end of the floor-0 pass, with
+        # the window on D's own floor — the moved beacon read
+        # "moved" on 4 of 5 seeds, but by the end of the walk the
+        # window had moved upstairs and it read "uncertain" on 4
+        # of 5. The window is per floor now, so the own-floor
+        # window does not change while the device is upstairs, and
+        # the verdict at the end of the walk is the verdict taken
+        # mid-walk, on every seed — at the default window and at
+        # the demo window alike.
+        expected = {
+            20: {1: "moved", 2: "moved", 3: "uncertain",
+                 7: "moved", 11: "moved"},
+            CYCLE_WINDOW: {1: "uncertain", 2: "uncertain",
+                           3: "moved", 7: "moved", 11: "moved"},
+        }
+        for window in (20, CYCLE_WINDOW):
+            for seed in SEEDS:
+                mid = DriftMonitor(BEACONS, window=window)
+                for step in _walk(seed, "move")[:120]:
+                    mid.feed(step)
+                end = _classify(seed, "move", window=window)
+                self.assertEqual(mid.classify("D").verdict,
+                                 end.classify("D").verdict,
+                                 f"window {window} seed {seed}")
+                self.assertEqual(end.classify("D").verdict,
+                                 expected[window][seed],
+                                 f"window {window} seed {seed}")
+
+    def test_windows_are_kept_per_floor(self):
+        # D reads 10 dB too loud upstairs and clean downstairs: the
+        # own-floor verdict is healthy and the cross-floor window
+        # says otherwise — the two floors never mix into one
+        # window, and the classification says which floor it was
+        # taken on.
+        import math
+
+        from beacon.rssi import distance_to_rssi
+
+        monitor = DriftMonitor(BEACONS)
+        downstairs = distance_to_rssi(math.hypot(2.0, 10.0), -59.0,
+                                      2.0)
+        upstairs = distance_to_rssi(math.hypot(2.0, 10.0, 3.0), -59.0,
+                                    2.0) - 15.0
+        for _ in range(10):
+            monitor.observe((2.0, 2.0, 0), {"D": downstairs})
+        for _ in range(10):
+            monitor.observe((2.0, 2.0, 1), {"D": upstairs + 10.0})
+        own = monitor.classify("D")
+        self.assertEqual(own.floor, 0)
+        self.assertEqual(own.verdict, "healthy")
+        self.assertAlmostEqual(own.mean_residual_db, 0.0, places=6)
+        other = monitor.classify("D", floor=1)
+        self.assertEqual(other.floor, 1)
+        self.assertAlmostEqual(other.mean_residual_db, 10.0, places=6)
+        self.assertEqual(monitor.alarm("D"), None)
+        self.assertIsNotNone(monitor.alarm("D", floor=1))
+
+    def test_classification_carries_its_floor(self):
+        # Every beacon's classification names the floor its verdict
+        # rests on — its own floor by default.
+        monitor = DriftMonitor(BEACONS)
+        for step in _walk(7, "healthy"):
+            monitor.feed(step)
+        for result in monitor.classifications():
+            beacon = next(b for b in BEACONS if b.id == result.id)
+            self.assertEqual(result.floor, beacon.floor,
+                             f"beacon {result.id}")
+
+    def test_unheard_on_its_own_floor_is_uncertain(self):
+        # A beacon heard only through the slab — never on its own
+        # floor — has no own-floor window to classify from, so it
+        # is uncertain, not healthy, and the reason names the floor.
+        monitor = DriftMonitor(BEACONS)
+        for _ in range(10):
+            monitor.observe((2.0, 2.0, 1), {"D": -62.0})
+        result = monitor.classify("D")
+        self.assertEqual(result.verdict, "uncertain")
+        self.assertEqual(result.floor, 0)
+        self.assertIn("floor 0", result.reason)
+        self.assertIsNone(monitor.status("D"))
 
 
 class MultifloorDriftCliTest(unittest.TestCase):
@@ -228,12 +316,19 @@ class MultifloorDriftCliTest(unittest.TestCase):
         self.assertEqual(text.count("healthy"), 8)
 
     def test_cli_multifloor_battery_sag(self):
+        # The slow sag is missed on the two-floor walk: the
+        # per-floor window averages the fresh first loop with the
+        # drained second loop, so D's mean stays above the sag
+        # gate — all eight beacons read healthy, and no verdict
+        # claims a sag.
         out = io.StringIO()
         with redirect_stdout(out):
             self.assertEqual(main(["--drift-classify", "--multifloor",
                                    "--seed", "7", "--battery-degrade",
                                    "D"]), 0)
-        self.assertIn("battery-sag", out.getvalue())
+        text = out.getvalue()
+        self.assertNotIn("battery-sag", text)
+        self.assertEqual(text.count("healthy"), 8)
 
     def test_cli_multifloor_moved(self):
         out = io.StringIO()

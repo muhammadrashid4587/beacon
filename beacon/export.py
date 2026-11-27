@@ -625,6 +625,10 @@ def _drift_classifications_from_dict(raw) -> list[dict]:
     return [
         {
             "id": str(c["id"]),
+            # Files written before per-floor windows carry no floor;
+            # those classifications predate the per-floor window, so
+            # they default to floor 0.
+            "floor": int(c.get("floor", 0)),
             "verdict": str(c["verdict"]),
             "mean_residual_db": float(c["mean_residual_db"]),
             "residual_std_db": float(c["residual_std_db"]),

@@ -84,6 +84,21 @@ second half of the window much weaker than the first), which
 catches a fast sag most of the time but cannot rule a move out;
 the verdict's reason says which evidence was used.
 
+On a multi-floor walk the rolling window is per floor, not one
+window per beacon: the classifier's evidence is the window, and a
+single window spanning both floors mixes the beacon's own-floor
+readings — where a move's position-dependent signature lives —
+with cross-floor readings, where the slab compresses it, so the
+verdict follows whichever floor the window happens to cover
+instead of the beacon. Each beacon keeps one rolling window per
+floor it was heard on, and ``classify`` — and the alarm — read the
+window for the beacon's own floor by default, the floor the beacon
+is mounted on, so the verdict always rests on the beacon's own
+geometry. ``classify(id, floor=...)`` reads another floor's window
+instead, for inspection, and the classification carries the floor
+it was taken on. A beacon never heard on its own floor is
+``uncertain`` — no readings to classify — not healthy.
+
 Measured behaviour (simulator, 2 dB RSSI noise, two-loop ward
 walk, seeds 1, 2, 3, 7, 11 — see the README for the full table):
 a slowly draining beacon (0.3 per hour, 120 s steps) is called
@@ -223,10 +238,12 @@ class DriftClassification:
 
     ``verdict`` is one of ``"healthy"``, ``"battery-sag"``,
     ``"moved"``, ``"noisy"`` or ``"uncertain"`` — see the module
-    docstring for what each signature looks like.
-    ``mean_residual_db`` and ``residual_std_db`` are the rolling
-    window's mean and spread; ``time_slope_db_per_step`` and
-    ``time_correlation`` are the window's residual trend over time;
+    docstring for what each signature looks like. ``floor`` is the
+    floor whose window the verdict rests on — the beacon's own
+    floor by default, or the floor asked for. ``mean_residual_db``
+    and ``residual_std_db`` are the rolling window's mean and
+    spread; ``time_slope_db_per_step`` and ``time_correlation``
+    are the window's residual trend over time;
     ``revisit_delta_db`` is the mean change in residual at the same
     spot between visits (None when the device never revisited a
     spot — under five pairs — so the time trend is the only
@@ -236,6 +253,7 @@ class DriftClassification:
     """
 
     id: str
+    floor: int
     verdict: str
     mean_residual_db: float
     residual_std_db: float
@@ -253,6 +271,7 @@ class DriftClassification:
         measured."""
         return {
             "id": self.id,
+            "floor": self.floor,
             "verdict": self.verdict,
             "mean_residual_db": self.mean_residual_db,
             "residual_std_db": self.residual_std_db,
@@ -268,11 +287,16 @@ class DriftClassification:
 class DriftMonitor:
     """Watch a stream of observations for beacons drifting off calibration.
 
-    ``window`` is how many recent readings per beacon the rolling
-    mean covers; ``drift_threshold_db`` is the mean residual that
-    trips an alarm (5 dB by default, matching the survey health
-    check); ``min_samples`` is how many readings a beacon needs in
-    its window before it can alarm at all. ``noise_db`` is the
+    ``window`` is how many recent readings per beacon per floor the
+    rolling mean covers — each beacon keeps one window per floor it
+    was heard on, and the alarm and the classification read the
+    window for the beacon's own floor by default, so a verdict on
+    a multi-floor walk always rests on the beacon's own geometry
+    instead of whichever floor the window happens to cover;
+    ``drift_threshold_db`` is the mean residual that trips an alarm
+    (5 dB by default, matching the survey health check);
+    ``min_samples`` is how many readings a beacon needs in its
+    window before it can alarm at all. ``noise_db`` is the
     deployment's expected RSSI noise (2 dB by default, matching the
     simulator) — the noisy verdict fires when a beacon's residual
     spread is more than twice it. ``history`` is how many readings
@@ -331,14 +355,30 @@ class DriftMonitor:
         self._revisit_radius_m = revisit_radius_m
         self._floor_height_m = floor_height_m
         self._floor_attenuation_db = floor_attenuation_db
-        # (sequence, x, y, floor, residual) per beacon: the rolling
-        # window for the alarm, and the longer history for
-        # classification.
-        self._observations: dict[str, deque[tuple[int, float, float, int, float]]] = {
-            b.id: deque(maxlen=window) for b in beacons}
+        # (sequence, x, y, floor, residual) per beacon per floor: the
+        # rolling window for the alarm and the classification — one
+        # window per floor, so the verdict on a multi-floor walk
+        # rests on the beacon's own floor instead of whichever floor
+        # a single mixed window happens to cover — and the longer
+        # history, per beacon, for classification.
+        self._observations: dict[str, dict[int, deque[tuple[int, float, float, int, float]]]] = {
+            b.id: {} for b in beacons}
         self._history: dict[str, deque[tuple[int, float, float, int, float]]] = {
             b.id: deque(maxlen=history) for b in beacons}
         self._seq = 0
+
+    def _window_floor(self, beacon_id: str, floor: int | None) -> int:
+        """Which floor's window to read: the floor asked for, or the
+        beacon's own floor — the floor it is mounted on."""
+        beacon = self._beacons[beacon_id]
+        return beacon.floor if floor is None else floor
+
+    def _window_for(self, beacon_id: str, floor: int
+                ) -> deque[tuple[int, float, float, int, float]]:
+        """The rolling window for one beacon on one floor — an empty
+        deque when it was never heard there."""
+        return self._observations[beacon_id].get(
+            floor, deque(maxlen=self._window))
 
     def observe(self, position: tuple[float, float]
                 | tuple[float, float, int],
@@ -351,9 +391,11 @@ class DriftMonitor:
         is ``floor_height_m`` per floor of separation — minus the
         slab attenuation for a beacon on a different floor from the
         device, the same model the simulator uses, so a healthy
-        beacon heard through a floor does not read as drift.
-        Beacons not in the monitor's beacon set are ignored rather
-        than failing the stream.
+        beacon heard through a floor does not read as drift. The
+        reading lands in that floor's window for the beacon, so
+        each floor's window holds only readings taken on that
+        floor. Beacons not in the monitor's beacon set are ignored
+        rather than failing the stream.
         """
         if len(position) == 2:
             x, y, floor = position[0], position[1], 0
@@ -375,7 +417,10 @@ class DriftMonitor:
             if beacon.floor != floor:
                 predicted -= self._floor_attenuation_db
             entry = (self._seq, x, y, floor, observed - predicted)
-            self._observations[beacon_id].append(entry)
+            windows = self._observations[beacon_id]
+            if floor not in windows:
+                windows[floor] = deque(maxlen=self._window)
+            windows[floor].append(entry)
             self._history[beacon_id].append(entry)
 
     def feed(self, step: dict) -> None:
@@ -387,8 +432,9 @@ class DriftMonitor:
         """Forget every reading — the rolling windows, the revisit
         history, and the sequence — so a new device starts with a
         clean monitor, as a new ``LiveTracker`` would."""
-        for observations in self._observations.values():
-            observations.clear()
+        for windows in self._observations.values():
+            for observations in windows.values():
+                observations.clear()
         for history in self._history.values():
             history.clear()
         self._seq = 0
@@ -418,11 +464,18 @@ class DriftMonitor:
             floor_height_m=self._floor_height_m,
             floor_attenuation_db=self._floor_attenuation_db)
 
-    def status(self, beacon_id: str) -> DriftAlarm | None:
-        """The rolling residual for one beacon, or ``None`` if unheard."""
-        observations = self._observations.get(beacon_id)
-        if observations is None:
+    def status(self, beacon_id: str, floor: int | None = None
+               ) -> DriftAlarm | None:
+        """The rolling residual for one beacon, or ``None`` if unheard.
+
+        ``floor`` names which floor's window to read; by default it
+        is the beacon's own floor, so the reading rests on the
+        beacon's own geometry rather than cross-floor readings.
+        """
+        if beacon_id not in self._beacons:
             raise ValueError(f"unknown beacon: {beacon_id!r}")
+        observations = self._window_for(
+            beacon_id, self._window_floor(beacon_id, floor))
         if not observations:
             return None
         residuals = [entry[4] for entry in observations]
@@ -431,14 +484,17 @@ class DriftMonitor:
             mean_residual_db=_mean(residuals),
             samples=len(residuals))
 
-    def alarm(self, beacon_id: str) -> DriftAlarm | None:
+    def alarm(self, beacon_id: str, floor: int | None = None
+              ) -> DriftAlarm | None:
         """The active alarm for one beacon, or ``None`` if it is not alarming.
 
         A beacon alarms once it has at least ``min_samples`` readings
         in its window and the rolling mean residual is beyond the
-        drift threshold in either direction.
+        drift threshold in either direction. ``floor`` names which
+        floor's window to read; by default it is the beacon's own
+        floor.
         """
-        state = self.status(beacon_id)
+        state = self.status(beacon_id, floor)
         if state is None or state.samples < self._min_samples:
             return None
         if abs(state.mean_residual_db) > self._threshold:
@@ -454,22 +510,22 @@ class DriftMonitor:
         """Whether the beacon is currently alarming."""
         return self.alarm(beacon_id) is not None
 
-    def _revisit_delta(self, beacon_id: str
+    def _revisit_delta(self, beacon_id: str, floor: int,
+                       window: list[tuple[int, float, float, int, float]]
                        ) -> tuple[float | None, float | None, int]:
         """Mean change in residual at the same spot between visits.
 
-        Each reading in the rolling window is matched to the closest
-        earlier reading at (nearly) the same position, at least
-        ``revisit_gap`` readings earlier — on the same floor, so a
-        reading upstairs never counts as revisiting the same spot
-        downstairs. Returns ``(mean_delta,
+        Each reading in the floor's rolling window is matched to the
+        closest earlier reading at (nearly) the same position, at
+        least ``revisit_gap`` readings earlier — on the same floor,
+        so a reading upstairs never counts as revisiting the same
+        spot downstairs. Returns ``(mean_delta,
         standard_error, pairs)`` — or ``(None, None, 0)`` when fewer
         than five pairs match, which is too few to trust.
         """
-        window = self._observations[beacon_id]
         history = self._history[beacon_id]
         deltas = []
-        for seq, x, y, floor, residual in window:
+        for seq, x, y, _, residual in window:
             best = None
             for old_seq, old_x, old_y, old_floor, old_residual in history:
                 if old_seq > seq - self._revisit_gap:
@@ -487,30 +543,39 @@ class DriftMonitor:
         se = _stdev(deltas) / math.sqrt(len(deltas))
         return mean_delta, se, len(deltas)
 
-    def classify(self, beacon_id: str) -> DriftClassification:
+    def classify(self, beacon_id: str, floor: int | None = None
+                 ) -> DriftClassification:
         """Classify one beacon's drift: sag, move, noise, or unclear.
 
-        See the module docstring for the signatures. The verdict is
-        ``"healthy"`` when nothing is off, ``"battery-sag"`` when
-        the beacon reads weaker over time at the same spot,
-        ``"moved"`` when the residual is stable at the same spot
-        but wrong by a position-dependent amount, ``"noisy"`` when
-        the residual spread is more than twice the expected noise,
-        and ``"uncertain"`` when the beacon is off calibration but
-        no signature fits — including when it has not been heard
-        enough yet to tell.
+        See the module docstring for the signatures. ``floor`` names
+        which floor's window the verdict rests on; by default it is
+        the beacon's own floor, so a verdict on a multi-floor walk
+        always reads the beacon's own geometry — a verdict taken
+        from another floor's window is the same beacon seen through
+        the slab, and the classification says which floor it was
+        taken on. The verdict is ``"healthy"`` when nothing is off,
+        ``"battery-sag"`` when the beacon reads weaker over time at
+        the same spot, ``"moved"`` when the residual is stable at
+        the same spot but wrong by a position-dependent amount,
+        ``"noisy"`` when the residual spread is more than twice the
+        expected noise, and ``"uncertain"`` when the beacon is off
+        calibration but no signature fits — including when it has
+        not been heard enough yet to tell, or not heard on its own
+        floor at all.
         """
         if beacon_id not in self._beacons:
             raise ValueError(f"unknown beacon: {beacon_id!r}")
-        window = list(self._observations[beacon_id])
+        floor = self._window_floor(beacon_id, floor)
+        window = list(self._window_for(beacon_id, floor))
         samples = len(window)
         if samples == 0:
             return DriftClassification(
-                id=beacon_id, verdict="uncertain",
+                id=beacon_id, floor=floor, verdict="uncertain",
                 mean_residual_db=0.0, residual_std_db=0.0,
                 time_slope_db_per_step=0.0, time_correlation=0.0,
                 revisit_delta_db=None, revisit_pairs=0, samples=0,
-                reason="beacon unheard — no readings to classify")
+                reason=f"beacon unheard on floor {floor} — no "
+                       "readings to classify")
         residuals = [entry[4] for entry in window]
         mean = _mean(residuals)
         std = _stdev(residuals)
@@ -520,11 +585,12 @@ class DriftMonitor:
         half = samples // 2
         half_delta = (_mean(residuals[half:]) - _mean(residuals[:half])
                       if half else 0.0)
-        delta, delta_se, pairs = self._revisit_delta(beacon_id)
+        delta, delta_se, pairs = self._revisit_delta(beacon_id, floor,
+                                                     window)
 
         def result(verdict: str, reason: str) -> DriftClassification:
             return DriftClassification(
-                id=beacon_id, verdict=verdict,
+                id=beacon_id, floor=floor, verdict=verdict,
                 mean_residual_db=mean, residual_std_db=std,
                 time_slope_db_per_step=slope,
                 time_correlation=correlation,
