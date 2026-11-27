@@ -5061,3 +5061,126 @@ and the single-loop slow sag stays a measured limit of
 this evidence, pending longer walks. The roadmap grows as
 new needs surface — the drop's standard error is the
 latest addition.
+
+## The beacon was noisy from the start
+
+The v0.75.0 notes left seed 156's two-loop noisy misread,
+and it has a fix — from the start of the walk, not the end.
+Measured first: on two loops, out of sample, seed 156's
+noisy beacon reads `battery-sag` through the short-window
+route, and every number it rests on is a number a true
+slow sag also produces — mean -2.11 dB, revisit delta
+-4.34 dB over 20 pairs, level drop -2.86 dB, late decline
+-3.04 dB. The gates that repaired the earlier cliffs all
+stay silent on it: its mid-first spread growth is only
+-0.09 dB, so the 0.74.0 gate passes it, and its early
+revisits declined too (-0.71 dB), so the early-delta gate
+cannot veto it either — and on two loops it would stay
+silent anyway, since the early history holds only 14
+pairs, under the 30-pair minimum. What separates it is
+not a decline but a level: the spread at the start of the
+walk. A dying battery starts fresh — its first third
+spreads at the base noise, about 2 dB — while a noisy
+beacon is noisy from the first reading, so its first
+third already spreads past twice the expected noise. The
+discriminator is the first-third spread: the standard
+deviation of the first third of the floor's long history.
+The short-window sag route is vetoed when it spreads past
+twice the expected noise (4.0 dB at the default 2 dB) —
+the same boundary the noisy verdict itself uses, not a
+tuned threshold: a beacon that was already noisier than
+the noisy gate at the start of the walk cannot be a
+battery that only got noisy as it drained.
+
+The gate guards the short-window route only, deliberately.
+A sag blocked here falls through to the long-history
+check, whose own mean gate keeps the cliff out — its long
+mean sits near zero (-0.10 dB, against the -0.84 dB the
+gate needs) — so it reads `noisy` instead (its short
+window spreads 5.32 dB, past the 4 dB gate), the same
+design as the late-decline, early-delta and mid-first
+gates. And the gate only applies when the history is long
+enough to estimate a spread per third (60 readings, 20
+per third, the same size as the spread-growth gates), so
+it stays silent on a single loop, where the short route
+never fires anyway.
+
+Six other discriminators were measured and rejected
+before it, in-sample and out-of-sample on the pinned seed
+sweeps:
+
+- The long history's spread as a whole: seed 156 spreads
+  5.02 dB against the true sags' widest 4.48 dB — a
+  0.54 dB gap, but the gate would sit at a tuned 4.75 dB,
+  a value with no meaning outside this sample, while the
+  first-third gate sits on the noisy verdict's own
+  boundary.
+- The middle third's spread: seed 156 at 4.69 dB against
+  the true sags' widest 4.29 dB — a 0.40 dB gap, and the
+  same tuned-value problem.
+- The first half's spread: the true sags reach 3.18 dB
+  on two loops (3.45 dB on three) against the noisy
+  beacons' quietest 3.74 dB (4.04 dB on three) — a real
+  gap, but thinner than the first third's, and again the
+  gate would be a fitted value rather than the noisy
+  boundary.
+- The first quarter's spread: the true sags reach 3.48 dB
+  against the noisy beacons' quietest 3.33 dB — the
+  ranges overlap, no cut.
+- The drop's standard error: seed 156's drop carries a
+  1.60 dB standard error against the true sags' widest
+  1.49 dB — a 0.11 dB margin, a tuned threshold on a
+  knife-edge that repairs one seed.
+- The mid-last spread growth, the half growth, the long
+  slope and correlation, and the short- and long-window
+  pair medians and fractions below -1 dB: seed 156 sits
+  inside the true sags' ranges on all of them (mid-last
+  growth +0.15 dB against -1.19 to +2.37 dB, half growth
+  +0.28 dB against -0.11 to +2.72 dB, long correlation
+  -0.27 against -0.53 to -0.18, short pair median -3.07 dB
+  against -6.53 to -0.72 dB) — no cut. Moving the noisy
+  check before the sag checks was not tried as a fix: the
+  ordering is deliberate, a proven decline is named for
+  the decline first, and the gate is the same boundary
+  applied to the start of the walk, not a reorder.
+
+Measured behaviour (v0.76.0): 2 dB RSSI noise, beacon D,
+seeds 1–100 and 101–200 — the other beacons stay `healthy`
+in every scenario, on all 100 seeds of each sample:
+
+| walk | verdicts, seeds 1–100 | verdicts, seeds 101–200 |
+|---|---|---|
+| two-loop, D with 5 dB extra noise | `noisy` 91, `healthy` 8, `moved` 1 — unchanged | `noisy` 95, `healthy` 4, `moved` 1 (was `noisy` 94, `healthy` 4, `battery-sag` 1, `moved` 1) |
+| two-loop, D draining, 0.3/hr | `battery-sag` 84, `noisy` 11, `healthy` 5 — unchanged | `battery-sag` 85, `uncertain` 2, `noisy` 5, `healthy` 4, `moved` 4 — unchanged |
+| three-loop, D with 5 dB extra noise | `noisy` 90, `healthy` 10 — unchanged | `noisy` 90, `uncertain` 1, `healthy` 9 — unchanged |
+| three-loop, D draining, 0.3/hr | `battery-sag` 98, `noisy` 2 — unchanged | `battery-sag` 99, `noisy` 1 — unchanged |
+| two- and three-loop, every other scenario | unchanged | unchanged |
+
+The fix is honest about its margins, and they are wider
+than the last three gates': the widest true slow sag
+spreads 3.32 dB in its first third on two loops (seed 92)
+and 3.19 dB on three (seed 105), against the gate at
+4.0 dB and the misread at 4.78 dB — 0.68 dB of margin on
+the sag side, 0.78 dB on the misread side. And the
+boundary is not fitted to the one seed: 194 of 200 noisy
+beacons spread past 4.0 dB in their first third on two
+loops (199 of 200 on three), while no true slow sag on
+either sample, on two loops or three, reaches it. The
+classification carries the evidence as
+`first_third_spread_db`, and the export round-trips it (a
+file written before v0.76.0 loads with it null).
+
+The fix is honest about what it does not repair. A beacon
+with less extra noise than the pinned 5 dB would sit
+under the gate — 3 dB of extra noise spreads only about
+3.6 dB in the first third — so a quieter noisy beacon
+that fakes a decline the same way would still read
+`battery-sag`; the gate repairs the pinned case, not
+every noisy beacon. And the single-loop slow sag stays
+barely detected (1/100 in-sample, 3/100 out-of-sample):
+the gate needs 60 readings, and a single loop holds 40
+with no revisits at all. The next item is the
+single-loop slow sag, a measured limit of this evidence,
+pending longer walks. The roadmap grows as new needs
+surface — the beacon being noisy from the start is the
+latest addition.

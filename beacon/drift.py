@@ -497,6 +497,33 @@ SAG_EARLY_DELTA_MIN_PAIRS = 30
 # and early-delta gates.
 SAG_MID_SPREAD_GROWTH_MAX_DB = -1.0
 
+# A dying battery starts fresh — its first third spreads at the
+# base noise — while a noisy beacon is noisy from the first
+# reading, so its first third already spreads past twice the
+# expected noise. The short-window sag route is vetoed when the
+# first third of the floor's long history spreads past twice the
+# expected noise — the same boundary the noisy verdict itself
+# uses, not a tuned threshold: a beacon that was already noisier
+# than the noisy gate at the start of the walk cannot be a
+# battery that only got noisy as it drained. The gate only
+# applies when the history is long enough to estimate a spread
+# per third (60 readings, 20 per third, the same size as the
+# spread-growth gates); a shorter history carries no first-third
+# evidence and the call stands on the other gates. A sag blocked
+# here falls through to the long-history check below, whose own
+# gates still fire for a real decline — and the long mean gate is
+# what keeps the cliff out there too, since its long mean sits
+# near zero — so the cost of the gate is the verdict's route,
+# not the verdict itself, the same design as the late-decline,
+# early-delta and mid-first gates. Measured on seeds 1-200, two
+# and three loops: the last late cliff (seed 156, out of sample,
+# two loops) spreads 4.78 dB in its first third, while the
+# widest true slow sag spreads only 3.32 dB there (two loops,
+# seed 92; 3.19 dB on three loops, seed 105) — the gate sits
+# between those two with margin on both sides (see the README
+# v0.76.0 notes).
+SAG_FIRST_SPREAD_NOISY_MULTIPLIER = 2.0
+
 # A moved beacon's residuals spread out (geometry wrong in
 # different directions) around a shifted mean.
 MOVED_STD_MIN_DB = 2.5
@@ -695,6 +722,32 @@ def _mid_spread_growth(entries: list[tuple[int, float, float, int, float]]
     return growth, se
 
 
+def _first_spread(entries: list[tuple[int, float, float, int, float]]
+                  ) -> tuple[float | None, float | None]:
+    """The residual spread of the first third of ``entries``.
+
+    The standard deviation of the first third of the readings,
+    with its standard error — or ``(None, None)`` when there are
+    too few readings to estimate a spread per third (fewer than
+    ``SAG_SPREAD_GROWTH_MIN_READINGS``, 20 per third). A dying
+    battery starts fresh — its first third spreads at the base
+    noise, about 2 dB — while a noisy beacon is noisy from the
+    first reading, so its first third already spreads past twice
+    the expected noise. The standard error rides along for
+    inspection (and for tests) — the gate itself is magnitude-only
+    at twice the expected noise, the same boundary the noisy
+    verdict uses, since a significance test on a spread would
+    punish the very noise the gate measures.
+    """
+    if len(entries) < SAG_SPREAD_GROWTH_MIN_READINGS:
+        return None, None
+    third = len(entries) // 3
+    first = [entry[4] for entry in entries[:third]]
+    spread = _stdev(first)
+    se = spread / math.sqrt(2 * len(first))
+    return spread, se
+
+
 def _spread_above_noise(std: float, samples: int, noise_db: float,
                         min_t: float = MOVED_LONG_SPREAD_MIN_T) -> bool:
     """Whether a residual spread is real excess over the expected noise.
@@ -835,7 +888,14 @@ class DriftClassification:
     that starts early and keeps falling from reading as a sag
     through the short window, since a dying battery gets noisier
     as it drains and an excursion's middle third can read much
-    quieter than its first; ``samples`` is the window size;
+    quieter than its first; ``first_third_spread_db`` is the
+    residual spread of the first third of the history (None when
+    the history is too short to estimate a spread per third) —
+    the check that keeps a beacon that was noisy from the start
+    from reading as a sag through the short window, since a dying
+    battery starts fresh and only gets noisy as it drains, while
+    a noisy beacon already spreads past twice the expected noise
+    in its first third; ``samples`` is the window size;
     ``reason`` says in words why this verdict was reached.
     """
 
@@ -856,6 +916,7 @@ class DriftClassification:
     spread_growth_db: float | None = None
     early_revisit_delta_db: float | None = None
     mid_first_spread_growth_db: float | None = None
+    first_third_spread_db: float | None = None
 
     def to_dict(self) -> dict:
         """JSON-friendly form, for the stream output, the exported
@@ -870,7 +931,9 @@ class DriftClassification:
         ``early_revisit_delta_db`` is null when fewer than five
         pairs match in the first two-thirds of the history, and
         ``mid_first_spread_growth_db`` is null when it was too
-        short to estimate a spread per third."""
+        short to estimate a spread per third, and
+        ``first_third_spread_db`` is null when it was too short
+        to estimate a spread per third."""
         return {
             "id": self.id,
             "floor": self.floor,
@@ -890,6 +953,7 @@ class DriftClassification:
             "early_revisit_delta_db": self.early_revisit_delta_db,
             "mid_first_spread_growth_db":
                 self.mid_first_spread_growth_db,
+            "first_third_spread_db": self.first_third_spread_db,
         }
 
 
@@ -1289,6 +1353,18 @@ class DriftMonitor:
         # a spread difference would punish the sag for the very
         # noise growth it measures.
         mid_first_growth, _mid_se = _mid_spread_growth(long_window)
+        # The first third's spread across the floor's long
+        # history — the standard deviation of the first third of
+        # the readings, measured once and shared by the
+        # short-window sag check below. A dying battery starts
+        # fresh, so its first third spreads at the base noise;
+        # a noisy beacon is noisy from the first reading, so its
+        # first third already spreads past twice the expected
+        # noise. The standard error rides along for inspection
+        # (and for tests) — the gate itself is magnitude-only at
+        # twice the expected noise, the same boundary the noisy
+        # verdict uses.
+        first_spread, _first_se = _first_spread(long_window)
         # The early revisit delta across the floor's long history —
         # the mean paired delta over the first two-thirds of the
         # history, the part before the late interval, measured once
@@ -1344,7 +1420,8 @@ class DriftMonitor:
                 late_decline_db=late_decline,
                 spread_growth_db=spread_growth,
                 early_revisit_delta_db=early_delta,
-                mid_first_spread_growth_db=mid_first_growth)
+                mid_first_spread_growth_db=mid_first_growth,
+                first_third_spread_db=first_spread)
 
         if samples < self._min_samples:
             return result(
@@ -1438,6 +1515,23 @@ class DriftMonitor:
         # to the long-history check below, whose own
         # spread-growth gate already vetoes the cliff, so the
         # cost of the gate is the verdict's route, not the
+        # verdict itself. And the beacon must not have been
+        # noisy from the start: the short-window call is vetoed
+        # when the first third of the history already spreads
+        # past twice the expected noise — a dying battery
+        # starts fresh, so a spread past the noisy gate in the
+        # first third is the beacon's own noise, not a drain,
+        # while a noise excursion that fakes a decline can sit
+        # on top of it (the last late cliff, seed 156, spreads
+        # 4.78 dB in its first third). The gate is
+        # magnitude-only at twice the expected noise — the same
+        # boundary the noisy verdict itself uses, not a tuned
+        # threshold — and it needs the same 60-reading history
+        # as the other spread gates, so it stays silent on a
+        # single loop. A sag blocked here falls through to the
+        # long-history check below, whose own mean gate keeps
+        # the cliff out (its long mean sits near zero), so the
+        # cost of the gate is the verdict's route, not the
         # verdict itself.
         if mean < SAG_MEAN_MAX_DB:
             if pairs >= 5:
@@ -1455,7 +1549,11 @@ class DriftMonitor:
                                  and early_delta > 0.0)
                         and not (mid_first_growth is not None
                                  and mid_first_growth
-                                 < SAG_MID_SPREAD_GROWTH_MAX_DB)):
+                                 < SAG_MID_SPREAD_GROWTH_MAX_DB)
+                        and not (first_spread is not None
+                                 and first_spread
+                                 > SAG_FIRST_SPREAD_NOISY_MULTIPLIER
+                                 * self._noise_db)):
                     return result(
                         "battery-sag",
                         f"mean residual {mean:.2f} dB and the residual "
