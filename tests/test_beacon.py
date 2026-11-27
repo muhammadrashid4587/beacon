@@ -1689,7 +1689,7 @@ class TestDriftClassification(unittest.TestCase):
         # about the size of the 2 dB RSSI noise: on the canonical
         # seeds the classifier never invents a cause for it —
         # healthy or uncertain only — but across seeds 1-100 it
-        # reads moved on 18, so the detection floor is
+        # reads moved on 27, so the detection floor is
         # statistical, not a hard line (see the hundred-seed
         # sweep below).
         moved = [Beacon(b.id, b.x, b.y) for b in BEACONS]
@@ -1934,7 +1934,7 @@ class TestDriftClassification(unittest.TestCase):
         # canonical five seeds flatter the classifier — the
         # single-loop fast sag reads battery-sag on 4/5 of them
         # but only 50/100, the slow sag 38/50 on seeds 1-50 but
-        # 84/100, and the 1.4 m move reads moved on 18/100 — so
+        # 84/100, and the 1.4 m move reads moved on 27/100 — so
         # a future change that shifts these counts must update
         # this test and the README deliberately, not silently.
         moved = [Beacon(b.id, b.x, b.y) for b in BEACONS]
@@ -1992,10 +1992,10 @@ class TestDriftClassification(unittest.TestCase):
             {"battery-sag": 84, "noisy": 11, "healthy": 5})
         self.assertEqual(
             tally(lambda s: self._two_loops_with(s, moved)),
-            {"moved": 98, "uncertain": 2})
+            {"moved": 100})
         self.assertEqual(
             tally(lambda s: self._two_loops_with(s, small_moved)),
-            {"uncertain": 64, "healthy": 18, "moved": 18})
+            {"uncertain": 55, "healthy": 18, "moved": 27})
         self.assertEqual(tally(noisy),
                          {"noisy": 91, "healthy": 8, "moved": 1})
         self.assertEqual(
@@ -2019,20 +2019,22 @@ class TestDriftClassification(unittest.TestCase):
             {"uncertain": 100})
 
     def test_three_loop_sweep_pins_verdict_counts(self):
-        # The v0.68.0 measurement: the same scenarios swept over
+        # The v0.69.0 measurement: the same scenarios swept over
         # seeds 1-100 on three loops (120 readings) instead of
         # two. The third loop settles the slow sag — 84 to 98 —
         # because the extra loop's drained readings pull the long
-        # mean and the long revisit delta past their gates, and it
-        # rescues the 7 m move's seed 23 the same way. It does not
-        # settle the named knife-edges: the 1.4 m move reads moved
-        # on 24, up from 18, but the same count on the
-        # out-of-sample seeds 101-200, where two loops already
-        # read 24 — the bump is the final window's noise draw, not
-        # a systematic effect — and seeds 23 and 73 still miss on
-        # spread, their settled long spreads sitting at 2.32 dB
-        # against the 2.5 dB gate. The single-pass fast sag is
-        # identical on one, two and three loops (50/100): the
+        # mean and the long revisit delta past their gates. The
+        # 7 m move now reads moved on 100, up from 97: the
+        # position-pattern route rescues seeds 64, 73 and 74,
+        # whose long spreads settle at 2.42 to 2.47 dB, just under
+        # the 2.5 dB gate, while their plane fits explain 0.107
+        # to 0.191 of the residual variance. The 1.4 m move reads
+        # moved on 35, up from 24 — and 31 on the out-of-sample
+        # seeds 101-200, up from 24 there too, so the bump is a
+        # systematic effect of the new evidence, not the final
+        # window's noise draw: a small move leaves the same
+        # position pattern, only weaker. The single-pass fast sag
+        # is identical on one, two and three loops (50/100): the
         # beacon goes dark at step 24, so the extra loops add no
         # readings at all. And the third loop opens two small
         # misreads the other way: the steady offset reads
@@ -2086,10 +2088,10 @@ class TestDriftClassification(unittest.TestCase):
             {"battery-sag": 98, "noisy": 2})
         self.assertEqual(
             tally(lambda s: self._three_loops_with(s, moved)),
-            {"moved": 97, "uncertain": 3})
+            {"moved": 100})
         self.assertEqual(
             tally(lambda s: self._three_loops_with(s, small_moved)),
-            {"moved": 24, "uncertain": 51, "healthy": 25})
+            {"moved": 35, "uncertain": 41, "healthy": 24})
         self.assertEqual(tally(noisy),
                          {"noisy": 85, "battery-sag": 6, "healthy": 9})
         self.assertEqual(
@@ -2115,7 +2117,7 @@ class TestDriftClassification(unittest.TestCase):
         self.assertEqual(
             tally(lambda s: self._three_loops_with(s, small_moved),
                   seeds=range(101, 201)),
-            {"moved": 24, "uncertain": 53, "healthy": 23})
+            {"moved": 31, "uncertain": 47, "healthy": 22})
         self.assertEqual(
             tally(lambda s: offset(s, -6.0), seeds=range(101, 201)),
             {"uncertain": 98, "battery-sag": 2})

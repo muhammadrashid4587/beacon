@@ -73,7 +73,13 @@ signatures in the residuals, so ``classify`` names the cause:
   short window's spread misses the gate, the classifier consults
   the longer history too: the same spread and mean gates, the
   same stable-revisit requirement, over the long window's
-  readings, where the spread estimate has settled. The same
+  readings, where the spread estimate has settled. A spread just
+  under the gate still counts when it is real excess over the
+  noise (the 1.5-SE test) and the residuals carry a position
+  pattern — a plane fit of the residual on (x, y) over the long
+  history explaining at least 0.08 of the variance — because a
+  move's spread is geometry, a pattern in position, while a
+  steady offset's spread is pure noise. The same
   noise cuts the other way: a steady offset's short window can
   fluke *above* the gate — on the tripled two-floor walk its
   spread is 2.70 dB on seed 1 — so when a longer history exists
@@ -196,31 +202,44 @@ per-floor history there, so no longer history exists to consult;
 the fix is a third loop, not a sharper threshold. A move under
 about 2 m sits at the detection floor at 2 dB noise: on the
 canonical seeds it is called healthy or uncertain, but across
-seeds 1–100 it reads moved on 18 — its position pattern is
-about the size of the noise, so the call is a coin flip at that
-distance, which is a limit of the data, not a bug in the
-classifier. And the third loop opened the adjacent misread the
-other way: at the default 20-reading window the steady offset
-reads ``moved`` on seed 1, its short spread fluking to 2.70 dB,
-0.20 dB over the gate, around a -5.96 dB mean with a stable
-revisit delta. The moved call now needs the longer history to
-agree that the spread is real — the 120-reading history's spread
-must clear the 2 dB noise by at least 1.5 standard errors — and
-the offset's settles to 2.09 dB, 0.70 standard errors above noise,
-so it reads ``uncertain`` on 5/5 seeds while the moved beacon
-stays ``moved`` on 5/5 (its long spread is 2.57 to 2.95 dB, 4.4
-to 7.4 standard errors above noise). A residual-vs-distance
-correlation was measured and rejected as the discriminator: the
-moved beacon reads louder almost everywhere, since it moved
-towards the ward interior, so its correlation with distance is
-near zero (-0.05 over the long history on seed 1) — the pattern
-is a localised dip near the old corner, not a monotone trend —
-and the offset's is the same size, so no correlation gate
-separates them. The margin on the fix is honest but thin: the
-offset's long spread clears the noise test by only 0.10 dB on
-seed 1, and on two loops seed 3's short spread sits 0.01 dB under
-the moved gate with a long spread that would pass the test, so a
-slightly unluckier noise draw could still misread it.
+seeds 1–100 it reads moved on 27 on two loops and 35 on three
+— its position pattern is about the size of the noise, so the
+call is still a minority at that distance, which is a limit of
+the data, not a bug in the classifier. And the third loop opened
+the adjacent misread the other way: at the default 20-reading
+window the steady offset reads ``moved`` on seed 1, its short
+spread fluking to 2.70 dB, 0.20 dB over the gate, around a
+-5.96 dB mean with a stable revisit delta. The moved call now
+needs the longer history to agree that the spread is real — the
+120-reading history's spread must clear the 2 dB noise by at
+least 1.5 standard errors — and the offset's settles to 2.09 dB,
+0.70 standard errors above noise, so it reads ``uncertain`` on
+5/5 seeds while the moved beacon stays ``moved`` on 5/5 (its
+long spread is 2.57 to 2.95 dB, 4.4 to 7.4 standard errors
+above noise). A residual-vs-distance correlation was measured
+and rejected as the discriminator: the moved beacon reads
+louder almost everywhere, since it moved towards the ward
+interior, so its correlation with distance is near zero (-0.05
+over the long history on seed 1) — the pattern is a localised
+dip near the old corner, not a monotone trend — and the
+offset's is the same size, so no correlation gate separates
+them. What does separate them is the residual's dependence on
+position itself: a plane fit on (x, y) explains 0.054 to 0.244
+of a 7 m move's residual variance on three loops, against at
+most 0.068 for a steady offset, so the long-history moved
+check accepts a spread below the 2.5 dB gate when the spread
+is real excess over the noise and the plane fit explains at
+least 0.08 — the v0.69.0 fix, which rescues the three
+spread-gate misses (seeds 64/73/74, long spread 2.42 to 2.47
+dB, plane fits 0.107 to 0.191) without moving any other
+scenario's hundred-seed tally — the only other tally that
+moves is the 1.4 m move's, which the same evidence catches
+more often (18 to 27 on two loops, 24 to 35 on three). The margin on the fix is honest but thin:
+the offset's long spread clears the noise test by only 0.10 dB
+on seed 1, and on two loops seed 3's short spread sits 0.01 dB
+under the moved gate with a long spread that would pass the
+test, so a slightly unluckier noise draw could still misread
+it.
 """
 
 import math
@@ -309,6 +328,26 @@ MOVED_MEAN_MIN_DB = 1.5
 # 2.09 dB) while the settled spread says noise. The same 1.5-SE
 # convention as the sag gates.
 MOVED_LONG_SPREAD_MIN_T = 1.5
+
+# A moved beacon's residuals are a function of position — the
+# beacon reads louder near its new home and quieter far from it —
+# while a steady offset's are pure noise, so the residual's
+# dependence on position is a second piece of evidence for a
+# move, independent of how wide the spread is. The long-history
+# moved check accepts a spread below the 2.5 dB gate when the
+# spread is real excess over the noise (the 1.5-SE test above)
+# *and* the position pattern is strong: a plane fit of the
+# residual on (x, y) over the long history must explain at least
+# this share of the residual variance. Measured on three loops,
+# seeds 1-100: a 7 m move's plane fit explains 0.054 to 0.244 of
+# the variance (the three spread-gate misses, seeds 64/73/74,
+# sit at 0.107 to 0.191), while a steady offset's explains at
+# most 0.068 — and the offset seeds whose spread sits in the
+# rescue band clear only 0.044. The gate sits between those two
+# with margin on both sides, and the mean and stable-revisit
+# gates still apply, so a noisy beacon (mean near zero) cannot
+# borrow this route either.
+MOVED_PATTERN_R2_MIN = 0.08
 
 # A beacon is "off calibration but unclassifiable" when its mean
 # residual is this far from zero in standard errors (and at least
@@ -400,6 +439,48 @@ def _spread_above_noise(std: float, samples: int, noise_db: float,
         return False
     se = noise_db / math.sqrt(2 * samples)
     return std > noise_db + min_t * se
+
+
+def _position_pattern_r2(entries: list[tuple[int, float, float, int, float]]
+                         ) -> float:
+    """How much of the residual variance a plane in position explains.
+
+    The R^2 of a least-squares plane fit of the residual on (x, y)
+    over ``entries`` — 0.0 when the entries are degenerate or carry
+    no variance. A moved beacon's residual is a smooth function of
+    position (louder near its new home, quieter far from it), so
+    the plane catches a real share of the variance; a steady
+    offset's residuals are pure noise, so the plane catches only
+    the ~2/n a fit on noise always catches. The residual's
+    correlation with distance from the calibrated position was
+    measured and rejected as the discriminator (near zero — the
+    pattern is a localised dip, not a monotone trend in distance),
+    but the plane fit measures the pattern's gradient in x and y
+    directly, and it separates: on three loops, seeds 1-100, a
+    7 m move fits 0.054 to 0.244, a steady offset at most 0.068.
+    """
+    if len(entries) < 8:
+        return 0.0
+    xs = [entry[1] for entry in entries]
+    ys = [entry[2] for entry in entries]
+    rs = [entry[4] for entry in entries]
+    mx, my, mr = _mean(xs), _mean(ys), _mean(rs)
+    sxx = sum((x - mx) ** 2 for x in xs)
+    syy = sum((y - my) ** 2 for y in ys)
+    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    sxr = sum((x - mx) * (r - mr) for x, r in zip(xs, rs))
+    syr = sum((y - my) * (r - mr) for y, r in zip(ys, rs))
+    det = sxx * syy - sxy * sxy
+    if det == 0:
+        return 0.0
+    bx = (sxr * syy - syr * sxy) / det
+    by = (syr * sxx - sxr * sxy) / det
+    ss_tot = sum((r - mr) ** 2 for r in rs)
+    if ss_tot == 0:
+        return 0.0
+    ss_res = sum((r - (mr + bx * (x - mx) + by * (y - my))) ** 2
+                 for x, y, r in zip(xs, ys, rs))
+    return 1.0 - ss_res / ss_tot
 
 
 @dataclass(frozen=True)
@@ -1034,17 +1115,27 @@ class DriftMonitor:
         # same moved gates are read off it instead: the same spread
         # above 2.5 dB, the same mean beyond 1.5 dB, the same
         # stable revisit (delta within 1.0 dB) — a longer history,
-        # not a sharper threshold. It runs before the noisy check
-        # below, so a proven move is named for the move even when
-        # the short window's spread flukes wide: a moved beacon's
-        # residuals spread with position, and on a longer walk the
-        # final window can spread past the noisy gate on noise
-        # alone (a 7 m move reads noisy on 4/100 seeds over three
-        # loops, with a long spread of 2.8 to 3.2 dB around a
-        # 4 dB mean and a stable revisit delta over 81 pairs).
-        # What keeps a genuinely noisy beacon out of this route is
-        # the mean gate below, not the ordering: its long mean sits
-        # near zero, not 1.5 dB from it — and a sagging beacon's
+        # not a sharper threshold. A spread just under the gate
+        # still counts when it is real excess over the noise (the
+        # 1.5-SE test) *and* the residuals carry a position
+        # pattern — a plane fit on (x, y) explaining at least
+        # 0.08 of the variance — because a move's spread is
+        # geometry, a pattern in position, while a steady offset's
+        # spread is pure noise: on three loops the 7 m move's
+        # spread-gate misses (seeds 64/73/74, long spread 2.42 to
+        # 2.47 dB) fit 0.107 to 0.191, while the offset seeds
+        # whose spread sits in the same band fit at most 0.044.
+        # It runs before the noisy check below, so a proven move
+        # is named for the move even when the short window's
+        # spread flukes wide: a moved beacon's residuals spread
+        # with position, and on a longer walk the final window can
+        # spread past the noisy gate on noise alone (a 7 m move
+        # reads noisy on 4/100 seeds over three loops, with a
+        # long spread of 2.8 to 3.2 dB around a 4 dB mean and a
+        # stable revisit delta over 81 pairs). What keeps a
+        # genuinely noisy beacon out of this route is the mean
+        # gate below, not the ordering: its long mean sits near
+        # zero, not 1.5 dB from it — and a sagging beacon's
         # revisit delta is strongly negative, so it cannot borrow
         # this route either. The long spread must also sit below
         # the noisy gate (twice the expected noise): a move's
@@ -1056,21 +1147,33 @@ class DriftMonitor:
         # loops). When the long window holds no more readings than
         # the short one, it says nothing the short window has not
         # already said, and this check stays silent.
+        spread_gate = long_std > MOVED_STD_MIN_DB
+        pattern_route = (
+            _spread_above_noise(long_std, len(long_window),
+                                 self._noise_db)
+            and _position_pattern_r2(long_window)
+            >= MOVED_PATTERN_R2_MIN)
         if (len(long_window) > samples
-                and long_std > MOVED_STD_MIN_DB
+                and (spread_gate or pattern_route)
                 and long_std < 2.0 * self._noise_db
                 and abs(long_mean) > MOVED_MEAN_MIN_DB
                 and long_pairs >= 5
                 and long_delta is not None
                 and abs(long_delta) < 1.0):
-            return result(
-                "moved",
+            reason = (
                 f"over the longer {len(long_window)}-reading "
                 f"history on floor {floor} the residual at "
                 f"revisited spots is stable ({long_delta:+.2f} dB "
                 f"over {long_pairs} pairs) but the history spreads "
                 f"{long_std:.2f} dB around a {long_mean:+.2f} dB "
                 f"mean — the geometry is wrong, not the power")
+            if pattern_route and not spread_gate:
+                reason += (
+                    f", and the spread is a position pattern, not "
+                    f"noise: a plane fit on (x, y) explains "
+                    f"{_position_pattern_r2(long_window):.2f} of "
+                    f"the residual variance")
+            return result("moved", reason)
 
         # Noise: spread more than twice the expected RSSI noise,
         # with no coherent decline. It runs after the long-history

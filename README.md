@@ -4333,3 +4333,91 @@ holds, the 1.4 m move's does not, and the offset's small
 sag-misread rate is the same out of sample as in it.
 The roadmap grows as new needs surface — the noisy check
 yielding to a proven move is the latest addition.
+
+## The spread gate was a pattern, not a threshold
+
+The v0.68.0 notes left one knife-edge for v0.69.0: the 7 m
+move's spread gate. On three loops it reads `moved` on 97,
+missing seeds 64, 73 and 74 — their long spreads settle at
+2.46, 2.47 and 2.42 dB, just under the 2.5 dB gate — and on
+two loops it misses seeds 23 and 73 the same way, at 2.41
+and 2.30 dB. More history tightens the spread estimate
+around a value the gate does not accept, and no threshold
+change fixes that without also letting steady offsets
+through: the offset's long spread sits in the same band on
+two seeds (2.31 and 2.38 dB). What separates them is not
+how wide the spread is but what it is made of. A move's
+spread is geometry — the residual is a function of position,
+louder near the beacon's new home and quieter far from it —
+while a steady offset's spread is pure noise. A plane fit
+of the residual on (x, y) over the long history measures
+exactly that: on three loops, seeds 1–100, a 7 m move's
+plane fit explains 0.054 to 0.244 of the residual variance
+(the three misses sit at 0.107 to 0.191), while a steady
+offset's explains at most 0.068 — and the offset seeds
+whose spread sits in the rescue band clear only 0.044. The
+residual's correlation with distance from the calibrated
+position was measured and rejected as the discriminator in
+v0.68.0 (near zero — the pattern is a localised dip, not a
+monotone trend in distance); the plane fit measures the
+pattern's gradient in x and y directly, and it separates.
+
+The fix is a second piece of evidence, not a sharper
+threshold: the long-history moved check accepts a spread
+below the 2.5 dB gate when the spread is real excess over
+the noise (the 1.5-standard-error test the short-window
+call already uses for agreement) *and* the plane fit
+explains at least 0.08 of the residual variance. The mean
+gate (beyond 1.5 dB) and the stable-revisit gate (delta
+within 1.0 dB) still apply unchanged, so a noisy beacon —
+mean near zero, spread past the 4 dB cap — cannot borrow
+the new route, and neither can a sagging beacon, whose
+revisit delta is strongly negative. The verdict's reason
+says which evidence was used, so a move rescued through
+the pattern route reads as one.
+
+Measured behaviour (v0.69.0): 2 dB RSSI noise, beacon D,
+seeds 1–100 — the other beacons stay `healthy` in every
+scenario, on all 100 seeds:
+
+| walk | verdicts |
+|---|---|
+| two-loop, D moved (0, 12) to (5, 7) | `moved` 100/100 (was 98; seeds 23 and 73 rescued, plane fits 0.182 and 0.142) |
+| two-loop, D moved 1.4 m, to (1, 11) | `moved` 27, `uncertain` 55, `healthy` 18 (was 18) |
+| three-loop, D moved (0, 12) to (5, 7) | `moved` 100/100 (was 97; seeds 64, 73 and 74 rescued) |
+| three-loop, D moved 1.4 m, to (1, 11) | `moved` 35, `uncertain` 41, `healthy` 24 (was 24) |
+
+Every other hundred-seed tally is unchanged, on two loops
+and on three: the healthy walk, the slow sag, the noisy
+beacon, and both steady offsets read exactly as in v0.67.0
+and v0.68.0. Out-of-sample, seeds 101–200: the 7 m move
+reads `moved` on 99 on two loops and 100 on three, and the
+1.4 m move on 29 and 31 — the small move's gain holds out
+of sample too, so it is a systematic effect of the new
+evidence, not the sample the gate was tuned on.
+
+The fix is honest about its margins, and they are thin in
+a new place. The 0.08 plane-fit gate sits between the
+offset's best in-band fit (0.044) and the moved misses'
+worst (0.107) — a real gap, but a noise draw 0.06 either
+way would close it. The two-loop out-of-sample 7 m move
+still misses one seed, 164, and not on spread at all: its
+long spread is 2.59 dB, past the gate, but its long revisit
+delta is +1.04 dB, 0.04 dB over the 1.0 dB stability gate —
+a second knife-edge, on a different gate, which the third
+loop rescues (the delta settles to +0.64 dB over 81 pairs).
+The single-pass 7 m move is unchanged at 91/100: on one
+loop the long history holds only 40 readings, and the
+pattern route needs the longer history to settle. The
+1.4 m move is still at the detection floor — 27 on two
+loops, 35 on three — only now the floor is higher: the
+pattern is real evidence, but at 1.4 m it is still about
+the size of the noise. The next item is the other open
+problem from v0.68.0: the 3-loop sag-misread rate — the
+steady offset reading `battery-sag` on 2 of 100 seeds and
+the noisy beacon on 6, both from a short-window decline
+the long history contradicts only weakly — which needs a
+discriminator that is not long-delta agreement, already
+rejected after measurement: it costs 3 true slow sags.
+The roadmap grows as new needs surface — the position
+pattern settling the spread gate is the latest addition.
