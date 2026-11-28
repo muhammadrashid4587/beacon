@@ -5447,3 +5447,165 @@ collapses inside it — a window sized in distance or time
 would keep the move while the walk lengthens. The roadmap
 grows as new needs surface — the longer walk for the
 single-loop slow sag is the latest addition.
+
+## The window's unit
+
+The v0.78.0 notes left the window's unit: it is 20 readings,
+so on a denser walk it covers less ground — 23.2 m at the end
+of the default walk, 7.6 m on a doubled loop, 3.8 m on a
+quadrupled one — and the moved beacon's position pattern
+collapses inside it. Three candidates were measured on the
+simulated walks, seeds 1–100 and 101–200, 2 dB RSSI noise,
+beacon D, every scenario, on a single, doubled and quadrupled
+loop:
+
+- **readings**: the last 20 readings (the current default).
+- **distance**: the readings covering the last 24 m of walked
+  path — the ground the 20-reading window covers on the
+  default walk, rounded to the ward's half-perimeter (48 m
+  loop) — so the window covers the same ground however densely
+  the walk is sampled.
+- **time**: the readings from the last 2400 s (20 readings at
+  120 s steps), the same span in time that the current window
+  covers.
+
+On a single loop the distance window holds exactly the last
+20 readings — the last 21 readings span 24.0 m in exact
+arithmetic, and the float sum lands just above it — so every
+pinned single-loop tally stands unchanged under it, and the
+time window holds exactly the last 20 readings on every walk,
+since the steps are evenly spaced at 120 s. The doubled and
+quadrupled loops are where the three come apart (the two
+numbers in each cell are seeds 1–100 and 101–200, counting the
+scenario's expected verdict):
+
+| walk | scenario | readings | distance, 24 m | time, 2400 s |
+|---|---|---|---|---|
+| doubled loop | D slow sag, 0.3/hr | `battery-sag` 82 / 86 | `battery-sag` 74 / 84 | `battery-sag` 82 / 86 |
+| doubled loop | D fast sag, 1.2/hr | `battery-sag` 49 / 62 | `battery-sag` 45 / 52 | `battery-sag` 49 / 62 |
+| doubled loop | D moved 7 m | `moved` 92 / 84 | `moved` 95 / 98 | `moved` 92 / 84 |
+| doubled loop | D with 5 dB extra noise | `noisy` 88 / 94 | `noisy` 99 / 98 | `noisy` 88 / 94 |
+| doubled loop | healthy | `healthy` 100 / 100 | `healthy` 100 / 100 | `healthy` 100 / 100 |
+| doubled loop | D steady -6 dB offset | `uncertain` 100 / 100 | `uncertain` 100 / 100 | `uncertain` 100 / 100 |
+| quadrupled loop | D slow sag, 0.3/hr | `battery-sag` 99 / 98 | `battery-sag` 89 / 96 | `battery-sag` 99 / 98 |
+| quadrupled loop | D fast sag, 1.2/hr | `battery-sag` 49 / 62 | `battery-sag` 45 / 52 | `battery-sag` 49 / 62 |
+| quadrupled loop | D moved 7 m | `moved` 35 / 40 | `moved` 35 / 40 | `moved` 35 / 40 |
+| quadrupled loop | D with 5 dB extra noise | `noisy` 89 / 97 | `noisy` 100 / 100 | `noisy` 89 / 97 |
+| quadrupled loop | healthy | `healthy` 100 / 100 | `healthy` 100 / 100 | `healthy` 100 / 100 |
+| quadrupled loop | D steady -6 dB offset | `uncertain` 99 / 100 | `uncertain` 99 / 100 | `uncertain` 99 / 100 |
+
+The distance window does not repair the case that motivated
+it. The moved beacon on a quadrupled loop reads `moved` on
+35 of 100 seeds in-sample (40 out of sample) under every
+window — the same seeds, per-seed identical across 200 seeds
+— because the verdict rides the long-history route in both
+modes, and the binding constraint is the revisit delta, not
+the window's spread. The distance window restores the spread
+(seed 3: 1.24 dB over the last 20 readings, 3.27 dB over the
+last 24 m) and the mean (+5.55 dB to +3.90 dB), but the
+revisit delta is -1.61 dB over the same 5 pairs at the
+closing corner, past the 1.0 dB the moved call needs — and a
+5-pair delta carries about 1.26 dB of standard error (each
+pair's delta spreads about 2.83 dB), so the gate is a coin
+flip on those pairs whatever the window holds. The window's
+unit is the wrong lever for that verdict: the fix, if there
+is one, is in the revisit evidence — more pairs, or a gate
+that knows how noisy five pairs are — not in how the window
+is sized. The doubled loop is the one place the distance
+window helps the move (92 to 95 in-sample, 84 to 98 out of
+sample): there the 20-reading window spans only 7.6 m, one
+side of the ward, so the move's spread flukes past the noisy
+gate on 8 seeds in-sample (14 out of sample), while the 24 m
+window spans the north and west sides and its spread stays
+under it.
+
+And the distance window costs slow sags, which is what the
+classifier exists to catch. The mechanism is the mean: a
+wider window averages fresher readings into it, so the
+short-window mean gate (-1.5 dB) clears less often — the
+mean leg falls 90 to 82 on a doubled loop in-sample (96 to
+91 out of sample) and 100 to 90 on a quadrupled one (100 to
+98 out of sample), and the slow sag follows it, 82 to 74 and
+99 to 89. The fast sag falls the same way, 49 to 45 and 62
+to 52 on both lengths: the distance window holds all 24
+heard readings, including the first four fresh ones, instead
+of the last 20. The alarm goes with the mean: on a
+quadrupled loop the slow sag alarms on 28 seeds in-sample
+(34 out of sample) under readings and on 0 under distance,
+because the mean over the last 24 m never reaches 5 dB — and
+the moved beacon's alarm goes quiet there too (95 and 97
+alarms under readings, 0 under distance), since the wider
+window averages the loud readings with quieter ones (seed 1:
++5.95 dB to +3.91 dB). The noisy beacon is
+the one clean gain: it reads `noisy` on 99/98 seeds on a
+doubled loop (against 88/94) and 100/100 on a quadrupled one
+(against 89/97), with one battery-sag misread per sample on
+the doubled loop, because the wider window's mean is steadier
+and the spread settles. The healthy walk stays healthy at
+every length under either unit, and the steady offset's one
+quadrupled-loop misread as `battery-sag` (1 seed in-sample)
+is the same seed under both — so the wider window invents
+nothing; it trades one detection for another.
+
+Two other distances were measured before the default was
+set, on the same sweeps:
+
+- 12 m keeps the slow sag at 81/86 on a doubled loop and
+  99/98 on a quadrupled one — nearly the readings tallies —
+  and reads the doubled-loop move at 92/92, but it is half
+  the ground the current window covers, with no derivation:
+  a fitted value, not a unit. The option defaults to 24 m,
+  the ground the window already covers.
+- 48 m, the full loop, collapses the slow sag to 22/29 on a
+  doubled loop (74/85 on a quadrupled one): the window holds
+  the whole walk, so its mean barely clears the -1.5 dB gate
+  at all. A window that spans the whole walk is a history,
+  not a window.
+
+Time was measured and rejected alongside them. Its tallies
+are identical to readings on every cell run — the doubled-
+and quadrupled-loop move and slow sag, both samples,
+including the alarms (95/97 on the quadrupled-loop move,
+28/34 on the quadrupled-loop sag) — because a 2400 s window
+on evenly-spaced 120 s steps holds exactly the last 20
+readings, so it cannot repair the move collapse or cost a
+sag either. It is not offered as a unit at all: it would
+need timestamps the monitor does not receive — the entries
+carry positions, not times — and on the only evidence
+available it is readings under another name. It would only
+differ on an irregularly-timed stream, where the readings
+arrive in bursts or the device pauses — and that stream
+would need the timestamps plumbed through first.
+
+What ships is the choice, not the retune. `DriftMonitor`
+takes `window_unit="readings"` (the default) or
+`"distance"`, with `window_distance_m=24.0` sizing the
+distance window — a deployment that samples densely and
+cares about moves more than slow sags can choose it, with
+its tallies pinned in the test suite. The classification
+carries the ground its window covers as `window_span_m` —
+the walked path from its oldest reading to its newest, in
+metres — so a verdict says how much ward it rests on, not
+just how many readings: 23.2 m at the end of the default
+walk, 7.6 m on a doubled loop, 3.8 m on a quadrupled one
+under readings, and 24.0 m by construction under distance
+(up to one step-gap under it, since the span is measured
+between the readings the window holds). The export
+round-trips it, and a file written before v0.79.0 loads
+with it null.
+
+Measured behaviour (v0.79.0): 2 dB RSSI noise, beacon D —
+no verdict changes anywhere under the default: every pinned
+tally stands exactly as v0.78.0 left it, on every loop count,
+on either sample. Under `window_unit="distance"` the
+doubled-loop slow sag reads `battery-sag` on 74 of 100 seeds
+in-sample (84 out of sample), the fast sag on 45 and 52,
+the 7 m move on 95 and 98, the noisy beacon on 99 and 98,
+and the quadrupled-loop slow sag on 89 and 96 with no
+alarms, the move on 35 and 40 — the same seeds as under
+readings. The next item is the quadrupled-loop move's
+revisit-delta gate: five pairs at the closing corner, a
+1.0 dB magnitude gate on a statistic with about 1.26 dB of
+standard error. The roadmap grows as new needs surface —
+the window's unit is the latest addition.
+

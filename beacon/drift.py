@@ -177,6 +177,30 @@ detection still rests on the short window: the alarm, the moved
 and noisy verdicts, and the fast-sag fallback all read the short
 window exactly as before.
 
+The window is measured in readings by default — the last 20 — so
+on a denser walk it covers less ground: 23.2 m at the end of the
+default walk, 7.6 m on a doubled loop, 3.8 m on a quadrupled one.
+``window_unit="distance"`` sizes it in metres instead — the
+readings covering the last ``window_distance_m`` metres of walked
+path (24 m by default, the ground the 20-reading window covers) —
+so the window covers the same ground however densely the walk is
+sampled. The default stays readings: measured on the simulated
+walks, a distance window does not repair the moved beacon on a
+quadrupled loop (it reads ``moved`` on 35 of 100 seeds
+in-sample, 40 out of sample, under every window — the verdict
+rides the long-history route and the binding constraint is the
+5-pair revisit delta, which no window unit touches) and it costs
+slow-sag detection, because the wider window's mean is diluted
+by fresher readings (the slow sag falls 82 to 74 on a doubled
+loop and 99 to 89 on a quadrupled one, and the quadrupled-loop
+alarm with it, 28 to 0). A time window is not offered: on
+evenly-spaced walks it holds exactly the last 20 readings, so
+its tallies are identical to readings, and it would need
+timestamps the monitor does not receive. The classification
+carries the ground its window covers as ``window_span_m``, so a
+verdict says how much ward it rests on — see the README v0.79.0
+notes for the full comparison.
+
 Measured behaviour (simulator, 2 dB RSSI noise, two-loop ward
 walk, seeds 1, 2, 3, 7, 11 — see the README for the full table):
 a slowly draining beacon (0.3 per hour, 120 s steps) is called
@@ -304,6 +328,44 @@ from .rssi import distance_to_rssi
 
 DEFAULT_WINDOW = 20
 DEFAULT_MIN_SAMPLES = 5
+
+# What the rolling window is measured in — ``"readings"`` keeps the
+# last ``window`` readings, ``"distance"`` keeps the readings
+# covering the last ``window_distance_m`` metres of walked path.
+# The default is readings: measured on the simulated walks (see the
+# README v0.79.0 notes), a distance window does not repair the
+# case that motivated it — the moved beacon on a quadrupled loop
+# reads ``moved`` on 35 of 100 seeds in-sample (40 out of sample)
+# under every window, because the verdict rides the long-history
+# route and the binding constraint is the 5-pair revisit delta,
+# which no window unit touches — and it costs slow-sag detection,
+# because the wider window's mean is diluted by fresher readings
+# (the mean leg falls 90 to 82 on a doubled loop, 100 to 90 on a
+# quadrupled one, and the slow sag with it, 82 to 74 and 99 to
+# 89). A time window was measured and rejected alongside it: on
+# evenly-spaced walks it holds exactly the last 20 readings, so
+# its tallies are identical to readings on every pinned walk, and
+# it would need timestamps the monitor does not receive — the
+# entries carry positions, not times — so it is not a unit the
+# monitor offers at all.
+WINDOW_UNITS = ("readings", "distance")
+DEFAULT_WINDOW_UNIT = "readings"
+
+# How much walked path the distance window covers, in metres — the
+# ground the current 20-reading window covers on the default walk:
+# the last 20 readings span 23.2 m there (the north side plus the
+# west side), and 24 m is the ward's half-perimeter (48 m loop),
+# so a 24 m window holds exactly the last 20 readings at the end
+# of every default-density walk — the pinned tallies stand
+# unchanged under it — and more readings only where the sampling
+# is denser. A smaller window dilutes the sag mean less (12 m
+# keeps the slow sag at 81/86 on a doubled loop and 99/98 on a
+# quadrupled one) but covers less ground (the doubled-loop move
+# reads 92/92 there, against 95/98 at 24 m), and a full-loop
+# window collapses the sag entirely (48 m reads it on 22/29 on
+# a doubled loop) — 24 m is the ground the window already covers,
+# not a value fitted to the sweeps.
+DEFAULT_WINDOW_DISTANCE_M = 24.0
 
 # Expected RSSI noise (stddev, dB) — the deployment's nominal noise,
 # matching the simulator's default. The noisy verdict fires when the
@@ -767,6 +829,32 @@ def _first_spread(entries: list[tuple[int, float, float, int, float]]
     return spread, se
 
 
+def _window_span_m(entries: list[tuple[int, float, float, int, float]]
+                   ) -> float:
+    """How much ground a window's readings cover, in metres.
+
+    The straight-line distance between consecutive readings summed
+    along the window — the walked path from its oldest reading to
+    its newest. A single reading spans 0 m. The measure is exact
+    when the beacon is heard every step, as in the simulator; a
+    beacon unheard for a stretch measures the gap straight, so
+    the window can hold a little more ground than the distance it
+    was sized for. It is the evidence that says what a verdict
+    rests on in metres, not readings: a 20-reading window spans
+    23.2 m at the end of the default walk but only 3.8 m at the
+    end of a quadrupled one — the collapse the v0.78.0 notes
+    measured — while a distance window spans its size by
+    construction.
+    """
+    span = 0.0
+    prev = None
+    for entry in entries:
+        if prev is not None:
+            span += math.hypot(entry[1] - prev[1], entry[2] - prev[2])
+        prev = entry
+    return span
+
+
 def _acceleration(entries: list[tuple[int, float, float, int, float]]
                   ) -> float | None:
     """How much the residual decline steepened across ``entries``.
@@ -964,8 +1052,16 @@ class DriftClassification:
     doubled loop, 96 when a draining beacon goes dark part-way
     through a quadrupled one. A longer walk is more evidence,
     not a sharper threshold, and the count is what makes that
-    visible; ``samples`` is the window size; ``reason`` says in
-    words why this verdict was reached.
+    visible; ``window_span_m`` is how much ground the window
+    covers — the walked path from its oldest reading to its
+    newest, in metres — so a verdict says how much ward its
+    window rests on, not just how many readings: a 20-reading
+    window spans 23.2 m at the end of the default walk but only
+    3.8 m at the end of a quadrupled one, while a distance window
+    spans its size by construction (None when the beacon was
+    never heard, so there is no window to span); ``samples`` is
+    the window size; ``reason`` says in words why this verdict
+    was reached.
     """
 
     id: str
@@ -988,6 +1084,7 @@ class DriftClassification:
     first_third_spread_db: float | None = None
     acceleration_db_per_step: float | None = None
     long_history_readings: int | None = None
+    window_span_m: float | None = None
 
     def to_dict(self) -> dict:
         """JSON-friendly form, for the stream output, the exported
@@ -1008,7 +1105,9 @@ class DriftClassification:
         ``acceleration_db_per_step`` is null when it was too short
         to slope either half, and ``long_history_readings`` is
         null when the classification was written before the
-        history length was carried."""
+        history length was carried, and ``window_span_m`` is null
+        when the classification was written before v0.79.0, which
+        first carried how much ground the window covers."""
         return {
             "id": self.id,
             "floor": self.floor,
@@ -1031,6 +1130,7 @@ class DriftClassification:
             "first_third_spread_db": self.first_third_spread_db,
             "acceleration_db_per_step": self.acceleration_db_per_step,
             "long_history_readings": self.long_history_readings,
+            "window_span_m": self.window_span_m,
         }
 
 
@@ -1042,7 +1142,23 @@ class DriftMonitor:
     was heard on, and the alarm and the classification read the
     window for the beacon's own floor by default, so a verdict on
     a multi-floor walk always rests on the beacon's own geometry
-    instead of whichever floor the window happens to cover;
+    instead of whichever floor the window happens to cover.
+    ``window_unit`` is what the window is measured in —
+    ``"readings"`` keeps the last ``window`` readings (the
+    default), ``"distance"`` keeps the readings covering the last
+    ``window_distance_m`` metres of walked path, so the window
+    covers the same ground however densely the walk is sampled —
+    and ``window_distance_m`` is that distance (24 m by default,
+    the ground the 20-reading window covers on the default walk).
+    The default stays readings: on the simulated walks a distance
+    window costs slow-sag detection (its mean is diluted by
+    fresher readings) without repairing the moved beacon on a
+    quadrupled loop, whose verdict rides the long-history route
+    either way — see the README v0.79.0 notes for the measured
+    comparison. A time window is not offered: on evenly-spaced
+    walks it holds exactly the last 20 readings, so its tallies
+    are identical to readings, and it would need timestamps the
+    monitor does not receive.
     ``drift_threshold_db`` is the mean residual that trips an alarm
     (5 dB by default, matching the survey health check);
     ``min_samples`` is how many readings a beacon needs in its
@@ -1071,6 +1187,8 @@ class DriftMonitor:
 
     def __init__(self, beacons: list[Beacon],
                  window: int = DEFAULT_WINDOW,
+                 window_unit: str = DEFAULT_WINDOW_UNIT,
+                 window_distance_m: float = DEFAULT_WINDOW_DISTANCE_M,
                  drift_threshold_db: float = DEFAULT_DRIFT_THRESHOLD_DB,
                  min_samples: int = DEFAULT_MIN_SAMPLES,
                  noise_db: float = DEFAULT_NOISE_DB,
@@ -1084,6 +1202,12 @@ class DriftMonitor:
             raise ValueError("drift monitor needs at least one beacon")
         if window < 1:
             raise ValueError("window must be at least 1")
+        if window_unit not in WINDOW_UNITS:
+            raise ValueError(
+                "window_unit must be one of "
+                f"{', '.join(WINDOW_UNITS)}: got {window_unit!r}")
+        if window_distance_m <= 0:
+            raise ValueError("window_distance_m must be positive")
         if drift_threshold_db <= 0:
             raise ValueError("drift_threshold_db must be positive")
         if min_samples < 1:
@@ -1118,6 +1242,9 @@ class DriftMonitor:
                 f"got long_window={long_window}, history={history}")
         self._beacons = {b.id: b for b in beacons}
         self._window = window
+        self._window_unit = window_unit
+        self._window_distance_m = window_distance_m
+        self._history_len = history
         self._long_window = long_window
         self._threshold = drift_threshold_db
         self._min_samples = min_samples
@@ -1161,6 +1288,23 @@ class DriftMonitor:
         deque when it was never heard there."""
         return self._observations[beacon_id].get(
             floor, deque(maxlen=self._window))
+
+    def _trim_window(self, window: deque[tuple[int, float, float, int,
+                                               float]]) -> None:
+        """Drop the oldest readings while the window spans more
+        than ``window_distance_m`` metres of walked path.
+
+        The comparison is strict: a span of exactly the size
+        keeps the readings, so a window whose oldest reading sits
+        exactly one size back is the whole window. On the default
+        walk the last 21 readings span 24.0 m in exact arithmetic
+        and 24.000000000000004 m as computed, so the 24 m window
+        holds exactly the 20 readings the count window holds
+        there — and the sweeps pin that.
+        """
+        while (len(window) > 1
+               and _window_span_m(window) > self._window_distance_m):
+            window.popleft()
 
     def _long_window_for(self, beacon_id: str, floor: int
                 ) -> deque[tuple[int, float, float, int, float]]:
@@ -1212,8 +1356,18 @@ class DriftMonitor:
             entry = (self._seq, x, y, floor, observed - predicted)
             windows = self._observations[beacon_id]
             if floor not in windows:
-                windows[floor] = deque(maxlen=self._window)
+                # In distance mode the count must never trim the
+                # window — the span does that — so the deque is
+                # bounded by the history instead, which a
+                # per-floor window can never exceed (it is a
+                # subset of the beacon's history).
+                windows[floor] = deque(maxlen=(
+                    self._history_len
+                    if self._window_unit == "distance"
+                    else self._window))
             windows[floor].append(entry)
+            if self._window_unit == "distance":
+                self._trim_window(windows[floor])
             long_windows = self._long_observations[beacon_id]
             if floor not in long_windows:
                 long_windows[floor] = deque(maxlen=self._long_window)
@@ -1255,6 +1409,8 @@ class DriftMonitor:
         return DriftMonitor(
             list(self._beacons.values()),
             window=self._window,
+            window_unit=self._window_unit,
+            window_distance_m=self._window_distance_m,
             drift_threshold_db=self._threshold,
             min_samples=self._min_samples,
             noise_db=self._noise_db,
@@ -1376,10 +1532,18 @@ class DriftMonitor:
                 mean_residual_db=0.0, residual_std_db=0.0,
                 time_slope_db_per_step=0.0, time_correlation=0.0,
                 revisit_delta_db=None, revisit_pairs=0, samples=0,
-                long_history_readings=0,
+                long_history_readings=0, window_span_m=None,
                 reason=f"beacon unheard on floor {floor} — no "
                        "readings to classify")
         residuals = [entry[4] for entry in window]
+        # How much ground the window covers — the walked path from
+        # its oldest reading to its newest, in metres, measured
+        # once and carried on every verdict below, so a verdict
+        # says how much ward it rests on: a 20-reading window
+        # spans 23.2 m at the end of the default walk but only
+        # 3.8 m at the end of a quadrupled one, while a distance
+        # window spans its size by construction.
+        window_span_m = _window_span_m(window)
         mean = _mean(residuals)
         std = _stdev(residuals)
         steps = list(range(samples))
@@ -1512,7 +1676,8 @@ class DriftMonitor:
                 mid_first_spread_growth_db=mid_first_growth,
                 first_third_spread_db=first_spread,
                 acceleration_db_per_step=acceleration,
-                long_history_readings=len(long_window))
+                long_history_readings=len(long_window),
+                window_span_m=window_span_m)
 
         if samples < self._min_samples:
             return result(

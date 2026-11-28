@@ -648,7 +648,10 @@ def _drift_classifications_from_dict(raw) -> list[dict]:
     defaults to null there too — and ``long_history_readings`` is
     the number of readings the floor's long history holds — a file
     written before v0.78.0 carries no history length at all, so it
-    defaults to null there too.
+    defaults to null there too — and ``window_span_m`` is how much
+    ground the window covers, in metres — a file written before
+    v0.79.0 carries no window span at all, so it defaults to null
+    there too.
     """
     if raw is None:
         return []
@@ -698,6 +701,9 @@ def _drift_classifications_from_dict(raw) -> list[dict]:
             "long_history_readings": (
                 None if c.get("long_history_readings") is None
                 else int(c["long_history_readings"])),
+            "window_span_m": (
+                None if c.get("window_span_m") is None
+                else float(c["window_span_m"])),
         }
         for c in raw
     ]

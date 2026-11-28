@@ -3319,6 +3319,296 @@ class TestDriftClassification(unittest.TestCase):
                     sum(1 for z in z_scores if abs(z) < 1.5),
                     want_inside, (sps, label))
 
+    def test_window_unit_is_validated_and_carried_by_fresh(self):
+        # The window's unit (v0.79.0): "readings" keeps the last
+        # ``window`` readings, "distance" keeps the readings
+        # covering the last ``window_distance_m`` metres of walked
+        # path. A time window is not offered — on evenly-spaced
+        # walks it holds exactly the last 20 readings, so its
+        # tallies are identical to readings, and it would need
+        # timestamps the monitor does not receive — so asking for
+        # it is rejected rather than silently behaving like
+        # readings. The distance must be positive, and ``fresh``
+        # carries the unit and the distance to each device's
+        # monitor, so a multi-device tracker does not silently
+        # fall back to readings for the second device.
+        with self.assertRaises(ValueError):
+            DriftMonitor(BEACONS, window_unit="time")
+        with self.assertRaises(ValueError):
+            DriftMonitor(BEACONS, window_unit="metres")
+        with self.assertRaises(ValueError):
+            DriftMonitor(BEACONS, window_unit="distance",
+                         window_distance_m=0.0)
+        with self.assertRaises(ValueError):
+            DriftMonitor(BEACONS, window_unit="distance",
+                         window_distance_m=-5.0)
+        monitor = DriftMonitor(BEACONS, window_unit="distance",
+                               window_distance_m=12.0)
+        fresh = monitor.fresh()
+        self.assertEqual(fresh._window_unit, "distance")
+        self.assertEqual(fresh._window_distance_m, 12.0)
+        self.assertEqual(fresh._window, 20)
+        default = DriftMonitor(BEACONS)
+        self.assertEqual(default._window_unit, "readings")
+        self.assertEqual(default._window_distance_m, 24.0)
+        self.assertEqual(default.fresh()._window_unit, "readings")
+
+    def test_window_span_m_is_carried_and_round_trips(self):
+        # The classification carries how much ground its window
+        # covers (v0.79.0): a 20-reading window spans 23.2 m at
+        # the end of the default walk but only 7.6 m on a doubled
+        # loop and 3.8 m on a quadrupled one — the collapse the
+        # v0.78.0 notes measured — while a 24 m distance window
+        # spans 24.0 m by construction on every length. The span
+        # rides the export rows like the other evidence, and a
+        # file written before v0.79.0 — with no window_span_m key
+        # at all — loads with it null instead of failing. A beacon
+        # never heard carries no window at all, so its span is
+        # null too.
+        for sps, want in ((10, 23.2), (20, 7.6), (40, 3.8)):
+            loop = rectangular_walk(20.0, 12.0, sps)
+            steps = simulate_walk(loop, BEACONS, noise_db=2.0, seed=7)
+            monitor = DriftMonitor(BEACONS)
+            for step in steps:
+                monitor.feed(step)
+            result = monitor.classify("D")
+            self.assertAlmostEqual(result.window_span_m, want,
+                                   places=1, msg=sps)
+            self.assertEqual(result.samples, 20)
+        # The distance window spans its size by construction — up
+        # to one step-gap under it, since the span is measured
+        # between the oldest and newest readings it holds: on the
+        # default walk the reading before the window sits 0.8 m
+        # back, so the span is 23.2 m, while on the denser walks
+        # the gap is smaller and the span reads 24.0 m.
+        for sps, want in ((10, 23.2), (20, 24.0), (40, 24.0)):
+            loop = rectangular_walk(20.0, 12.0, sps)
+            steps = simulate_walk(loop, BEACONS, noise_db=2.0, seed=7)
+            monitor = DriftMonitor(BEACONS, window_unit="distance")
+            for step in steps:
+                monitor.feed(step)
+            result = monitor.classify("D")
+            self.assertAlmostEqual(result.window_span_m, want,
+                                   places=1, msg=sps)
+        loop = rectangular_walk(20.0, 12.0, 10)
+        steps = simulate_walk(loop, BEACONS, noise_db=2.0, seed=7)
+        monitor = DriftMonitor(BEACONS)
+        for step in steps:
+            monitor.feed(step)
+        raw = [monitor.classify("D").to_dict()]
+        loaded = _drift_classifications_from_dict(raw)
+        self.assertEqual(len(loaded), 1)
+        self.assertAlmostEqual(loaded[0]["window_span_m"],
+                               raw[0]["window_span_m"])
+        old = [dict(raw[0])]
+        del old[0]["window_span_m"]
+        loaded_old = _drift_classifications_from_dict(old)
+        self.assertIsNone(loaded_old[0]["window_span_m"])
+        self.assertIsNone(DriftMonitor(BEACONS).classify("D")
+                          .window_span_m)
+
+    def test_distance_window_matches_readings_on_the_default_walk(self):
+        # The 24 m distance window holds exactly the last 20
+        # readings at the end of every default-density walk (the
+        # last 21 readings span 24.0 m in exact arithmetic, and
+        # the float sum lands just above it), so the pinned
+        # single-loop tallies stand unchanged under it — the
+        # verdicts, not just the totals: the window contents are
+        # identical, so every seed reads the same verdict under
+        # either unit. A future change that shifts these counts
+        # must update this test and the README deliberately, not
+        # silently.
+        moved = [Beacon(b.id, b.x, b.y) for b in BEACONS]
+        moved[3] = Beacon("D", 5.0, 7.0)
+
+        def tally(build, seeds):
+            counts = {}
+            for seed in seeds:
+                verdict = build(seed).classify("D").verdict
+                counts[verdict] = counts.get(verdict, 0) + 1
+            return counts
+
+        def walk(seed, beacons=None, **kwargs):
+            loop = rectangular_walk(20.0, 12.0, 10)
+            steps = simulate_walk(loop, beacons or BEACONS,
+                                  noise_db=2.0, seed=seed, **kwargs)
+            monitor = DriftMonitor(BEACONS, window_unit="distance")
+            for step in steps:
+                monitor.feed(step)
+            return monitor
+
+        slow_sag = {"D": BatteryModel(drain_rate_per_hour=0.3)}
+        for seeds, want_sag, want_moved in (
+                (range(1, 101),
+                 {"healthy": 98, "battery-sag": 2},
+                 {"moved": 91, "uncertain": 8, "noisy": 1}),
+                (range(101, 201),
+                 {"healthy": 94, "uncertain": 2, "battery-sag": 4},
+                 {"moved": 89, "uncertain": 10, "noisy": 1})):
+            self.assertEqual(
+                tally(lambda s: walk(
+                    s, batteries=slow_sag, step_seconds=120.0),
+                    seeds),
+                want_sag, seeds)
+            self.assertEqual(
+                tally(lambda s: walk(s, beacons=moved), seeds),
+                want_moved, seeds)
+
+    def test_distance_window_tallies_on_longer_walks(self):
+        # The distance window, measured (v0.79.0): 2 dB RSSI
+        # noise, beacon D, seeds 1-100 and 101-200. On a doubled
+        # loop it reads the move better (95/98 against 92/84 —
+        # the 20-reading window spans only 7.6 m there, so the
+        # move's spread flukes past the noisy gate on 8/14 seeds,
+        # while the 24 m window spans the north and west sides
+        # and its spread stays under it) and the noisy beacon
+        # cleaner (99/98 noisy, one battery-sag misread each
+        # sample, against 88/94 and 3/1) — but it costs slow
+        # sags (74/84 against 82/86: the wider window's mean is
+        # diluted by fresher readings, the mean leg falling 90
+        # to 82 in-sample) and fast sags (45/52 against 49/62:
+        # the window holds all 24 heard readings, including the
+        # first four fresh ones, instead of the last 20). On a
+        # quadrupled loop the slow sag falls further (89/96
+        # against 99/98) and the alarm with it — 0 alarms on
+        # either sample, against 28 and 34, because the mean over
+        # the last 24 m never reaches 5 dB — while the move does
+        # not move at all (35/40, the same seeds as under
+        # readings: the verdict rides the long-history route and
+        # the binding constraint is the 5-pair revisit delta,
+        # which no window unit touches). The healthy walk stays
+        # healthy and the steady offset stays uncertain at every
+        # length, so the wider window invents nothing. The fast
+        # sag is pinned on the doubled loop only: it goes dark
+        # at step 24, so the quadrupled loop adds no readings
+        # and reads the same tallies there.
+        moved = [Beacon(b.id, b.x, b.y) for b in BEACONS]
+        moved[3] = Beacon("D", 5.0, 7.0)
+
+        def tally(build, seeds=range(1, 101)):
+            counts = {}
+            alarms = 0
+            for seed in seeds:
+                monitor = build(seed)
+                verdict = monitor.classify("D").verdict
+                counts[verdict] = counts.get(verdict, 0) + 1
+                if monitor.is_alarming("D"):
+                    alarms += 1
+            return counts, alarms
+
+        def walk(seed, sps, beacons=None, **kwargs):
+            loop = rectangular_walk(20.0, 12.0, sps)
+            steps = simulate_walk(loop, beacons or BEACONS,
+                                  noise_db=2.0, seed=seed, **kwargs)
+            monitor = DriftMonitor(BEACONS, window_unit="distance")
+            for step in steps:
+                monitor.feed(step)
+            return monitor
+
+        def offset(seed, sps, delta_db):
+            loop = rectangular_walk(20.0, 12.0, sps)
+            steps = simulate_walk(loop, BEACONS, noise_db=2.0,
+                                  seed=seed)
+            for step in steps:
+                step["rssi"]["D"] += delta_db
+            monitor = DriftMonitor(BEACONS, window_unit="distance")
+            for step in steps:
+                monitor.feed(step)
+            return monitor
+
+        def noisy(seed, sps):
+            loop = rectangular_walk(20.0, 12.0, sps)
+            steps = simulate_walk(loop, BEACONS, noise_db=2.0,
+                                  seed=seed)
+            rng = random.Random(seed + 1000)
+            for step in steps:
+                step["rssi"]["D"] += rng.gauss(0.0, 5.0)
+            monitor = DriftMonitor(BEACONS, window_unit="distance")
+            for step in steps:
+                monitor.feed(step)
+            return monitor
+
+        slow_sag = {"D": BatteryModel(drain_rate_per_hour=0.3)}
+        fast_sag = {"D": BatteryModel(drain_rate_per_hour=1.2)}
+        expected = {
+            # (sps, scenario, sample): (counts, alarms)
+            (20, "slow_sag", "in"): (
+                {"battery-sag": 74, "uncertain": 6, "healthy": 13,
+                 "noisy": 7}, 0),
+            (20, "slow_sag", "out"): (
+                {"battery-sag": 84, "healthy": 9, "noisy": 3,
+                 "uncertain": 4}, 0),
+            (20, "fast_sag", "in"): (
+                {"battery-sag": 45, "healthy": 39, "noisy": 13,
+                 "uncertain": 3}, 0),
+            (20, "fast_sag", "out"): (
+                {"healthy": 35, "uncertain": 4, "battery-sag": 52,
+                 "noisy": 9}, 0),
+            (20, "moved", "in"): ({"moved": 95, "uncertain": 5}, 0),
+            (20, "moved", "out"): ({"moved": 98, "uncertain": 2}, 0),
+            (20, "noisy", "in"): ({"noisy": 99, "battery-sag": 1}, 0),
+            (20, "noisy", "out"): (
+                {"noisy": 98, "battery-sag": 1, "healthy": 1}, 0),
+            (20, "healthy", "in"): ({"healthy": 100}, 0),
+            (20, "healthy", "out"): ({"healthy": 100}, 0),
+            (20, "offset", "in"): ({"uncertain": 100}, 100),
+            (20, "offset", "out"): ({"uncertain": 100}, 100),
+            (40, "slow_sag", "in"): (
+                {"battery-sag": 89, "healthy": 6, "noisy": 5}, 0),
+            (40, "slow_sag", "out"): (
+                {"battery-sag": 96, "uncertain": 1, "noisy": 1,
+                 "healthy": 2}, 0),
+            (40, "moved", "in"): ({"moved": 35, "uncertain": 65}, 0),
+            (40, "moved", "out"): ({"moved": 40, "uncertain": 60}, 0),
+            (40, "noisy", "in"): ({"noisy": 100}, 0),
+            (40, "noisy", "out"): ({"noisy": 100}, 0),
+            (40, "healthy", "in"): ({"healthy": 100}, 0),
+            (40, "healthy", "out"): ({"healthy": 100}, 0),
+            (40, "offset", "in"): (
+                {"uncertain": 99, "battery-sag": 1}, 100),
+            (40, "offset", "out"): ({"uncertain": 100}, 100),
+        }
+        builders = {
+            "slow_sag": lambda s, sps: walk(
+                s, sps, batteries=slow_sag, step_seconds=120.0),
+            "fast_sag": lambda s, sps: walk(
+                s, sps, batteries=fast_sag, step_seconds=120.0),
+            "moved": lambda s, sps: walk(s, sps, beacons=moved),
+            "noisy": noisy,
+            "healthy": lambda s, sps: walk(s, sps),
+            "offset": lambda s, sps: offset(s, sps, -6.0),
+        }
+        for (sps, scenario, sample), (want, want_alarms) in \
+                expected.items():
+            seeds = (range(1, 101) if sample == "in"
+                     else range(101, 201))
+            counts, alarms = tally(
+                lambda s: builders[scenario](s, sps), seeds)
+            self.assertEqual(counts, want, (sps, scenario, sample))
+            self.assertEqual(alarms, want_alarms,
+                             (sps, scenario, sample))
+        # The quadrupled-loop move, per seed: the distance
+        # window changes no verdict at all — 0 of 200 seeds read
+        # differently under readings — because the verdict rides
+        # the long-history route in both modes and the binding
+        # constraint is the 5-pair revisit delta, which the
+        # window's unit does not touch.
+        for seed in list(range(1, 101)) + list(range(101, 201)):
+            loop = rectangular_walk(20.0, 12.0, 40)
+            steps = simulate_walk(loop, moved, noise_db=2.0,
+                                  seed=seed)
+            verdicts = {}
+            for unit in ("readings", "distance"):
+                monitor = DriftMonitor(
+                    BEACONS,
+                    **({"window_unit": unit}
+                       if unit == "distance" else {}))
+                for step in steps:
+                    monitor.feed(step)
+                verdicts[unit] = monitor.classify("D").verdict
+            self.assertEqual(verdicts["readings"],
+                             verdicts["distance"], seed)
+
     def test_early_delta_gate_keeps_true_sag_on_thin_early_evidence(self):
         # The pair-count minimum, pinned by seed: the true slow
         # sag on seed 105 (out of sample) has a POSITIVE early
