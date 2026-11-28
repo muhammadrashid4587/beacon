@@ -5184,3 +5184,132 @@ single-loop slow sag, a measured limit of this evidence,
 pending longer walks. The roadmap grows as new needs
 surface — the beacon being noisy from the start is the
 latest addition.
+
+## The decline barely steepens on one loop
+
+The v0.76.0 notes left the single-loop slow sag, and v0.77.0
+measures it with fresh discriminators instead of tuning past
+it. On one loop there are no revisits (0–1 pairs), so only the
+fallback route can fire, and its three legs almost never pass
+together — the v0.75.0 gate-by-gate counts still stand: the
+short-window mean clears -1.5 dB on only 4 of 100 seeds, the
+trend leg (long slope below -0.15 dB per reading, or the second
+half 1.5 dB below the first) on 7, and the level drop below
+-1.0 dB at 1.5 standard errors on 21 — all three at once on
+exactly 1. The new measurement adds the other scenarios' legs
+to the same table, seeds 1–100, single loop:
+
+| scenario | mean | trend | drop | all three |
+|---|---|---|---|---|
+| healthy | 0 | 0 | 8 | 0 |
+| D slow sag, 0.3/hr | 4 | 7 | 21 | 1 |
+| D fast sag, 1.2/hr | 73 | 84 | 65 | 49 |
+| D steady -6 dB offset | 100 | 0 | 8 | 0 |
+| D with 5 dB extra noise | 9 | 14 | 5 | 3 |
+
+The mean is not the slow sag's bottleneck, whatever it looks
+like: relaxing it to -1.0 dB with the current trend leg leaves
+the slow sag at 1 in-sample and 3 out-of-sample — the
+trend-plus-drop intersection is the bottleneck, not the mean —
+while the fast sag gains 7 in-sample (49 to 56) and 7
+out-of-sample. Ten candidate trend legs were measured as
+replacements for that leg, keeping the mean and drop gates,
+in-sample and out-of-sample on the pinned seed sweeps, on one
+loop and two:
+
+- The acceleration — the second half's slope minus the first
+  half's, the steepening a quadratic sag must show: at 0.0 dB
+  per reading the slow sag reads 1 to 2 in-sample and stays 3
+  out-of-sample, but the fast sag falls 49 to 35 in-sample and
+  61 to 42 out-of-sample, and the steady offset misreads 6
+  in-sample and 4 out-of-sample (was 0 and 1). At -0.05 the
+  slow sag gains nothing and the fast sag still falls 16 and
+  20; at -0.15 the slow sag falls out-of-sample, 3 to 1.
+- The late slope — the slope over the last 20 readings, where
+  the sag is steepest: at -0.15 dB per reading the slow sag is
+  unchanged (1 in-sample, 1 out-of-sample) and the fast sag
+  falls 4 and 2, with 2 offset misreads in-sample; at -0.20
+  the slow sag reads 0 in-sample.
+- The Spearman rank correlation, the trend leg made robust to
+  noise excursions: at -0.3 the slow sag is unchanged
+  in-sample and gains one out-of-sample (3 to 4), but the fast
+  sag falls 4 in-sample and the offset misreads 2 in-sample
+  and 3 out-of-sample; at -0.4 the slow sag reads 0
+  in-sample.
+- The block-max decline — the largest fall between consecutive
+  10-reading block means, the sag's decline concentrated in
+  one step: at -1.0 dB the slow sag reads 1 to 3 in-sample
+  and 3 to 4 out-of-sample, the best slow-sag gain measured —
+  but the fast sag falls 6 in-sample (49 to 43) and the steady
+  offset misreads 7 in-sample and 4 out-of-sample, and it
+  gains seeds 10 and 94 in-sample against offset misreads on
+  seeds 8, 38, 53, 57, 62, 77 and 84. At -1.5 dB the gain
+  shrinks to 2 and 4 against 4 and 3 offset misreads.
+- The quadratic t-stat as the trend leg: the slow sag is
+  unchanged in-sample and falls to 0 out-of-sample, while the
+  fast sag collapses 49 to 11 in-sample and 61 to 7
+  out-of-sample — the quadratic fit on 40 readings is noise,
+  and the fast sag's plateaued loss is not quadratic at all.
+- The late decline as the trend leg: the slow sag reads 1 to
+  2 in-sample and stays 3 out-of-sample, but the fast sag
+  falls 5 in-sample and the offset misreads 2 on each sample.
+- The current leg OR the acceleration at -0.10: the slow sag
+  is unchanged on both samples, and the offset misreads 2 on
+  each — an OR can only add misreads when the new leg fires
+  on offsets as often as on sags.
+- A composite z-score — the slope's z plus the drop's z, a
+  linear discriminant instead of AND gates: at -3.0 the slow
+  sag reads 1 to 3 in-sample and 3 to 4 out-of-sample at no
+  cost to the fast sag, but the steady offset misreads 7
+  in-sample and 5 out-of-sample.
+- The mean relaxed to -1.0 dB with the composite z-score at
+  -3.0: the slow sag reads 1 to 8 in-sample and 3 to 5
+  out-of-sample, the biggest gain measured — but the offset
+  misreads 7 in-sample and 5 out-of-sample, a healthy walk
+  misreads out-of-sample, and the noisy beacon's misreads
+  rise 1 to 5 out-of-sample. The same trade with the block-max
+  decline at -1.0 dB: slow 1 to 9 in-sample and 3 to 5
+  out-of-sample, against 7 and 4 offset misreads, 1 healthy
+  misread out-of-sample, and the noisy beacon 1 to 5
+  out-of-sample.
+
+The trap is structural, and the new numbers show it exactly.
+An offset's trend statistics are identical to a healthy walk's
+by construction — adding a constant shifts no slope, drop or
+correlation — and the distributions are literally the same
+numbers: the acceleration's median is -0.019 dB per reading on
+both, the Spearman correlation +0.009 on both, the late slope
+-0.002 on both, the quadratic t-stat +0.012 on both, the
+composite z-score +0.04 on both, with identical ranges. So
+any trend-leg relaxation fires on offsets at the same rate it
+fires on sags, and the offset's mean (-6 dB) passes every mean
+gate — the offset is the healthy walk with a level, and no
+statistic built from the trend can tell them apart. The
+acceleration is the cleanest statement of it: the slow sag's
+median is -0.055 dB per reading in-sample (-0.025 over seeds
+1–200) against the healthy walk's -0.019 (-0.001 over 200),
+62 of 100 sag seeds sit at or below zero against 57 of 100
+healthy, and 35 against 25 below -0.10 — the sag's whole
+steepening is about 0.02 dB per reading against about 0.2 dB
+per reading of noise in the difference of two half-slopes,
+about 0.15 standard errors of signal. Every candidate that
+touched the fallback also moved the two-loop fast sag — it
+goes dark at step 24, so it falls through the fallback on two
+loops too — while the two-loop slow sag stayed 84 in-sample
+and 85 out-of-sample under every candidate: the fallback is
+shared, and the slow sag's single-loop evidence is the same
+evidence the two-loop walk already settles.
+
+The classification now carries the acceleration as
+`acceleration_db_per_step`, and the export round-trips it (a
+file written before v0.77.0 loads with it null).
+
+Measured behaviour (v0.77.0): 2 dB RSSI noise, beacon D — no
+verdict changes anywhere, on any loop count, on either sample;
+every pinned tally stands exactly as v0.76.0 left it,
+including the single-loop slow sag at 1/100 in-sample and
+3/100 out-of-sample, now pinned out-of-sample in the test
+suite too. The next item is the single-loop slow sag, a
+measured limit of this evidence, pending longer walks. The
+roadmap grows as new needs surface — the decline barely
+steepening on one loop is the latest addition.

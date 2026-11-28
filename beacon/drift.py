@@ -748,6 +748,34 @@ def _first_spread(entries: list[tuple[int, float, float, int, float]]
     return spread, se
 
 
+def _acceleration(entries: list[tuple[int, float, float, int, float]]
+                  ) -> float | None:
+    """How much the residual decline steepened across ``entries``.
+
+    The least-squares slope of the second half of the readings
+    minus that of the first half — or ``None`` when there are too
+    few readings to slope either half (fewer than four, so under
+    two per half). A draining battery's loss grows with the square
+    of the charge used, so its decline steepens as the walk goes
+    on — the second half falls faster than the first — while a
+    steady offset's slope is pure noise in both halves, so its
+    acceleration is centred on zero whatever its level does. The
+    standard error of a half-slope on 20 readings at 2 dB noise is
+    about 0.15 dB per reading, so the difference of two carries
+    about 0.2 dB per reading of noise against a slow sag's whole
+    acceleration of about 0.02 dB per reading — the statistic is
+    carried for inspection, not gated on.
+    """
+    if len(entries) < 4:
+        return None
+    half = len(entries) // 2
+    first = [entry[4] for entry in entries[:half]]
+    second = [entry[4] for entry in entries[half:]]
+    slope_first = _slope(list(range(len(first))), first)
+    slope_second = _slope(list(range(len(second))), second)
+    return slope_second - slope_first
+
+
 def _spread_above_noise(std: float, samples: int, noise_db: float,
                         min_t: float = MOVED_LONG_SPREAD_MIN_T) -> bool:
     """Whether a residual spread is real excess over the expected noise.
@@ -895,7 +923,20 @@ class DriftClassification:
     from reading as a sag through the short window, since a dying
     battery starts fresh and only gets noisy as it drains, while
     a noisy beacon already spreads past twice the expected noise
-    in its first third; ``samples`` is the window size;
+    in its first third; ``acceleration_db_per_step`` is how much
+    the residual decline steepened across the history — the second
+    half's slope minus the first half's (None when the history is
+    too short to slope either half) — the number that says whether
+    the decline accelerates the way a draining battery's must: the
+    loss grows with the square of the charge used, so a sag's
+    second half falls faster than its first, while a steady
+    offset's slopes are pure noise in both halves. On a single
+    loop the acceleration carries about 0.15 standard errors of
+    signal — the sag's whole steepening is about 0.02 dB per
+    reading against about 0.2 dB per reading of noise in the
+    difference of two half-slopes — so no gate on it can call the
+    sag without also calling noise, and it is carried for
+    inspection, not gated on; ``samples`` is the window size;
     ``reason`` says in words why this verdict was reached.
     """
 
@@ -917,6 +958,7 @@ class DriftClassification:
     early_revisit_delta_db: float | None = None
     mid_first_spread_growth_db: float | None = None
     first_third_spread_db: float | None = None
+    acceleration_db_per_step: float | None = None
 
     def to_dict(self) -> dict:
         """JSON-friendly form, for the stream output, the exported
@@ -933,7 +975,9 @@ class DriftClassification:
         ``mid_first_spread_growth_db`` is null when it was too
         short to estimate a spread per third, and
         ``first_third_spread_db`` is null when it was too short
-        to estimate a spread per third."""
+        to estimate a spread per third, and
+        ``acceleration_db_per_step`` is null when it was too short
+        to slope either half."""
         return {
             "id": self.id,
             "floor": self.floor,
@@ -954,6 +998,7 @@ class DriftClassification:
             "mid_first_spread_growth_db":
                 self.mid_first_spread_growth_db,
             "first_third_spread_db": self.first_third_spread_db,
+            "acceleration_db_per_step": self.acceleration_db_per_step,
         }
 
 
@@ -1365,6 +1410,17 @@ class DriftMonitor:
         # twice the expected noise, the same boundary the noisy
         # verdict uses.
         first_spread, _first_se = _first_spread(long_window)
+        # The acceleration across the floor's long history — the
+        # second half's slope minus the first half's, measured once
+        # and carried on the classification for inspection. A
+        # draining battery's loss grows with the square of the
+        # charge used, so its decline steepens as the walk goes
+        # on; a steady offset's slopes are pure noise in both
+        # halves. The standard error rides along for inspection
+        # (and for tests) — the statistic is not gated on, since
+        # on a single loop it carries about 0.15 standard errors
+        # of signal.
+        acceleration = _acceleration(long_window)
         # The early revisit delta across the floor's long history —
         # the mean paired delta over the first two-thirds of the
         # history, the part before the late interval, measured once
@@ -1421,7 +1477,8 @@ class DriftMonitor:
                 spread_growth_db=spread_growth,
                 early_revisit_delta_db=early_delta,
                 mid_first_spread_growth_db=mid_first_growth,
-                first_third_spread_db=first_spread)
+                first_third_spread_db=first_spread,
+                acceleration_db_per_step=acceleration)
 
         if samples < self._min_samples:
             return result(

@@ -642,7 +642,10 @@ def _drift_classifications_from_dict(raw) -> list[dict]:
     ``first_third_spread_db`` is null when the history was too
     short to estimate a spread per third — a file written before
     v0.76.0 carries no first-third spread at all, so it defaults
-    to null there too.
+    to null there too — and ``acceleration_db_per_step`` is null
+    when the history was too short to slope either half — a file
+    written before v0.77.0 carries no acceleration at all, so it
+    defaults to null there too.
     """
     if raw is None:
         return []
@@ -686,6 +689,9 @@ def _drift_classifications_from_dict(raw) -> list[dict]:
             "first_third_spread_db": (
                 None if c.get("first_third_spread_db") is None
                 else float(c["first_third_spread_db"])),
+            "acceleration_db_per_step": (
+                None if c.get("acceleration_db_per_step") is None
+                else float(c["acceleration_db_per_step"])),
         }
         for c in raw
     ]

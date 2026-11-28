@@ -2763,6 +2763,67 @@ class TestDriftClassification(unittest.TestCase):
         self.assertEqual(
             sum(1 for z in z_scores if abs(z) < 1.5), 77)
 
+    def test_acceleration_db_per_step_pins_single_loop_slow_sag_limit(
+            self):
+        # The single-loop slow sag, measured with fresh
+        # discriminators (v0.77.0): the classification now carries
+        # the acceleration — the second half's slope minus the
+        # first half's over the long history — the statistic that
+        # tests whether the decline steepens the way a draining
+        # battery's must. It barely separates at all: on one loop
+        # the slow sag's median acceleration is -0.055 dB per
+        # reading against a healthy walk's -0.019, 62 of 100 sag
+        # seeds sit at or below zero against 57 of 100 healthy,
+        # and 35 against 25 below -0.10 — the sag's whole
+        # steepening is about 0.02 dB per reading against about
+        # 0.2 dB per reading of noise in the difference of two
+        # half-slopes, so no gate on it can call the sag without
+        # also calling noise, and it is carried for inspection,
+        # not gated on. A history too short to slope either half
+        # carries it null.
+        sag_accels = []
+        healthy_accels = []
+        for seed in range(1, 101):
+            loop = rectangular_walk(20.0, 12.0, 10)
+            for batteries, accels in (
+                    ({"D": BatteryModel(
+                        drain_rate_per_hour=0.3)}, sag_accels),
+                    (None, healthy_accels)):
+                steps = simulate_walk(
+                    loop, BEACONS, noise_db=2.0, seed=seed,
+                    batteries=batteries, step_seconds=120.0) \
+                    if batteries else simulate_walk(
+                        loop, BEACONS, noise_db=2.0, seed=seed)
+                monitor = DriftMonitor(BEACONS)
+                for step in steps:
+                    monitor.feed(step)
+                result = monitor.classify("D")
+                self.assertIsNotNone(
+                    result.acceleration_db_per_step, seed)
+                accels.append(result.acceleration_db_per_step)
+        sag_ordered = sorted(sag_accels)
+        sag_median = (sag_ordered[49] + sag_ordered[50]) / 2
+        self.assertAlmostEqual(sag_median, -0.06, places=2)
+        self.assertEqual(
+            sum(1 for a in sag_accels if a <= 0.0), 62)
+        self.assertEqual(
+            sum(1 for a in sag_accels if a <= -0.10), 35)
+        healthy_ordered = sorted(healthy_accels)
+        healthy_median = (healthy_ordered[49] + healthy_ordered[50]) / 2
+        self.assertAlmostEqual(healthy_median, -0.02, places=2)
+        self.assertEqual(
+            sum(1 for a in healthy_accels if a <= 0.0), 57)
+        self.assertEqual(
+            sum(1 for a in healthy_accels if a <= -0.10), 25)
+        # A history too short to slope either half carries it
+        # null: two readings, under the four the split needs.
+        loop = rectangular_walk(20.0, 12.0, 10)
+        steps = simulate_walk(loop[:2], BEACONS, noise_db=2.0, seed=7)
+        monitor = DriftMonitor(BEACONS)
+        for step in steps:
+            monitor.feed(step)
+        self.assertIsNone(monitor.classify("D").acceleration_db_per_step)
+
     def test_level_drop_se_db_round_trips_through_export(self):
         # The classification's drop standard error rides the
         # export rows like the level drop itself does, and a
@@ -2814,6 +2875,115 @@ class TestDriftClassification(unittest.TestCase):
         del old[0]["first_third_spread_db"]
         loaded_old = _drift_classifications_from_dict(old)
         self.assertIsNone(loaded_old[0]["first_third_spread_db"])
+
+    def test_acceleration_db_per_step_round_trips_through_export(self):
+        # The classification's acceleration rides the export rows
+        # like the first-third spread does, and a file written
+        # before v0.77.0 — with no acceleration_db_per_step key
+        # at all — loads with it null instead of failing.
+        loop = rectangular_walk(20.0, 12.0, 10)
+        steps = simulate_walk(
+            loop, BEACONS, noise_db=2.0, seed=7,
+            batteries={"D": BatteryModel(
+                drain_rate_per_hour=0.3)}, step_seconds=120.0)
+        monitor = DriftMonitor(BEACONS)
+        for step in steps:
+            monitor.feed(step)
+        raw = [monitor.classify("D").to_dict()]
+        loaded = _drift_classifications_from_dict(raw)
+        self.assertEqual(len(loaded), 1)
+        self.assertAlmostEqual(
+            loaded[0]["acceleration_db_per_step"],
+            raw[0]["acceleration_db_per_step"])
+        self.assertAlmostEqual(
+            raw[0]["acceleration_db_per_step"], -0.072, places=3)
+        old = [dict(raw[0])]
+        del old[0]["acceleration_db_per_step"]
+        loaded_old = _drift_classifications_from_dict(old)
+        self.assertIsNone(loaded_old[0]["acceleration_db_per_step"])
+
+    def test_single_loop_out_of_sample_sweep_pins_verdict_counts(self):
+        # The single-loop tallies out of sample (v0.77.0): seeds
+        # 101-200, never used to tune the gates. The slow sag
+        # stays barely detected (3 of 100, against 1 in-sample),
+        # the fast sag reads battery-sag on 61, and the steady
+        # -6 dB offset misreads as battery-sag on exactly one
+        # seed — the same single misread the in-sample sweep
+        # used to carry, repaired there in v0.71.0. A future
+        # change that shifts these counts must update this test
+        # and the README deliberately, not silently.
+        moved = [Beacon(b.id, b.x, b.y) for b in BEACONS]
+        moved[3] = Beacon("D", 5.0, 7.0)
+        small_moved = [Beacon(b.id, b.x, b.y) for b in BEACONS]
+        small_moved[3] = Beacon("D", 1.0, 11.0)
+
+        def tally(build):
+            counts = {}
+            for seed in range(101, 201):
+                verdict = build(seed).classify("D").verdict
+                counts[verdict] = counts.get(verdict, 0) + 1
+            return counts
+
+        def one_loop(seed, beacons=None, **kwargs):
+            loop = rectangular_walk(20.0, 12.0, 10)
+            steps = simulate_walk(loop, beacons or BEACONS,
+                                  noise_db=2.0, seed=seed, **kwargs)
+            monitor = DriftMonitor(BEACONS)
+            for step in steps:
+                monitor.feed(step)
+            return monitor
+
+        def offset(seed, delta_db):
+            loop = rectangular_walk(20.0, 12.0, 10)
+            steps = simulate_walk(loop, BEACONS, noise_db=2.0,
+                                  seed=seed)
+            for step in steps:
+                step["rssi"]["D"] += delta_db
+            monitor = DriftMonitor(BEACONS)
+            for step in steps:
+                monitor.feed(step)
+            return monitor
+
+        def noisy(seed):
+            loop = rectangular_walk(20.0, 12.0, 10)
+            steps = simulate_walk(loop, BEACONS,
+                                  noise_db=2.0, seed=seed)
+            rng = random.Random(seed + 1000)
+            for step in steps:
+                step["rssi"]["D"] += rng.gauss(0.0, 5.0)
+            monitor = DriftMonitor(BEACONS)
+            for step in steps:
+                monitor.feed(step)
+            return monitor
+
+        slow_sag = {"D": BatteryModel(drain_rate_per_hour=0.3)}
+        fast_sag = {"D": BatteryModel(drain_rate_per_hour=1.2)}
+        self.assertEqual(tally(lambda s: one_loop(s)),
+                         {"healthy": 100})
+        self.assertEqual(
+            tally(lambda s: one_loop(
+                s, batteries=slow_sag, step_seconds=120.0)),
+            {"battery-sag": 3, "healthy": 95, "uncertain": 2})
+        self.assertEqual(
+            tally(lambda s: one_loop(
+                s, batteries=fast_sag, step_seconds=120.0)),
+            {"battery-sag": 61, "healthy": 21, "noisy": 13,
+             "uncertain": 5})
+        self.assertEqual(
+            tally(lambda s: offset(s, -6.0)),
+            {"battery-sag": 1, "uncertain": 99})
+        self.assertEqual(
+            tally(lambda s: offset(s, 6.0)),
+            {"moved": 1, "uncertain": 99})
+        self.assertEqual(tally(noisy),
+                         {"battery-sag": 1, "healthy": 8,
+                          "moved": 1, "noisy": 90})
+        self.assertEqual(
+            tally(lambda s: one_loop(s, beacons=moved)),
+            {"moved": 89, "noisy": 1, "uncertain": 10})
+        self.assertEqual(
+            tally(lambda s: one_loop(s, beacons=small_moved)),
+            {"healthy": 22, "moved": 17, "uncertain": 61})
 
     def test_early_delta_gate_keeps_true_sag_on_thin_early_evidence(self):
         # The pair-count minimum, pinned by seed: the true slow
