@@ -342,9 +342,28 @@ SAG_DELTA_MAX_DB = -1.0
 SAG_DELTA_MIN_T = -1.5
 
 # Without revisits, a decline this steep (dB per reading) or this
-# large between the window's halves counts as a sag.
+# large between the window's halves counts as a sag. The half-delta
+# gate is -1.0 dB, the same magnitude as the level-drop gate
+# below — both are level differences between two halves of the
+# history, not slopes — and the longer walks are what earned it:
+# on a single loop the slow sag's whole fall is under 1 dB, so the
+# old -1.5 dB gate passed only 7 of 100 seeds, while on a doubled
+# loop the fall is ~2.7 dB and the same gate passes 68; relaxing
+# the gate to -1.0 dB passes the trend leg on 92 of 100 (93 out
+# of sample), and all three fallback legs together read 82 of
+# 100 on the doubled loop (86 out of sample) and 2 on the single
+# loop (4 out of sample), at the cost of one more steady-offset
+# misread (seed 186, single loop, out of sample — seed 144
+# already misread there) and two more noisy-beacon misreads
+# (seeds 19 and 83, doubled loop, in sample). A -1.25 dB gate
+# would gain less (75/76) for the same noisy cost and is a fitted
+# midpoint with no meaning; -0.75 dB costs five offset misreads.
+# The slope leg is unchanged: at -0.15 dB per reading it never
+# fires on a slow sag over 80 readings (the whole fall is ~3.8
+# dB, about -0.05 per reading), so the trend leg rests on the
+# half-delta alone there.
 SAG_SLOPE_MAX_DB_PER_STEP = -0.15
-SAG_HALF_DELTA_MAX_DB = -1.5
+SAG_HALF_DELTA_MAX_DB = -1.0
 
 # A sag is a process, not a level: the beacon's residual must
 # actually fall across the walk — the mean of the last quarter of
@@ -936,8 +955,17 @@ class DriftClassification:
     reading against about 0.2 dB per reading of noise in the
     difference of two half-slopes — so no gate on it can call the
     sag without also calling noise, and it is carried for
-    inspection, not gated on; ``samples`` is the window size;
-    ``reason`` says in words why this verdict was reached.
+    inspection, not gated on; ``long_history_readings`` is how
+    many readings the floor's long history holds — the history
+    the level drop, the late decline, the spread gates and the
+    fallback trend all read, against the short window's
+    ``samples`` — so a verdict says how much walk it rests on:
+    40 readings on a single loop of the default walk, 80 on a
+    doubled loop, 96 when a draining beacon goes dark part-way
+    through a quadrupled one. A longer walk is more evidence,
+    not a sharper threshold, and the count is what makes that
+    visible; ``samples`` is the window size; ``reason`` says in
+    words why this verdict was reached.
     """
 
     id: str
@@ -959,6 +987,7 @@ class DriftClassification:
     mid_first_spread_growth_db: float | None = None
     first_third_spread_db: float | None = None
     acceleration_db_per_step: float | None = None
+    long_history_readings: int | None = None
 
     def to_dict(self) -> dict:
         """JSON-friendly form, for the stream output, the exported
@@ -977,7 +1006,9 @@ class DriftClassification:
         ``first_third_spread_db`` is null when it was too short
         to estimate a spread per third, and
         ``acceleration_db_per_step`` is null when it was too short
-        to slope either half."""
+        to slope either half, and ``long_history_readings`` is
+        null when the classification was written before the
+        history length was carried."""
         return {
             "id": self.id,
             "floor": self.floor,
@@ -999,6 +1030,7 @@ class DriftClassification:
                 self.mid_first_spread_growth_db,
             "first_third_spread_db": self.first_third_spread_db,
             "acceleration_db_per_step": self.acceleration_db_per_step,
+            "long_history_readings": self.long_history_readings,
         }
 
 
@@ -1344,6 +1376,7 @@ class DriftMonitor:
                 mean_residual_db=0.0, residual_std_db=0.0,
                 time_slope_db_per_step=0.0, time_correlation=0.0,
                 revisit_delta_db=None, revisit_pairs=0, samples=0,
+                long_history_readings=0,
                 reason=f"beacon unheard on floor {floor} — no "
                        "readings to classify")
         residuals = [entry[4] for entry in window]
@@ -1478,7 +1511,8 @@ class DriftMonitor:
                 early_revisit_delta_db=early_delta,
                 mid_first_spread_growth_db=mid_first_growth,
                 first_third_spread_db=first_spread,
-                acceleration_db_per_step=acceleration)
+                acceleration_db_per_step=acceleration,
+                long_history_readings=len(long_window))
 
         if samples < self._min_samples:
             return result(

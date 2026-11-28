@@ -645,6 +645,9 @@ def _drift_classifications_from_dict(raw) -> list[dict]:
     to null there too — and ``acceleration_db_per_step`` is null
     when the history was too short to slope either half — a file
     written before v0.77.0 carries no acceleration at all, so it
+    defaults to null there too — and ``long_history_readings`` is
+    the number of readings the floor's long history holds — a file
+    written before v0.78.0 carries no history length at all, so it
     defaults to null there too.
     """
     if raw is None:
@@ -692,6 +695,9 @@ def _drift_classifications_from_dict(raw) -> list[dict]:
             "acceleration_db_per_step": (
                 None if c.get("acceleration_db_per_step") is None
                 else float(c["acceleration_db_per_step"])),
+            "long_history_readings": (
+                None if c.get("long_history_readings") is None
+                else int(c["long_history_readings"])),
         }
         for c in raw
     ]

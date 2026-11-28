@@ -2063,7 +2063,12 @@ class TestDriftClassification(unittest.TestCase):
         # (144, pinned above), down from 3, while the fast sag
         # is unchanged at 61 and the slow sag loses one of its
         # four single-loop detections (seed 185, whose longer
-        # history is quiet) and reads healthy instead.
+        # history is quiet) and reads healthy instead. The
+        # v0.78.0 half-delta retune (-1.5 dB to -1.0 dB) moves
+        # all three: the offset misreads a second seed (186),
+        # the fast sag gains one (62), and the slow sag gains
+        # the seed it had lost — 185 reads battery-sag now, so
+        # it detects on 4 of 100 (seeds 144, 185, 186, 190).
         def tally(build, seeds=range(101, 201)):
             counts = {}
             for seed in seeds:
@@ -2092,20 +2097,20 @@ class TestDriftClassification(unittest.TestCase):
             return monitor
 
         self.assertEqual(tally(lambda s: offset(s, -6.0)),
-                         {"uncertain": 99, "battery-sag": 1})
+                         {"uncertain": 98, "battery-sag": 2})
         self.assertEqual(
             tally(lambda s: one_loop(
                 s, batteries={"D": BatteryModel(
                     drain_rate_per_hour=1.2)},
                 step_seconds=120.0)),
-            {"battery-sag": 61, "healthy": 21, "uncertain": 5,
-             "noisy": 13})
+            {"battery-sag": 62, "healthy": 21, "uncertain": 5,
+             "noisy": 12})
         self.assertEqual(
             tally(lambda s: one_loop(
                 s, batteries={"D": BatteryModel(
                     drain_rate_per_hour=0.3)},
                 step_seconds=120.0)),
-            {"healthy": 95, "uncertain": 2, "battery-sag": 3})
+            {"healthy": 94, "uncertain": 2, "battery-sag": 4})
 
     def test_single_loop_positive_offset_is_uncertain(self):
         # One loop only, no revisits: a steady +6 dB offset reads
@@ -2335,10 +2340,14 @@ class TestDriftClassification(unittest.TestCase):
         # are pinned in test_level_drop_se_db_pins_... below, so
         # a future change that shifts this count must update
         # both tests and the README deliberately, not silently.
+        # The v0.78.0 half-delta retune (-1.5 dB to -1.0 dB)
+        # reads a second seed as well: 2/100 now, seeds 10 and
+        # 40, and the gate-by-gate test pins the trend leg's
+        # part in it.
         self.assertEqual(
             tally(lambda s: one_loop(
                 s, batteries=slow_sag, step_seconds=120.0)),
-            {"healthy": 99, "battery-sag": 1})
+            {"healthy": 98, "battery-sag": 2})
         self.assertEqual(tally(lambda s: one_loop(s)),
                          {"healthy": 100})
         self.assertEqual(
@@ -2694,18 +2703,24 @@ class TestDriftClassification(unittest.TestCase):
         # almost never together — the short-window mean clears
         # -1.5 dB on only 4 of 100 seeds (its median is -0.47
         # dB: the sag's whole fall across one loop is under
-        # 1 dB), the trend leg on 7, the drop plus its 1.5-SE
-        # leg on 21 — and all three at once on exactly 1, the
-        # seed the sweep pins as battery-sag. The classification
-        # now carries the drop's standard error as
-        # level_drop_se_db, so the verdict shows why: the drop's
-        # median z-score (drop over its own standard error) is
-        # -0.75 on the slow sag against -0.19 on a healthy walk,
-        # and 77 of 100 sag seeds sit inside 1.5 standard
-        # errors of zero, against 84 of 100 healthy — the two
-        # distributions overlap almost completely, so no
-        # significance gate on this evidence can call the sag
-        # without also calling noise.
+        # 1 dB), the trend leg on 7 under the old -1.5 dB
+        # half-delta gate, the drop plus its 1.5-SE leg on 21 —
+        # and all three at once on exactly 1, the seed the sweep
+        # pins as battery-sag. The classification now carries
+        # the drop's standard error as level_drop_se_db, so the
+        # verdict shows why: the drop's median z-score (drop
+        # over its own standard error) is -0.75 on the slow sag
+        # against -0.19 on a healthy walk, and 77 of 100 sag
+        # seeds sit inside 1.5 standard errors of zero, against
+        # 84 of 100 healthy — the two distributions overlap
+        # almost completely, so no significance gate on this
+        # evidence can call the sag without also calling noise.
+        # The v0.78.0 half-delta retune (-1.5 dB to -1.0 dB, the
+        # same magnitude as the drop gate) passes the trend leg
+        # on 23 seeds now instead of 7, so all three at once
+        # pass on 2 — seeds 10 and 40 — while the mean and drop
+        # legs are unchanged, since the retune touches only the
+        # trend.
         mean_pass = drop_pass = all_pass = 0
         z_scores = []
         for seed in range(1, 101):
@@ -2750,13 +2765,13 @@ class TestDriftClassification(unittest.TestCase):
                 sum((i - mean_t) * (r - mean_r)
                     for i, r in enumerate(residuals))
                 / sum((i - mean_t) ** 2 for i in range(count)))
-            trend_ok = long_slope <= -0.15 or half_delta <= -1.5
+            trend_ok = long_slope <= -0.15 or half_delta <= -1.0
             if (result.mean_residual_db < -1.5 and drop_ok
                     and trend_ok):
                 all_pass += 1
         self.assertEqual(mean_pass, 4)
         self.assertEqual(drop_pass, 21)
-        self.assertEqual(all_pass, 1)
+        self.assertEqual(all_pass, 2)
         ordered = sorted(z_scores)
         median_z = (ordered[49] + ordered[50]) / 2
         self.assertAlmostEqual(median_z, -0.75, places=1)
@@ -2902,6 +2917,43 @@ class TestDriftClassification(unittest.TestCase):
         loaded_old = _drift_classifications_from_dict(old)
         self.assertIsNone(loaded_old[0]["acceleration_db_per_step"])
 
+    def test_long_history_readings_round_trips_through_export(self):
+        # The classification's long-history length rides the
+        # export rows like the acceleration does, and a file
+        # written before v0.78.0 — with no
+        # long_history_readings key at all — loads with it null
+        # instead of failing. The count is the walk itself: 40
+        # readings on a single loop of the default walk, 80 on
+        # a doubled loop, and 96 when a draining beacon goes
+        # dark part-way through a quadrupled one (heard on steps
+        # 0-95, dark from step 96), so the verdict says how
+        # much walk it rests on.
+        for sps, expected in ((10, 40), (20, 80), (40, 96)):
+            loop = rectangular_walk(20.0, 12.0, sps)
+            steps = simulate_walk(
+                loop, BEACONS, noise_db=2.0, seed=7,
+                batteries={"D": BatteryModel(
+                    drain_rate_per_hour=0.3)}, step_seconds=120.0)
+            monitor = DriftMonitor(BEACONS)
+            for step in steps:
+                monitor.feed(step)
+            raw = [monitor.classify("D").to_dict()]
+            self.assertEqual(raw[0]["long_history_readings"],
+                             expected, sps)
+            loaded = _drift_classifications_from_dict(raw)
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(loaded[0]["long_history_readings"],
+                             expected, sps)
+            old = [dict(raw[0])]
+            del old[0]["long_history_readings"]
+            loaded_old = _drift_classifications_from_dict(old)
+            self.assertIsNone(
+                loaded_old[0]["long_history_readings"], sps)
+        # A beacon never heard carries no history at all.
+        monitor = DriftMonitor(BEACONS)
+        self.assertEqual(
+            monitor.classify("D").long_history_readings, 0)
+
     def test_single_loop_out_of_sample_sweep_pins_verdict_counts(self):
         # The single-loop tallies out of sample (v0.77.0): seeds
         # 101-200, never used to tune the gates. The slow sag
@@ -2911,7 +2963,12 @@ class TestDriftClassification(unittest.TestCase):
         # seed — the same single misread the in-sample sweep
         # used to carry, repaired there in v0.71.0. A future
         # change that shifts these counts must update this test
-        # and the README deliberately, not silently.
+        # and the README deliberately, not silently. The v0.78.0
+        # half-delta retune (-1.5 dB to -1.0 dB) moves three of
+        # them: the slow sag detects on 4 (seeds 144, 185, 186,
+        # 190), the fast sag on 62, and the offset misreads on
+        # a second seed (186) — the retune's measured cost,
+        # pinned here alongside its gains.
         moved = [Beacon(b.id, b.x, b.y) for b in BEACONS]
         moved[3] = Beacon("D", 5.0, 7.0)
         small_moved = [Beacon(b.id, b.x, b.y) for b in BEACONS]
@@ -2963,15 +3020,15 @@ class TestDriftClassification(unittest.TestCase):
         self.assertEqual(
             tally(lambda s: one_loop(
                 s, batteries=slow_sag, step_seconds=120.0)),
-            {"battery-sag": 3, "healthy": 95, "uncertain": 2})
+            {"battery-sag": 4, "healthy": 94, "uncertain": 2})
         self.assertEqual(
             tally(lambda s: one_loop(
                 s, batteries=fast_sag, step_seconds=120.0)),
-            {"battery-sag": 61, "healthy": 21, "noisy": 13,
+            {"battery-sag": 62, "healthy": 21, "noisy": 12,
              "uncertain": 5})
         self.assertEqual(
             tally(lambda s: offset(s, -6.0)),
-            {"battery-sag": 1, "uncertain": 99})
+            {"battery-sag": 2, "uncertain": 98})
         self.assertEqual(
             tally(lambda s: offset(s, 6.0)),
             {"moved": 1, "uncertain": 99})
@@ -2984,6 +3041,283 @@ class TestDriftClassification(unittest.TestCase):
         self.assertEqual(
             tally(lambda s: one_loop(s, beacons=small_moved)),
             {"healthy": 22, "moved": 17, "uncertain": 61})
+
+    def test_longer_single_loop_walks_catch_the_slow_sag(self):
+        # Longer single loops (v0.78.0): the slow sag is a
+        # walk-length limit, not a classifier limit. A doubled
+        # loop — 80 steps at the same 120 s spacing, so the
+        # battery drains twice as far (level 1.0 to 0.20, loss
+        # 0 to 3.84 dB) — reads battery-sag on 82 of 100 seeds
+        # in-sample (86 out of sample), up from 2 and 4 on a
+        # single loop, and a quadrupled loop reads it on 99
+        # (98 out of sample). The gain is the fallback's: the
+        # doubled loop still holds only 2 revisit pairs, under
+        # the 5 the revisit route needs, and the quadrupled
+        # loop's sag holds none at all — the beacon goes dark
+        # at step 96 on every seed, so the closing pairs the
+        # denser walk would have made never happen. The cost
+        # is on the moved beacon, not the offset: the steady
+        # offsets stay uncertain (0 battery-sag on either
+        # sample at 2x, 1 in-sample at 4x), the healthy walk
+        # stays healthy on every seed at every length, and the
+        # noisy beacon misreads as battery-sag on 3 seeds at
+        # 2x in-sample (19, 59, 83 — 59 already misread on one
+        # loop) — but the 7 m move reads noisy instead of moved
+        # on 8 seeds at 2x (14 out of sample), and at 4x it
+        # collapses to 35 moved in-sample (40 out of sample),
+        # the rest uncertain: the window is 20 readings, so on
+        # a denser walk it covers a shorter stretch of the
+        # ward, and the move's position pattern collapses
+        # inside it — the last 20 readings of the quadrupled
+        # walk are one half-side, where the moved beacon reads
+        # uniformly loud. Longer walks trade the move for the
+        # sag past 2x; the doubled loop is the sweet spot. The
+        # alarm still mostly misses the slow sag on a doubled
+        # loop (1 alarm in-sample, 2 out of sample) and catches
+        # it on about a third of the quadrupled ones (28 and
+        # 34) — the window mean only crosses 5 dB once the
+        # battery is nearly dead.
+        moved = [Beacon(b.id, b.x, b.y) for b in BEACONS]
+        moved[3] = Beacon("D", 5.0, 7.0)
+        small_moved = [Beacon(b.id, b.x, b.y) for b in BEACONS]
+        small_moved[3] = Beacon("D", 1.0, 11.0)
+
+        def tally(build, seeds=range(1, 101)):
+            counts = {}
+            alarms = 0
+            for seed in seeds:
+                monitor = build(seed)
+                verdict = monitor.classify("D").verdict
+                counts[verdict] = counts.get(verdict, 0) + 1
+                if monitor.is_alarming("D"):
+                    alarms += 1
+            return counts, alarms
+
+        def walk(seed, sps, beacons=None, **kwargs):
+            loop = rectangular_walk(20.0, 12.0, sps)
+            steps = simulate_walk(loop, beacons or BEACONS,
+                                  noise_db=2.0, seed=seed, **kwargs)
+            monitor = DriftMonitor(BEACONS)
+            for step in steps:
+                monitor.feed(step)
+            return monitor
+
+        def offset(seed, sps, delta_db):
+            loop = rectangular_walk(20.0, 12.0, sps)
+            steps = simulate_walk(loop, BEACONS, noise_db=2.0,
+                                  seed=seed)
+            for step in steps:
+                step["rssi"]["D"] += delta_db
+            monitor = DriftMonitor(BEACONS)
+            for step in steps:
+                monitor.feed(step)
+            return monitor
+
+        def noisy(seed, sps):
+            loop = rectangular_walk(20.0, 12.0, sps)
+            steps = simulate_walk(loop, BEACONS, noise_db=2.0,
+                                  seed=seed)
+            rng = random.Random(seed + 1000)
+            for step in steps:
+                step["rssi"]["D"] += rng.gauss(0.0, 5.0)
+            monitor = DriftMonitor(BEACONS)
+            for step in steps:
+                monitor.feed(step)
+            return monitor
+
+        slow_sag = {"D": BatteryModel(drain_rate_per_hour=0.3)}
+        fast_sag = {"D": BatteryModel(drain_rate_per_hour=1.2)}
+        # Doubled loop, in-sample.
+        counts, alarms = tally(
+            lambda s: walk(s, 20, batteries=slow_sag,
+                           step_seconds=120.0))
+        self.assertEqual(counts, {"battery-sag": 82, "noisy": 11,
+                                  "healthy": 6, "uncertain": 1})
+        self.assertEqual(alarms, 1)
+        self.assertEqual(
+            tally(lambda s: walk(s, 20, batteries=fast_sag,
+                                 step_seconds=120.0))[0],
+            {"battery-sag": 49, "healthy": 30, "noisy": 20,
+             "uncertain": 1})
+        self.assertEqual(tally(lambda s: walk(s, 20))[0],
+                         {"healthy": 100})
+        self.assertEqual(tally(lambda s: offset(s, 20, -6.0))[0],
+                         {"uncertain": 100})
+        self.assertEqual(tally(lambda s: offset(s, 20, 6.0))[0],
+                         {"uncertain": 99, "moved": 1})
+        self.assertEqual(tally(lambda s: noisy(s, 20))[0],
+                         {"noisy": 88, "healthy": 7, "moved": 2,
+                          "battery-sag": 3})
+        self.assertEqual(
+            tally(lambda s: walk(s, 20, beacons=moved))[0],
+            {"moved": 92, "noisy": 8})
+        self.assertEqual(
+            tally(lambda s: walk(s, 20, beacons=small_moved))[0],
+            {"uncertain": 65, "moved": 33, "healthy": 2})
+        # Doubled loop, out of sample.
+        counts, alarms = tally(
+            lambda s: walk(s, 20, batteries=slow_sag,
+                           step_seconds=120.0),
+            seeds=range(101, 201))
+        self.assertEqual(counts, {"battery-sag": 86, "uncertain": 3,
+                                  "noisy": 4, "healthy": 7})
+        self.assertEqual(alarms, 2)
+        self.assertEqual(
+            tally(lambda s: walk(s, 20, batteries=fast_sag,
+                                 step_seconds=120.0),
+                  seeds=range(101, 201))[0],
+            {"battery-sag": 62, "healthy": 21, "uncertain": 5,
+             "noisy": 12})
+        self.assertEqual(
+            tally(lambda s: noisy(s, 20), seeds=range(101, 201))[0],
+            {"noisy": 94, "healthy": 5, "battery-sag": 1})
+        # Quadrupled loop, both samples: the sag and the move.
+        for seeds, expected, want_alarms in (
+                (range(1, 101), {"battery-sag": 99, "noisy": 1}, 28),
+                (range(101, 201),
+                 {"battery-sag": 98, "noisy": 1, "uncertain": 1}, 34)):
+            counts, alarms = tally(
+                lambda s: walk(s, 40, batteries=slow_sag,
+                               step_seconds=120.0), seeds=seeds)
+            self.assertEqual(counts, expected)
+            self.assertEqual(alarms, want_alarms)
+        self.assertEqual(tally(lambda s: walk(s, 40))[0],
+                         {"healthy": 100})
+        self.assertEqual(
+            tally(lambda s: walk(s, 40), seeds=range(101, 201))[0],
+            {"healthy": 100})
+        self.assertEqual(
+            tally(lambda s: walk(s, 40, beacons=moved))[0],
+            {"moved": 35, "uncertain": 65})
+        self.assertEqual(
+            tally(lambda s: walk(s, 40, beacons=moved),
+                  seeds=range(101, 201))[0],
+            {"moved": 40, "uncertain": 60})
+        # The pairs and the dark step, by seed: the doubled
+        # loop's sag still has no revisit route (2 pairs), the
+        # quadrupled loop's sag has none either — the beacon is
+        # dark before the walk closes — while a healthy beacon
+        # on the quadrupled loop does close 5 pairs.
+        loop = rectangular_walk(20.0, 12.0, 20)
+        steps = simulate_walk(
+            loop, BEACONS, noise_db=2.0, seed=7,
+            batteries=slow_sag, step_seconds=120.0)
+        monitor = DriftMonitor(BEACONS)
+        for step in steps:
+            monitor.feed(step)
+        result = monitor.classify("D")
+        self.assertEqual(result.verdict, "battery-sag")
+        self.assertEqual(result.revisit_pairs, 2)
+        self.assertEqual(result.long_history_readings, 80)
+        loop = rectangular_walk(20.0, 12.0, 40)
+        steps = simulate_walk(
+            loop, BEACONS, noise_db=2.0, seed=7,
+            batteries=slow_sag, step_seconds=120.0)
+        self.assertNotIn("D", steps[96]["rssi"])
+        self.assertIn("D", steps[95]["rssi"])
+        monitor = DriftMonitor(BEACONS)
+        for step in steps:
+            monitor.feed(step)
+        result = monitor.classify("D")
+        self.assertEqual(result.verdict, "battery-sag")
+        self.assertEqual(result.revisit_pairs, 0)
+        self.assertEqual(result.long_history_readings, 96)
+        steps = simulate_walk(loop, BEACONS, noise_db=2.0, seed=7)
+        monitor = DriftMonitor(BEACONS)
+        for step in steps:
+            monitor.feed(step)
+        self.assertEqual(monitor.classify("D").revisit_pairs, 5)
+
+    def test_long_walk_fallback_legs_pin_detection_and_bottleneck(self):
+        # The longer walks, measured gate by gate (v0.78.0),
+        # the same legs the v0.75.0 test pins on one loop: on a
+        # doubled loop the mean leg clears on 90 of 100 seeds
+        # (the sag's fall is ~2.7 dB now, against under 1 dB on
+        # one loop), the drop leg on 86, and the trend leg on
+        # 92 with the retuned -1.0 dB half-delta gate — the
+        # slope leg never fires there (the whole fall is ~3.8
+        # dB over 80 readings, about -0.05 dB per reading
+        # against the -0.15 gate), so the trend leg rests on the
+        # half-delta alone. All three at once on 82, the seeds
+        # the sweep pins as battery-sag. On a quadrupled loop
+        # every leg is near saturation (mean 100, trend 100,
+        # drop 99, all 99 in-sample) — the drop's median
+        # z-score is -3.71 there, against -2.59 on the doubled
+        # loop and -0.75 on one, so the fall is no longer
+        # inside the noise at all. The bottleneck moves with
+        # the walk: on one loop it is all three legs at once,
+        # on a doubled loop it is the trend, on a quadrupled
+        # loop nothing binds.
+        for sps, expected in (
+                (20, {"in": (90, 92, 86, 82, -2.59, 14),
+                      "out": (96, 93, 91, 86, -2.77, 9)}),
+                (40, {"in": (100, 100, 99, 99, -3.71, 1),
+                      "out": (100, 98, 99, 98, -4.12, 1)})):
+            for seeds, label in ((range(1, 101), "in"),
+                                 (range(101, 201), "out")):
+                mean_pass = trend_pass = drop_pass = all_pass = 0
+                z_scores = []
+                for seed in seeds:
+                    loop = rectangular_walk(20.0, 12.0, sps)
+                    steps = simulate_walk(
+                        loop, BEACONS, noise_db=2.0, seed=seed,
+                        batteries={"D": BatteryModel(
+                            drain_rate_per_hour=0.3)},
+                        step_seconds=120.0)
+                    monitor = DriftMonitor(BEACONS)
+                    for step in steps:
+                        monitor.feed(step)
+                    result = monitor.classify("D")
+                    self.assertIsNotNone(result.level_drop_db,
+                                         (sps, label, seed))
+                    self.assertIsNotNone(result.level_drop_se_db,
+                                         (sps, label, seed))
+                    z_scores.append(result.level_drop_db
+                                    / result.level_drop_se_db)
+                    mean_ok = result.mean_residual_db < -1.5
+                    drop_ok = (result.level_drop_db < -1.0
+                               and result.level_drop_db
+                               < -1.5 * result.level_drop_se_db)
+                    heard = [s for s in steps if "D" in s["rssi"]]
+                    residuals = [
+                        s["rssi"]["D"] - distance_to_rssi(math.dist(
+                            s["true"], (0.0, 12.0)))
+                        for s in heard]
+                    half = len(residuals) // 2
+                    half_delta = (
+                        statistics.mean(residuals[half:])
+                        - statistics.mean(residuals[:half]))
+                    count = len(residuals)
+                    mean_t = (count - 1) / 2
+                    mean_r = statistics.mean(residuals)
+                    long_slope = (
+                        sum((i - mean_t) * (r - mean_r)
+                            for i, r in enumerate(residuals))
+                        / sum((i - mean_t) ** 2
+                              for i in range(count)))
+                    trend_ok = (long_slope <= -0.15
+                                or half_delta <= -1.0)
+                    mean_pass += mean_ok
+                    trend_pass += trend_ok
+                    drop_pass += drop_ok
+                    all_pass += mean_ok and drop_ok and trend_ok
+                want_mean, want_trend, want_drop, want_all, want_z, \
+                    want_inside = expected[label]
+                self.assertEqual(mean_pass, want_mean,
+                                 (sps, label))
+                self.assertEqual(trend_pass, want_trend,
+                                 (sps, label))
+                self.assertEqual(drop_pass, want_drop,
+                                 (sps, label))
+                self.assertEqual(all_pass, want_all,
+                                 (sps, label))
+                ordered = sorted(z_scores)
+                median_z = (ordered[49] + ordered[50]) / 2
+                self.assertAlmostEqual(median_z, want_z, places=1,
+                                       msg=(sps, label))
+                self.assertEqual(
+                    sum(1 for z in z_scores if abs(z) < 1.5),
+                    want_inside, (sps, label))
 
     def test_early_delta_gate_keeps_true_sag_on_thin_early_evidence(self):
         # The pair-count minimum, pinned by seed: the true slow

@@ -5313,3 +5313,137 @@ suite too. The next item is the single-loop slow sag, a
 measured limit of this evidence, pending longer walks. The
 roadmap grows as new needs surface — the decline barely
 steepening on one loop is the latest addition.
+
+## Longer walks for the single-loop slow sag
+
+The v0.77.0 notes left the single-loop slow sag pending longer
+walks, and v0.78.0 takes the measurement. A longer single loop
+is a denser one: the same rectangle walked with more steps per
+side — 20 steps per side (80 readings, twice the walk) and 40
+(160 readings, four times) — at the same 120 s spacing, so the
+battery drains twice and four times as far over the walk. The
+slow sag drains 0.3 per hour, so on one loop the level falls
+1.0 to 0.60 and the loss reaches 0.96 dB; on a doubled loop it
+falls to 0.20 and the loss reaches 3.84 dB; on a quadrupled loop
+the beacon goes dark at step 96 on every seed (level 0.05),
+heard on 96 readings and silent for the last 64. The sweep is
+seeds 1–100 and 101–200, 2 dB noise, beacon D, every scenario:
+
+| walk | slow sag 0.3/hr | fast sag 1.2/hr | healthy | steady -6 dB offset | noisy beacon | 7 m move |
+|---|---|---|---|---|---|---|
+| one loop | `battery-sag` 2 / 4 | 49 / 62 | `healthy` 100 / 100 | `battery-sag` 0 / 2 | `battery-sag` 3 / 1 | `moved` 91 / 89 |
+| doubled loop | `battery-sag` 82 / 86 | 49 / 62 | `healthy` 100 / 100 | `battery-sag` 0 / 0 | `battery-sag` 3 / 1 | `moved` 92 / 84 |
+| quadrupled loop | `battery-sag` 99 / 98 | 49 / 62 | `healthy` 100 / 100 | `battery-sag` 1 / 0 | `battery-sag` 0 / 0 | `moved` 35 / 40 |
+
+The two numbers in each cell are seeds 1–100 and 101–200. The
+slow sag was barely detected because the walk was short, not
+because the classifier was blind: the doubled loop reads it on
+82 of 100 seeds in-sample (86 out of sample), up from 2 and 4
+on one loop, and the quadrupled loop on 99 (98 out of sample).
+The gain is the fallback's, not the revisits': the doubled
+loop still holds only 2 revisit pairs, under the 5 the revisit
+route needs, and the quadrupled loop's sag holds none at all —
+the beacon is dark before the walk closes, so the closing pairs
+the denser walk would have made never happen (a healthy beacon
+on the quadrupled loop does close 5). The gate-by-gate legs
+say why, measured the same way the v0.75.0 test pins them on
+one loop:
+
+| walk | mean leg | trend leg | drop leg | all three | drop median z |
+|---|---|---|---|---|---|
+| one loop | 4 / 8 | 23 / 27 | 21 / 15 | 2 / 4 | -0.75 / -0.67 |
+| doubled loop | 90 / 96 | 92 / 93 | 86 / 91 | 82 / 86 | -2.59 / -2.77 |
+| quadrupled loop | 100 / 100 | 100 / 98 | 99 / 99 | 99 / 98 | -3.71 / -4.12 |
+
+The drop's median z-score walks out of the noise with the
+walk: -0.75 on one loop, -2.59 on a doubled loop, -3.71 on a
+quadrupled one — only 14 of 100 doubled-loop sag seeds sit
+inside 1.5 standard errors of zero, against 77 on one loop,
+and 1 on a quadrupled loop. The bottleneck moves with the
+walk: on one loop it is all three legs at once, on a doubled
+loop it is the trend, on a quadrupled loop nothing binds. The
+fast sag is identical on every length (49 in-sample, 62 out
+of sample): it goes dark at step 24, so the extra walk adds
+no readings at all — the same evidence on one, two, three or
+four loops.
+
+The doubled loop also earns a retune. Its trend leg is the
+bottleneck at 68 of 100 seeds under the old -1.5 dB half-delta
+gate, and the slope leg never fires there at all — the whole
+fall is ~3.8 dB over 80 readings, about -0.05 dB per reading
+against the -0.15 slope gate — so the trend leg rests on the
+half-delta alone. The gate moves to -1.0 dB, the same magnitude
+as the level-drop gate and the late-decline gate: all three are
+level differences between two halves of the history, not
+slopes, so the fallback's magnitudes are consistent now. At
+the old gate the doubled loop read the slow sag on 65
+in-sample (64 out of sample); at -1.0 dB it reads 82 (86).
+The cost is measured, not assumed: one more steady-offset
+misread (seed 186, single loop, out of sample — seed 144
+already misread there) and two more noisy-beacon misreads
+(seeds 19 and 83, doubled loop, in-sample — seed 59 already
+misread there). The fast sag gains one out of sample
+everywhere (61 to 62), and nothing else moves: the healthy
+walk stays healthy on every seed at every length, the 1.4 m
+move is unchanged, and the offset reads battery-sag on 0
+seeds at the doubled length on either sample. A -1.25 dB gate
+was measured and rejected: it gains less (75/76) for the same
+two noisy misreads, and it is a fitted midpoint with no
+meaning; -0.75 dB costs five offset misreads. The retune is
+the walk's retune, not a new threshold on old evidence — the
+same gate reads 2 of 100 on one loop, where the fall is under
+1 dB, and 82 on a doubled loop, where it is ~2.7 dB.
+
+Longer walks are not free. The 7 m move collapses on the
+quadrupled loop — 35 moved in-sample, 40 out of sample,
+against 91 and 89 on one loop — and the 1.4 m move falls to
+4 on both samples. The mechanism is the window: it is 20
+readings, not 20 metres, so on a denser walk it covers a
+shorter stretch of the ward. The last 20 readings of the
+quadrupled loop are one half-side, where the moved beacon
+reads uniformly loud (about +5 dB), so the move looks like a
+steady offset — alarming (95 of 100 seeds alarm) but
+`uncertain`, since no signature fits a constant level. On
+the doubled loop the move mostly survives (92/84), but 8
+seeds in-sample read `noisy` instead (14 out of sample),
+where 1 did on one loop: the window's residuals swing across
+the position pattern and spread past the noisy gate. The
+doubled loop is the sweet spot — the sag at 82/86, the move
+at 92/84 — and past it the walk trades the move for the sag.
+The alarm still mostly misses the slow sag on a doubled loop
+(1 alarm in-sample, 2 out of sample) and catches it on about
+a third of the quadrupled ones (28 and 34): the window mean
+only crosses 5 dB once the battery is nearly dead, so the
+quadrupled loop's detection rides partly on the beacon nearly
+dying, not just on the fall.
+
+The classification now carries the walk length as
+`long_history_readings` — how many readings the floor's long
+history holds, against the short window's `samples` — and the
+export round-trips it (a file written before v0.78.0 loads
+with it null). A verdict says how much walk it rests on: 40
+readings on a single loop of the default walk, 80 on a doubled
+loop, 96 when a draining beacon goes dark part-way through a
+quadrupled one. The CLI already walks a longer single loop
+without a code change — `--steps` is steps per side:
+
+```sh
+python3 -m beacon.cli --drift-classify --loops 1 --steps 20 --battery-degrade D --seed 7
+```
+
+On seed 7 the single loop reads D `healthy` (mean -0.52 dB)
+and the doubled loop reads it `battery-sag` (mean -2.71 dB,
+level fell -2.20 dB), the same verdict the sweep pins.
+
+Measured behaviour (v0.78.0): 2 dB RSSI noise, beacon D —
+the single-loop slow sag reads `battery-sag` on 2 of 100
+seeds in-sample (seeds 10 and 40) and 4 out of sample (seeds
+144, 185, 186, 190), the fast sag on 49 and 62, the steady
+-6 dB offset misreads on 0 and 2 seeds, and every pinned
+two- and three-loop tally stands exactly as v0.77.0 left it.
+The next item is the window's unit: it is 20 readings, so a
+denser walk covers less ground and the move's position pattern
+collapses inside it — a window sized in distance or time
+would keep the move while the walk lengthens. The roadmap
+grows as new needs surface — the longer walk for the
+single-loop slow sag is the latest addition.
